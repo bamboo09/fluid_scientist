@@ -1,0 +1,17 @@
+rules:
+  - id: RULE-TURB-001
+    severity: HARD
+    when:
+      flow_regime: turbulent
+    check:
+      metric: turbulence_model
+      operator: in
+      expected:
+        - kOmegaSST
+        - kEpsilon
+    message: Turbulent internal flow requires an approved turbulence model.
+    action: revise_physical_model
+    sources:
+      - MANUAL-OPENFOAM-001
+    version: 1.0.0
+
