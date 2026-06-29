@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fluid Research Workflow"
+  short_description: "Evidence-grounded OpenFOAM research workflow"
+  default_prompt: "Use $fluid-research-workflow to plan and validate an evidence-grounded OpenFOAM study."
