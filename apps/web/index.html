@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="流体力学可信科研工作台">
+    <title>Fluid Scientist · 科研工作台</title>
+    <link rel="stylesheet" href="/assets/styles.css">
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">φ</span>
+        <div><strong>FLUID SCIENTIST</strong><small>可信数值研究系统</small></div>
+      </div>
+      <div class="system-state"><span></span> FAKE MODE · 无需外部凭据</div>
+    </header>
+
+    <div class="shell">
+      <aside class="sidebar" aria-label="项目导航">
+        <p class="eyebrow">RESEARCH / 001</p>
+        <nav>
+          <a class="active" href="#overview"><b>01</b>项目总览</a>
+          <a href="#spec"><b>02</b>研究规格</a>
+          <a href="#evidence"><b>03</b>文献证据 <em>01</em></a>
+          <a href="#experiment"><b>04</b>实验设计</a>
+          <a href="#jobs"><b>05</b>HPC 作业 <em>03</em></a>
+          <a href="#report"><b>06</b>实验结果分析与报告</a>
+        </nav>
+        <div class="sidebar-note">
+          <span>控制平面</span>
+          <strong>LOCAL / READY</strong>
+          <small>真实 HPC 接口尚未配置</small>
+        </div>
+      </aside>
+
+      <main id="overview">
+        <section class="hero reveal">
+          <div>
+            <p class="eyebrow">90° BEND · SINGLE PHASE · STEADY RANS</p>
+            <h1>弯管压降与<br><i>二次流</i>研究</h1>
+          </div>
+          <div class="hero-meta">
+            <span>项目状态</span><strong id="project-status">等待研究问题</strong>
+            <span>工作流版本</span><strong>v0.1 / DEMO</strong>
+          </div>
+        </section>
+
+        <form id="research-form" class="research-input reveal" aria-label="运行研究演示">
+          <label for="question">研究问题</label>
+          <div class="input-row">
+            <textarea id="question" name="question" rows="2" minlength="10">弯管曲率和 Reynolds 数如何影响压降及二次流？</textarea>
+            <button id="run-button" type="submit"><span>运行可信闭环</span><b>→</b></button>
+          </div>
+          <p id="form-message" role="status">将执行结构化、三个审批 Gate、Fake Slurm、数值验证与证据化报告。</p>
+        </form>
+
+        <section class="stage-rail reveal" aria-label="研究阶段">
+          <div class="done"><b>01</b><span>问题</span></div>
+          <div class="done"><b>02</b><span>证据</span></div>
+          <div class="current"><b>03</b><span>Pilot</span></div>
+          <div><b>04</b><span>批量</span></div>
+          <div><b>05</b><span>验证</span></div>
+          <div><b>06</b><span>分析</span></div>
+          <div><b>07</b><span>报告</span></div>
+        </section>
+
+        <section class="dashboard-grid reveal">
+          <article class="panel action-panel">
+            <div class="panel-kicker"><span>ACTION</span><em>GATE 2</em></div>
+            <h2>Pilot 方案已锁定</h2>
+            <p>中心工况 × 三套网格。Fake 模式自动记录批准，但保留完整审计链。</p>
+            <dl><div><dt>算例</dt><dd>3</dd></div><div><dt>估算预算</dt><dd>18 CPU·h</dd></div></dl>
+          </article>
+
+          <article id="jobs" class="panel job-panel">
+            <div class="panel-kicker"><span>HPC / SLURM</span><em id="job-state">IDLE</em></div>
+            <h2>三节点执行边界</h2>
+            <ol>
+              <li><span>DATA</span>制品构建与校验</li>
+              <li><span>LOGIN</span>作业提交与查询</li>
+              <li><span>COMPUTE</span>OpenFOAM 求解</li>
+            </ol>
+            <div class="progress"><i id="job-progress"></i></div>
+          </article>
+
+          <article class="panel credibility-panel">
+            <div class="panel-kicker"><span>CREDIBILITY</span><em id="credibility-state">PENDING</em></div>
+            <div class="gauge"><strong id="mass-balance">—</strong><span>质量不平衡</span></div>
+            <ul>
+              <li>网格无关性 <b id="mesh-score">—</b></li>
+              <li>基准一致性 <b id="benchmark-score">—</b></li>
+              <li>HARD 违规 <b>0</b></li>
+            </ul>
+          </article>
+
+          <article id="evidence" class="panel evidence-panel">
+            <div class="panel-kicker"><span>EVIDENCE</span><em>TRACEABLE</em></div>
+            <blockquote>“仿真完成”不等于“科研可信”。</blockquote>
+            <p>结论必须绑定模拟制品、确定性分析指标或可定位文献证据。</p>
+            <span class="evidence-count" id="evidence-count">0</span><small>已绑定证据 ID</small>
+          </article>
+        </section>
+
+        <section id="report" class="report-section reveal" hidden>
+          <div class="section-heading">
+            <div><p class="eyebrow">RESULTS ANALYST / REVIEWER</p><h2>实验结果分析与报告</h2></div>
+            <span id="audit-count">0 AUDIT EVENTS</span>
+          </div>
+          <div class="report-grid">
+            <article class="metric-sheet">
+              <p>确定性计算</p>
+              <div><span>平均压降</span><strong id="mean-pressure">—</strong><small>Pa</small></div>
+              <div><span>标准差</span><strong id="std-pressure">—</strong><small>Pa</small></div>
+              <div><span>细网格 GCI</span><strong id="gci">—</strong><small>%</small></div>
+            </article>
+            <article class="claim-sheet"><p>证据化结论</p><ol id="claim-list"></ol></article>
+          </div>
+          <footer id="scope-note"></footer>
+        </section>
+      </main>
+    </div>
+    <script src="/assets/app.js" defer></script>
+  </body>
+</html>
+

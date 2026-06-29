@@ -9,7 +9,7 @@ description = "Evidence-grounded fluid mechanics research agent"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "fastapi>=0.115,<1",
+  "fastapi>=0.115,<0.116",
   "numpy>=2,<3",
   "pydantic>=2.7,<3",
   "PyYAML>=6,<7",
