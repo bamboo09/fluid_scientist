@@ -1,4 +1,5 @@
 .superpowers/
+.worktrees/
 .env
 .env.*
 !.env.example
@@ -12,4 +13,3 @@ dist/
 build/
 coverage/
 *.log
-
