@@ -1,6 +1,6 @@
 # Fake Vertical Research Slice Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
 **Goal:** Build a runnable, tested single-user platform slice that turns a bend-flow request into an approved research workflow, fake Slurm/OpenFOAM results, deterministic validation, Results Analyst output, and an evidence-linked report without requiring external credentials.
 
@@ -37,7 +37,7 @@
 - Create: `src/fluid_scientist/__init__.py`
 - Create: `tests/test_package.py`
 
-- [ ] **Step 1: Write the failing import/version test**
+- [x] **Step 1: Write the failing import/version test**
 
 ```python
 def test_package_exposes_version():
@@ -45,21 +45,21 @@ def test_package_exposes_version():
     assert fluid_scientist.__version__ == "0.1.0"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `python -m pytest tests/test_package.py -v`  
 Expected: FAIL because `fluid_scientist` is not importable.
 
-- [ ] **Step 3: Add package metadata and version**
+- [x] **Step 3: Add package metadata and version**
 
 Use a `src` layout, Python `>=3.11`, runtime dependencies `pydantic>=2.7`, `fastapi>=0.115`, `uvicorn>=0.30`, `PyYAML>=6`, `numpy>=2`, `scipy>=1.13`; dev dependencies `pytest>=8`, `httpx>=0.27`, `ruff>=0.6`. Set `__version__ = "0.1.0"`.
 
-- [ ] **Step 4: Install editable dev dependencies and verify**
+- [x] **Step 4: Install editable dev dependencies and verify**
 
 Run: `python -m pip install -e ".[dev]"` then `python -m pytest tests/test_package.py -v`  
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run: `git add pyproject.toml src/fluid_scientist/__init__.py tests/test_package.py && git commit -m "build: scaffold fluid scientist package"`.
 
@@ -70,7 +70,7 @@ Run: `git add pyproject.toml src/fluid_scientist/__init__.py tests/test_package.
 - Create: `src/fluid_scientist/domain/models.py`
 - Create: `tests/domain/test_models.py`
 
-- [ ] **Step 1: Write failing tests for normalized ResearchSpec and immutable CaseManifest**
+- [x] **Step 1: Write failing tests for normalized ResearchSpec and immutable CaseManifest**
 
 ```python
 def test_research_spec_rejects_nonpositive_diameter():
@@ -83,21 +83,21 @@ def test_case_manifest_is_frozen():
         case.solver = "other"
 ```
 
-- [ ] **Step 2: Run tests and observe missing models**
+- [x] **Step 2: Run tests and observe missing models**
 
 Run: `python -m pytest tests/domain/test_models.py -v`  
 Expected: collection error for missing module/classes.
 
-- [ ] **Step 3: Implement focused Pydantic models**
+- [x] **Step 3: Implement focused Pydantic models**
 
 Define strict models and enums for `GeometrySpec`, `FluidSpec`, `VariableRange`, `SimulationBudget`, `ResearchSpec`, `EvidenceItem`, `EvidencePackage`, `ExperimentPlan`, `CaseManifest`, `ValidationResult`, `AnalysisResult`, `EvidenceLinkedClaim`, `ResearchReport`, `Approval`, and `AuditEvent`. Reject extra fields; freeze manifests, approvals, evidence and audit events.
 
-- [ ] **Step 4: Run model tests**
+- [x] **Step 4: Run model tests**
 
 Run: `python -m pytest tests/domain/test_models.py -v`  
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run: `git add src/fluid_scientist/domain tests/domain && git commit -m "feat: add strict research domain schemas"`.
 
@@ -114,7 +114,7 @@ Run: `git add src/fluid_scientist/domain tests/domain && git commit -m "feat: ad
 - Create: `tests/physics/test_rules.py`
 - Create: `tests/validation/test_core.py`
 
-- [ ] **Step 1: Write failing numerical tests**
+- [x] **Step 1: Write failing numerical tests**
 
 ```python
 def test_reynolds_number_is_deterministic():
@@ -128,21 +128,21 @@ def test_gci_rejects_non_monotonic_grid_sizes():
         grid_convergence_index([1000, 900, 1200], [1.0, 0.9, 0.8])
 ```
 
-- [ ] **Step 2: Run tests and observe missing functions**
+- [x] **Step 2: Run tests and observe missing functions**
 
 Run: `python -m pytest tests/physics tests/validation -v`  
 Expected: collection errors.
 
-- [ ] **Step 3: Implement calculations, rules and validation**
+- [x] **Step 3: Implement calculations, rules and validation**
 
 Implement SI-only `reynolds_number`, `dean_number`, `area`, `velocity_from_reynolds`, `mass_imbalance_percent`, residual/monitor convergence checks and three-grid GCI. Load YAML rules with `id`, `severity`, conditions and deterministic checks; return structured violations without executing code from YAML.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `python -m pytest tests/physics tests/validation -v`  
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run: `git add src/fluid_scientist/physics src/fluid_scientist/validation tests/physics tests/validation && git commit -m "feat: add deterministic physics validation"`.
 
@@ -153,7 +153,7 @@ Run: `git add src/fluid_scientist/physics src/fluid_scientist/validation tests/p
 - Create: `src/fluid_scientist/orchestration/workflow.py`
 - Create: `tests/orchestration/test_workflow.py`
 
-- [ ] **Step 1: Write failing transition tests**
+- [x] **Step 1: Write failing transition tests**
 
 ```python
 def test_pilot_cannot_submit_without_gate_two():
@@ -169,21 +169,21 @@ def test_replayed_transition_is_idempotent():
     assert len(workflow.state.external_jobs) == 1
 ```
 
-- [ ] **Step 2: Run tests and observe failure**
+- [x] **Step 2: Run tests and observe failure**
 
 Run: `python -m pytest tests/orchestration/test_workflow.py -v`  
 Expected: missing workflow module.
 
-- [ ] **Step 3: Implement explicit state/action table**
+- [x] **Step 3: Implement explicit state/action table**
 
 Define states from `CREATED` through `REPORTED`, actions, gate requirements, terminal failures, maximum revision counters, immutable audit events and JSON snapshot serialization. Reject undeclared transitions and mismatched external job replay.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `python -m pytest tests/orchestration/test_workflow.py -v`  
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run: `git add src/fluid_scientist/orchestration tests/orchestration && git commit -m "feat: add audited research workflow"`.
 
@@ -199,7 +199,7 @@ Run: `git add src/fluid_scientist/orchestration tests/orchestration && git commi
 - Create: `src/fluid_scientist/services/research.py`
 - Create: `tests/services/test_research.py`
 
-- [ ] **Step 1: Write failing end-to-end service test**
+- [x] **Step 1: Write failing end-to-end service test**
 
 ```python
 def test_demo_research_produces_evidence_linked_report():
@@ -210,21 +210,21 @@ def test_demo_research_produces_evidence_linked_report():
     assert all(claim.evidence_ids for claim in result.report.claims)
 ```
 
-- [ ] **Step 2: Run and observe missing service**
+- [x] **Step 2: Run and observe missing service**
 
 Run: `python -m pytest tests/services/test_research.py -v`  
 Expected: collection error.
 
-- [ ] **Step 3: Implement ports and deterministic fakes**
+- [x] **Step 3: Implement ports and deterministic fakes**
 
 Define Protocols for `LLMProvider`, `EvidenceRetriever`, `SimulatorAdapter`, `JobScheduler`, `ArtifactStore`, and `WorkflowRepository`. Fake adapters return fixed but physically plausible three-grid bend results and structured analyst/reviewer claims. `ResearchService` advances the workflow only through declared transitions and uses deterministic analysis before model explanation.
 
-- [ ] **Step 4: Run service test**
+- [x] **Step 4: Run service test**
 
 Run: `python -m pytest tests/services/test_research.py -v`  
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run: `git add src/fluid_scientist/ports.py src/fluid_scientist/adapters src/fluid_scientist/analysis src/fluid_scientist/services tests/services && git commit -m "feat: run fake research vertical slice"`.
 
@@ -236,7 +236,7 @@ Run: `git add src/fluid_scientist/ports.py src/fluid_scientist/adapters src/flui
 - Create: `tests/execution/test_hpc.py`
 - Create: `tests/security/test_hpc_injection.py`
 
-- [ ] **Step 1: Write failing security tests**
+- [x] **Step 1: Write failing security tests**
 
 ```python
 @pytest.mark.parametrize("value", ["job; rm -rf /", "../outside", "$(curl bad)", "name\n#SBATCH --uid=0"])
@@ -245,21 +245,21 @@ def test_slurm_values_reject_control_and_shell_syntax(value):
         SafeSlurmValue(value)
 ```
 
-- [ ] **Step 2: Run and observe failure**
+- [x] **Step 2: Run and observe failure**
 
 Run: `python -m pytest tests/execution tests/security -v`  
 Expected: missing execution module.
 
-- [ ] **Step 3: Implement allowlisted builders**
+- [x] **Step 3: Implement allowlisted builders**
 
 Create validated value objects for remote relative paths, job names, partitions, module names and resource counts. Render `sbatch` scripts only from typed values and a fixed command enum (`blockMesh`, `snappyHexMesh`, `checkMesh`, `simpleFoam`, `postProcess`). Expose argv arrays for `sbatch`, `squeue`, `sacct`, and `scancel`; never concatenate user shell text.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `python -m pytest tests/execution tests/security -v`  
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run: `git add src/fluid_scientist/execution tests/execution tests/security && git commit -m "feat: add safe Slurm command builders"`.
 
@@ -273,7 +273,7 @@ Run: `git add src/fluid_scientist/execution tests/execution tests/security && gi
 - Create: `apps/web/app.js`
 - Create: `tests/api/test_app.py`
 
-- [ ] **Step 1: Write failing API tests**
+- [x] **Step 1: Write failing API tests**
 
 ```python
 def test_demo_endpoint_returns_reported_project(client):
@@ -289,21 +289,21 @@ def test_static_workbench_does_not_expose_skill_navigation(client):
     assert "Skill 候选" not in html
 ```
 
-- [ ] **Step 2: Run and observe missing API**
+- [x] **Step 2: Run and observe missing API**
 
 Run: `python -m pytest tests/api/test_app.py -v`  
 Expected: collection error.
 
-- [ ] **Step 3: Implement API and workbench**
+- [x] **Step 3: Implement API and workbench**
 
 Expose `/health`, `POST /api/demo`, `GET /api/projects/{id}`, and static files. The workbench shows stage progression, Gate actions, HPC state, credibility snapshot, evidence coverage and a combined results-analysis/report view. Do not display Skill operations.
 
-- [ ] **Step 4: Run API tests and a local smoke request**
+- [x] **Step 4: Run API tests and a local smoke request**
 
 Run: `python -m pytest tests/api/test_app.py -v`  
 Expected: PASS. Then run `python -m uvicorn fluid_scientist.api.app:app --host 127.0.0.1 --port 8000` and verify `GET /health` returns `{"status":"ok"}`.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run: `git add src/fluid_scientist/api apps/web tests/api && git commit -m "feat: add research API and workbench"`.
 
@@ -317,7 +317,7 @@ Run: `git add src/fluid_scientist/api apps/web tests/api && git commit -m "feat:
 - Create: `tests/skills/test_candidate_pipeline.py`
 - Create: `tests/skills/scenarios/no-skill-baseline.md`
 
-- [ ] **Step 1: Record a failing baseline and write pipeline tests**
+- [x] **Step 1: Record a failing baseline and write pipeline tests**
 
 The baseline fixture records an unskilled response that submits all cases before Pilot and treats solver completion as scientific validity.
 
@@ -334,21 +334,21 @@ def test_candidate_cannot_publish_without_red_green_evidence():
         publisher.publish(candidate_without_tests())
 ```
 
-- [ ] **Step 2: Run and observe failure**
+- [x] **Step 2: Run and observe failure**
 
 Run: `python -m pytest tests/skills -v`  
 Expected: missing service and fixtures.
 
-- [ ] **Step 3: Implement minimal tested Skill and candidate states**
+- [x] **Step 3: Implement minimal tested Skill and candidate states**
 
 Create `DRAFT → RED_RECORDED → GREEN_PASSED → APPROVED → PUBLISHED`. Redact secrets, hostnames, usernames and absolute paths. The repository Skill requires ResearchSpec, Pilot, deterministic validation, evidence-linked claims and human gates; keep detailed schemas in `references/workflow.md`.
 
-- [ ] **Step 4: Validate Skill and tests**
+- [x] **Step 4: Validate Skill and tests**
 
 Run the skill creator `quick_validate.py` against `skills/fluid-research-workflow`, then `python -m pytest tests/skills -v`.  
 Expected: validator success and all tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run: `git add src/fluid_scientist/services/skill_candidates.py skills tests/skills && git commit -m "feat: add governed skill candidate pipeline"`.
 
@@ -361,7 +361,7 @@ Run: `git add src/fluid_scientist/services/skill_candidates.py skills tests/skil
 - Create: `README.md`
 - Create: `tests/test_config_safety.py`
 
-- [ ] **Step 1: Write failing safety test**
+- [x] **Step 1: Write failing safety test**
 
 ```python
 def test_example_environment_contains_no_real_secrets():
@@ -371,21 +371,21 @@ def test_example_environment_contains_no_real_secrets():
     assert "login.internal" not in text
 ```
 
-- [ ] **Step 2: Run and observe missing configuration**
+- [x] **Step 2: Run and observe missing configuration**
 
 Run: `python -m pytest tests/test_config_safety.py -v`  
 Expected: FAIL because `.env.example` is absent.
 
-- [ ] **Step 3: Add local infrastructure, CI and operator documentation**
+- [x] **Step 3: Add local infrastructure, CI and operator documentation**
 
 Compose defines PostgreSQL, Redis, Qdrant and MinIO with health checks and named volumes. `.env.example` uses explicit empty/default-safe values. CI installs `.[dev]`, runs Ruff and pytest, and never invokes real OpenAI or HPC. README documents fake demo, service layout, three-node HPC contract, real-integration prerequisites and security boundaries.
 
-- [ ] **Step 4: Run full local verification**
+- [x] **Step 4: Run full local verification**
 
 Run: `python -m ruff check .` and `python -m pytest -q`  
 Expected: no lint errors and all tests PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 Run: `git add .env.example infra .github README.md tests/test_config_safety.py && git commit -m "chore: add infrastructure and CI"`.
 
@@ -394,7 +394,7 @@ Run: `git add .env.example infra .github README.md tests/test_config_safety.py &
 **Files:**
 - Modify: `docs/superpowers/plans/2026-06-29-fake-vertical-slice.md`
 
-- [ ] **Step 1: Run the complete quality gate**
+- [x] **Step 1: Run the complete quality gate**
 
 Run: `python -m ruff check .`  
 Expected: PASS.
@@ -402,21 +402,20 @@ Expected: PASS.
 Run: `python -m pytest -q`  
 Expected: PASS with no skipped Fake-mode tests.
 
-- [ ] **Step 2: Verify repository safety**
+- [x] **Step 2: Verify repository safety**
 
 Run: `git grep -n -E "(sk-[A-Za-z0-9_-]{16,}|BEGIN OPENSSH PRIVATE KEY|login\.internal|/home/alice)" -- ':!docs/superpowers/plans/*' ':!tests/skills/scenarios/*'`  
 Expected: no output.
 
-- [ ] **Step 3: Verify demo API**
+- [x] **Step 3: Verify demo API**
 
 Start Uvicorn, call `POST /api/demo`, and confirm the response contains `REPORTED`, a passing mass-conservation result, deterministic analysis, evidence-linked claims and reviewer approval.
 
-- [ ] **Step 4: Record plan completion and commit**
+- [x] **Step 4: Record plan completion and commit**
 
 Check completed steps in this plan and commit with `git commit -am "docs: record fake vertical slice completion"`.
 
-- [ ] **Step 5: Push**
+- [x] **Step 5: Push**
 
 Run: `git push origin main`  
 Expected: local `main` and `origin/main` point to the same commit.
-
