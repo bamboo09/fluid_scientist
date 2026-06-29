@@ -38,7 +38,9 @@ class ResearchWorkflow:
         ("REVIEW_READY", "PUBLISH_REPORT"): ("REPORTED", "GATE_3"),
     }
     _known_states = {"CREATED", "REPORTED"} | {
-        state for transition in _transitions.items() for state in (transition[0][0], transition[1][0])
+        state
+        for transition in _transitions.items()
+        for state in (transition[0][0], transition[1][0])
     }
 
     def __init__(self, project_id: str) -> None:
