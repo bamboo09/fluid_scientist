@@ -68,10 +68,13 @@ h1 i { color: var(--blue); font-weight: 400; }
 .research-input { margin-top: 38px; padding: 18px 20px 16px; border: 1px solid var(--line); background: linear-gradient(90deg, rgba(118,199,213,.055), transparent); }
 .research-input label { display: block; color: var(--blue); font: 10px var(--mono); letter-spacing: .12em; margin-bottom: 10px; }
 .input-row { display: flex; gap: 12px; }
+.input-actions { display: grid; grid-template-columns: 1fr; gap: 8px; min-width: 190px; }
 textarea { resize: vertical; flex: 1; min-height: 62px; padding: 10px 0; border: 0; outline: 0; color: var(--paper); background: transparent; font: 17px/1.5 var(--body); }
 button { border: 0; cursor: pointer; color: var(--ink); background: var(--amber); padding: 0 20px; font: 12px var(--mono); display: flex; align-items: center; gap: 20px; transition: .25s ease; }
 button:hover { background: #f4c767; transform: translateY(-2px); }
 button:disabled { opacity: .5; cursor: wait; transform: none; }
+button.secondary { color: var(--paper); background: transparent; border: 1px solid var(--line); }
+button.secondary:hover { border-color: var(--blue); background: rgba(118,199,213,.07); }
 .research-input > p { color: var(--muted); font: 10px var(--mono); margin: 10px 0 0; }
 
 .stage-rail { display: grid; grid-template-columns: repeat(7, 1fr); margin: 34px 0 18px; border-top: 1px solid var(--line); }
@@ -95,6 +98,8 @@ button:disabled { opacity: .5; cursor: wait; transform: none; }
 .action-panel dl div { display: flex; flex-direction: column-reverse; }
 .action-panel dt { color: var(--muted); font: 9px var(--mono); }
 .action-panel dd { margin: 0 0 4px; font: 26px var(--display); }
+.gate-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
+.gate-controls button { min-height: 38px; padding: 0 14px; }
 .job-panel { grid-column: span 2; }
 .job-panel ol { list-style: none; padding: 0; display: flex; gap: 18px; }
 .job-panel li { flex: 1; color: var(--muted); font-size: 11px; }
@@ -146,6 +151,7 @@ button:disabled { opacity: .5; cursor: wait; transform: none; }
   .hero { display: block; }
   .hero-meta { margin-top: 24px; }
   .input-row { display: block; }
+  .input-actions { margin-top: 12px; }
   button { width: 100%; min-height: 48px; justify-content: space-between; }
   .stage-rail { grid-template-columns: repeat(4, 1fr); }
   .dashboard-grid, .report-grid { grid-template-columns: 1fr; }

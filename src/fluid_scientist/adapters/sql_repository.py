@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from fluid_scientist.db import (
     ApprovalRow,
@@ -28,7 +29,13 @@ class ExternalJobConflict(RuntimeError):
 
 class SQLWorkflowRepository:
     def __init__(self, database_url: str) -> None:
-        self._engine = create_engine(database_url)
+        engine_options = {}
+        if database_url in {"sqlite://", "sqlite:///:memory:"}:
+            engine_options = {
+                "connect_args": {"check_same_thread": False},
+                "poolclass": StaticPool,
+            }
+        self._engine = create_engine(database_url, **engine_options)
         Base.metadata.create_all(self._engine)
         self._sessions = sessionmaker(self._engine, expire_on_commit=False)
 

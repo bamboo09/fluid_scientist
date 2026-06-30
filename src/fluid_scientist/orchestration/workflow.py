@@ -83,6 +83,24 @@ class ResearchWorkflow:
         )
         return approval
 
+    def reject(
+        self,
+        gate: str,
+        *,
+        rejected_by: str,
+        subject_version: int,
+        reason: str,
+    ) -> None:
+        if gate not in {"GATE_1", "GATE_2", "GATE_3"}:
+            raise ValueError(f"unknown approval gate: {gate}")
+        if not reason.strip():
+            raise ValueError("rejection reason is required")
+        self._audit(
+            "APPROVAL_REJECTED",
+            rejected_by,
+            {"gate": gate, "subject_version": subject_version, "reason": reason},
+        )
+
     def transition(
         self, action: str, *, actor: str = "system", payload: dict[str, Any] | None = None
     ) -> str:

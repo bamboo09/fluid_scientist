@@ -51,7 +51,10 @@
           <label for="question">研究问题</label>
           <div class="input-row">
             <textarea id="question" name="question" rows="2" minlength="10">弯管曲率和 Reynolds 数如何影响压降及二次流？</textarea>
-            <button id="run-button" type="submit"><span>运行可信闭环</span><b>→</b></button>
+            <div class="input-actions">
+              <button id="run-button" type="submit"><span>运行 Fake 闭环</span><b>→</b></button>
+              <button id="create-project" class="secondary" type="button"><span>创建持久项目</span><b>＋</b></button>
+            </div>
           </div>
           <p id="form-message" role="status">将执行结构化、三个审批 Gate、Fake Slurm、数值验证与证据化报告。</p>
         </form>
@@ -72,6 +75,11 @@
             <h2>Pilot 方案已锁定</h2>
             <p>中心工况 × 三套网格。Fake 模式自动记录批准，但保留完整审计链。</p>
             <dl><div><dt>算例</dt><dd>3</dd></div><div><dt>估算预算</dt><dd>18 CPU·h</dd></div></dl>
+            <div class="gate-controls" aria-label="人工审批控制">
+              <button id="gate-approve" type="button" disabled>批准当前 Gate</button>
+              <button id="gate-reject" class="secondary" type="button" disabled>驳回</button>
+              <button id="gate-advance" class="secondary" type="button" disabled>执行下一动作</button>
+            </div>
           </article>
 
           <article id="jobs" class="panel job-panel">

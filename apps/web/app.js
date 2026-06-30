@@ -1,6 +1,11 @@
 const form = document.querySelector("#research-form");
 const button = document.querySelector("#run-button");
 const message = document.querySelector("#form-message");
+const createProjectButton = document.querySelector("#create-project");
+const approveButton = document.querySelector("#gate-approve");
+const rejectButton = document.querySelector("#gate-reject");
+const advanceButton = document.querySelector("#gate-advance");
+let currentProject = null;
 
 const number = (value, digits = 2) => Number(value).toFixed(digits);
 
@@ -42,6 +47,47 @@ function renderResult(result) {
   document.querySelector("#report").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
+const gateForState = (state) => ({
+  SPEC_READY: "GATE_1",
+  PILOT_READY: "GATE_2",
+  REVIEW_READY: "GATE_3",
+})[state] || null;
+
+const actionForState = (state) => ({
+  SPEC_READY: "RETRIEVE_EVIDENCE",
+  EVIDENCE_READY: "DESIGN_PILOT",
+  PILOT_READY: "SUBMIT_PILOT",
+  PILOT_RUNNING: "VERIFY_PILOT",
+  PILOT_VERIFIED: "DESIGN_FULL",
+  FULL_READY: "SUBMIT_FULL",
+  FULL_RUNNING: "ANALYZE",
+  ANALYZED: "REVIEW",
+  REVIEW_READY: "PUBLISH_REPORT",
+})[state] || null;
+
+function renderProject(project) {
+  currentProject = project;
+  document.querySelector("#project-status").textContent = project.workflow_state;
+  document.querySelector("#audit-count").textContent = `${project.audit_event_count} AUDIT EVENTS`;
+  const gate = gateForState(project.workflow_state);
+  const approved = gate && project.approvals.some((item) => item.gate === gate);
+  approveButton.disabled = !gate || approved;
+  rejectButton.disabled = !gate;
+  advanceButton.disabled = !actionForState(project.workflow_state) || (gate && !approved);
+  message.textContent = gate
+    ? `${project.workflow_state}：等待 ${gate} 人工审批。`
+    : `${project.workflow_state}：可执行下一工作流动作。`;
+}
+
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, options);
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.detail || `API returned ${response.status}`);
+  }
+  return response.json();
+}
+
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
   button.disabled = true;
@@ -60,5 +106,77 @@ form.addEventListener("submit", async (event) => {
     message.textContent = `运行失败：${error.message}`;
   } finally {
     button.disabled = false;
+  }
+});
+
+createProjectButton.addEventListener("click", async () => {
+  createProjectButton.disabled = true;
+  try {
+    const project = await requestJson("/api/projects", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: document.querySelector("#question").value }),
+    });
+    renderProject(project);
+  } catch (error) {
+    message.textContent = `创建失败：${error.message}`;
+  } finally {
+    createProjectButton.disabled = false;
+  }
+});
+
+approveButton.addEventListener("click", async () => {
+  if (!currentProject) return;
+  const gate = gateForState(currentProject.workflow_state);
+  try {
+    const project = await requestJson(`/api/projects/${currentProject.project_id}/approvals`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        gate,
+        decision: "approve",
+        actor: "researcher",
+        subject_version: currentProject.version,
+      }),
+    });
+    renderProject(project);
+  } catch (error) {
+    message.textContent = `审批失败：${error.message}`;
+  }
+});
+
+rejectButton.addEventListener("click", async () => {
+  if (!currentProject) return;
+  const gate = gateForState(currentProject.workflow_state);
+  try {
+    const project = await requestJson(`/api/projects/${currentProject.project_id}/approvals`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        gate,
+        decision: "reject",
+        actor: "researcher",
+        subject_version: currentProject.version,
+        reason: "Researcher requested revision from the workbench.",
+      }),
+    });
+    renderProject(project);
+  } catch (error) {
+    message.textContent = `驳回失败：${error.message}`;
+  }
+});
+
+advanceButton.addEventListener("click", async () => {
+  if (!currentProject) return;
+  const action = actionForState(currentProject.workflow_state);
+  try {
+    const project = await requestJson(`/api/projects/${currentProject.project_id}/actions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action, actor: "researcher" }),
+    });
+    renderProject(project);
+  } catch (error) {
+    message.textContent = `工作流操作失败：${error.message}`;
   }
 });
