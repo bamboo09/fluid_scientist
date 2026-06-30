@@ -1,6 +1,6 @@
 ---
 name: fluid-research-workflow
-description: Use when planning, executing, validating, or reporting single-phase incompressible OpenFOAM pipe or 90-degree bend studies, especially with Slurm/HPC, evidence retrieval, mesh independence, mass conservation, result analysis, or human approval gates.
+description: Use when planning, executing, validating, or reporting single-phase incompressible OpenFOAM pipe or 90-degree bend studies on a workstation or Slurm/HPC platform, especially with evidence retrieval, mesh independence, mass conservation, result analysis, or human approval gates.
 ---
 
 # Fluid Research Workflow
@@ -17,7 +17,7 @@ Treat solver completion, numerical convergence, physical credibility, and genera
 4. Compute units, dimensionless numbers, parameter bounds, and rules with deterministic code. Never ask an LLM to supply numerical truth.
 5. Design a mandatory `Pilot` before a batch. Include coarse, medium, and fine meshes and relevant model sensitivity.
 6. Obtain Gate 2 human approval for the solver, mesh, budget, and case count.
-7. Render an immutable Case Manifest from versioned templates. Submit only through allowlisted HPC tools; never emit or run arbitrary shell.
+7. Select the approved execution target. Use typed Slurm commands on HPC or the fixed `fluid-worker` protocol on a direct workstation; never emit or run arbitrary shell.
 8. Perform deterministic validation: residuals plus monitored quantities, conservation, mesh independence/GCI, benchmark agreement, and model sensitivity.
 9. Run deterministic statistics before Results Analyst interpretation. Require evidence-linked claims and label observation, inference, literature support, extrapolation, or hypothesis.
 10. Have an independent Scientific Reviewer check failures, uncertainty, and scope. Obtain Gate 3 human approval before the final report.
@@ -26,6 +26,7 @@ Treat solver completion, numerical convergence, physical credibility, and genera
 
 - Block batch submission when the Pilot has not passed.
 - Block any HARD physics-rule violation.
+- Block first contact with a workstation until its SSH host fingerprint is verified out of band and recorded in `known_hosts`.
 - Limit controlled numerical repair to two recorded revisions per case.
 - Never hide failed cases, invent missing evidence, repair corrupt formulas, or generalize beyond the tested range.
 - Never publish a candidate Skill without a failing baseline, passing forward test, redaction, and human approval.

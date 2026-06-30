@@ -16,3 +16,13 @@ def test_workbench_javascript_keeps_chinese_execution_messages() -> None:
     assert "尚未配置真实执行平台" in script
     assert "等待 ${gate} 人工审批" in script
     assert "闭环完成" in script
+
+
+def test_skill_governance_is_not_exposed_in_the_workbench() -> None:
+    assets = "".join(
+        (ROOT / relative).read_text(encoding="utf-8")
+        for relative in ("apps/web/index.html", "apps/web/app.js")
+    )
+
+    assert "候选 Skill" not in assets
+    assert "Skill 治理" not in assets

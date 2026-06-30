@@ -64,3 +64,24 @@ def test_repository_skill_encodes_credibility_gates() -> None:
     ):
         assert required in text
     assert "TBD" not in text
+
+
+def test_repository_skill_covers_safe_openfoam13_workstation_execution() -> None:
+    skill = Path("skills/fluid-research-workflow/SKILL.md").read_text(encoding="utf-8")
+    reference = Path("skills/fluid-research-workflow/references/workflow.md").read_text(
+        encoding="utf-8"
+    )
+    combined = skill + reference
+
+    for required in (
+        "OpenFOAM Foundation 13",
+        "fluid-worker",
+        "host fingerprint",
+        "workstation",
+        "kinematic pressure",
+        "volumetric flow",
+    ):
+        assert required in combined
+    assert "10.129.177.241" not in combined
+    assert "192.168.1.102" not in combined
+    assert "username: ls" not in combined
