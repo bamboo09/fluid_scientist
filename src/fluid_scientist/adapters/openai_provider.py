@@ -1,0 +1,152 @@
+"""OpenAI Responses API provider using strict Pydantic structured outputs."""
+
+from dataclasses import asdict
+from typing import Any, TypeVar
+
+from openai import APIConnectionError, APITimeoutError, OpenAI
+from pydantic import BaseModel, ConfigDict, Field
+
+from fluid_scientist.domain.models import (
+    AnalysisResult,
+    EvidenceLinkedClaim,
+    EvidencePackage,
+    ResearchReport,
+    ResearchSpec,
+    ValidationResult,
+)
+from fluid_scientist.ports import SimulationResult
+from fluid_scientist.settings import OpenAISettings
+
+OutputT = TypeVar("OutputT", bound=BaseModel)
+
+
+class ProviderOutputError(RuntimeError):
+    """Raised when the API does not return the requested structured output."""
+
+
+class ProviderRequestError(RuntimeError):
+    """Raised after transient API failures exhaust the configured retries."""
+
+
+class StrictOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class ClaimBatch(StrictOutput):
+    claims: tuple[EvidenceLinkedClaim, ...] = Field(min_length=1)
+
+
+class ReviewDecision(StrictOutput):
+    approved: bool
+    reason: str = Field(min_length=1)
+
+
+class OpenAIResponsesProvider:
+    def __init__(self, settings: OpenAISettings, *, client: Any | None = None) -> None:
+        if client is None:
+            if settings.api_key is None:
+                raise ValueError("OpenAI api_key is required")
+            client = OpenAI(
+                api_key=settings.api_key.get_secret_value(),
+                timeout=settings.timeout_seconds,
+                max_retries=0,
+            )
+        self._settings = settings
+        self._client = client
+        self.last_request_id: str | None = None
+        self.last_review_reason: str | None = None
+
+    def __repr__(self) -> str:
+        return (
+            "OpenAIResponsesProvider("
+            f"planner_model={self._settings.planner_model!r}, "
+            f"extractor_model={self._settings.extractor_model!r})"
+        )
+
+    def interpret(self, question: str) -> ResearchSpec:
+        return self._parse(
+            model=self._settings.planner_model,
+            text_format=ResearchSpec,
+            instructions=(
+                "Convert the fluid-mechanics request into ResearchSpec. Use SI units. "
+                "Do not silently invent material conditions that change the conclusion."
+            ),
+            input_text=question,
+        )
+
+    def analyze(
+        self,
+        analysis: AnalysisResult,
+        evidence: EvidencePackage,
+        simulations: tuple[SimulationResult, ...],
+    ) -> tuple[EvidenceLinkedClaim, ...]:
+        payload = {
+            "analysis": analysis.model_dump(mode="json"),
+            "evidence": evidence.model_dump(mode="json"),
+            "simulations": [asdict(item) for item in simulations],
+        }
+        batch = self._parse(
+            model=self._settings.planner_model,
+            text_format=ClaimBatch,
+            instructions=(
+                "Act as Results Analyst. Explain only deterministic results supplied in input. "
+                "Every claim must cite analysis, simulation, or literature evidence IDs and use "
+                "the correct evidence level. Never calculate replacement values."
+            ),
+            input_text=self._json(payload),
+        )
+        return batch.claims
+
+    def review(self, report: ResearchReport, validation: ValidationResult) -> bool:
+        decision = self._parse(
+            model=self._settings.planner_model,
+            text_format=ReviewDecision,
+            instructions=(
+                "Act as an independent scientific reviewer. Approve only when conclusions are "
+                "traceable, scoped to the tested range, and consistent with validation."
+            ),
+            input_text=self._json(
+                {
+                    "report": report.model_dump(mode="json"),
+                    "validation": validation.model_dump(mode="json"),
+                }
+            ),
+        )
+        self.last_review_reason = decision.reason
+        return decision.approved
+
+    def _parse(
+        self,
+        *,
+        model: str,
+        text_format: type[OutputT],
+        instructions: str,
+        input_text: str,
+    ) -> OutputT:
+        last_error: Exception | None = None
+        for _attempt in range(self._settings.max_retries + 1):
+            try:
+                response = self._client.responses.parse(
+                    model=model,
+                    instructions=instructions,
+                    input=input_text,
+                    text_format=text_format,
+                    store=False,
+                    timeout=self._settings.timeout_seconds,
+                )
+                self.last_request_id = getattr(response, "_request_id", None)
+                parsed = response.output_parsed
+                if parsed is None:
+                    raise ProviderOutputError("OpenAI response contained no structured output")
+                return parsed
+            except ProviderOutputError:
+                raise
+            except (TimeoutError, APITimeoutError, APIConnectionError) as error:
+                last_error = error
+        raise ProviderRequestError("OpenAI request failed after configured retries") from last_error
+
+    @staticmethod
+    def _json(payload: Any) -> str:
+        import json
+
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
