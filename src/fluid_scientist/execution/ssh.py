@@ -44,6 +44,7 @@ class RemoteProgram(StrEnum):
     SCANCEL = "scancel"
     SHA256SUM = "sha256sum"
     MKDIR = "mkdir"
+    FLUID_WORKER = "fluid-worker"
 
 
 _REMOTE_ARG = re.compile(r"^[A-Za-z0-9_./:=+,%\-]+$")

@@ -10,6 +10,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from fluid_scientist.adapters.fakes import build_demo_service
 from fluid_scientist.adapters.sql_repository import SQLWorkflowRepository
+from fluid_scientist.execution_targets.base import (
+    ExecutionTargetAdapter,
+    ExecutionTargetCapability,
+)
 from fluid_scientist.orchestration.workflow import TransitionError
 from fluid_scientist.ports import WorkflowRepository
 from fluid_scientist.services.projects import ProjectService, ProjectView
@@ -44,7 +48,10 @@ class ActionRequest(StrictRequest):
     actor: str = Field(default="system", min_length=1, max_length=128)
 
 
-def create_app(repository: WorkflowRepository | None = None) -> FastAPI:
+def create_app(
+    repository: WorkflowRepository | None = None,
+    execution_targets: tuple[ExecutionTargetAdapter, ...] = (),
+) -> FastAPI:
     application = FastAPI(
         title="Fluid Scientist",
         version="0.2.0",
@@ -113,6 +120,12 @@ def create_app(repository: WorkflowRepository | None = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="project not found") from error
         except TransitionError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
+
+    @application.get(
+        "/api/execution-targets", response_model=tuple[ExecutionTargetCapability, ...]
+    )
+    def list_execution_targets() -> tuple[ExecutionTargetCapability, ...]:
+        return tuple(target.doctor() for target in execution_targets)
 
     return application
 

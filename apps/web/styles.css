@@ -70,6 +70,7 @@ h1 i { color: var(--blue); font-weight: 400; }
 .input-row { display: flex; gap: 12px; }
 .input-actions { display: grid; grid-template-columns: 1fr; gap: 8px; min-width: 190px; }
 textarea { resize: vertical; flex: 1; min-height: 62px; padding: 10px 0; border: 0; outline: 0; color: var(--paper); background: transparent; font: 17px/1.5 var(--body); }
+select { width: 100%; margin: 0 0 12px; padding: 10px; color: var(--paper); background: #101b20; border: 1px solid var(--line); font: 12px var(--mono); }
 button { border: 0; cursor: pointer; color: var(--ink); background: var(--amber); padding: 0 20px; font: 12px var(--mono); display: flex; align-items: center; gap: 20px; transition: .25s ease; }
 button:hover { background: #f4c767; transform: translateY(-2px); }
 button:disabled { opacity: .5; cursor: wait; transform: none; }

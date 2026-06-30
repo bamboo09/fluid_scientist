@@ -9,6 +9,26 @@ let currentProject = null;
 
 const number = (value, digits = 2) => Number(value).toFixed(digits);
 
+async function loadExecutionTargets() {
+  const select = document.querySelector("#execution-target");
+  try {
+    const targets = await requestJson("/api/execution-targets");
+    select.replaceChildren(...targets.map((target) => {
+      const option = document.createElement("option");
+      option.value = target.target_id;
+      option.disabled = !target.available;
+      const platform = target.kind === "workstation_openfoam" ? "工作站 OpenFOAM" : "HPC Slurm";
+      option.textContent = target.available
+        ? `${platform} · ${target.foam_version || "版本未知"} · ${target.cpu_count || "?"} CPU`
+        : `${platform} · 不可用：${target.reason}`;
+      return option;
+    }));
+    if (!targets.length) select.innerHTML = '<option value="">尚未配置真实执行平台</option>';
+  } catch (error) {
+    select.innerHTML = `<option value="">能力检查失败：${error.message}</option>`;
+  }
+}
+
 function renderResult(result) {
   document.querySelector("#project-status").textContent = result.workflow_state;
   document.querySelector("#job-state").textContent = "COMPLETED 3 / 3";
@@ -180,3 +200,5 @@ advanceButton.addEventListener("click", async () => {
     message.textContent = `工作流操作失败：${error.message}`;
   }
 });
+
+loadExecutionTargets();
