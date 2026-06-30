@@ -63,6 +63,13 @@ class JobRunResult:
     solver_log: str
 
 
+@dataclass(frozen=True)
+class SurfaceMetrics:
+    pressure_drop_pa: float
+    inlet_mass_flow: float
+    outlet_mass_flow: float
+
+
 class JobState(StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
@@ -201,9 +208,17 @@ class WorkerJobService:
         if record.state != JobState.RUNNING:
             return record
         try:
-            result = (runner or OpenFOAM13JobRunner()).run(self._job_root(job_id) / "case")
+            case_root = self._job_root(job_id) / "case"
+            result = (runner or OpenFOAM13JobRunner()).run(case_root)
+            metrics = extract_surface_metrics(case_root, density_kg_m3=record.spec.density_kg_m3)
+            solver_log = (
+                result.solver_log.rstrip()
+                + f"\ninlet massFlow = {metrics.inlet_mass_flow:.12g}"
+                + f"\noutlet massFlow = {metrics.outlet_mass_flow:.12g}"
+                + f"\npressureDrop = {metrics.pressure_drop_pa:.12g}\n"
+            )
             (self._job_root(job_id) / "checkMesh.log").write_text(result.mesh_log, encoding="utf-8")
-            (self._job_root(job_id) / "solver.log").write_text(result.solver_log, encoding="utf-8")
+            (self._job_root(job_id) / "solver.log").write_text(solver_log, encoding="utf-8")
             updated = record.model_copy(update={"state": JobState.SUCCEEDED})
         except (OSError, RuntimeError, subprocess.SubprocessError) as error:
             updated = record.model_copy(update={"state": JobState.FAILED, "error": str(error)})
@@ -272,6 +287,38 @@ def build_doctor_report(
         disk_free_gb=round(disk_free_gb, 2),
         commands=REQUIRED_COMMANDS,
     )
+
+
+def extract_surface_metrics(case_root: Path, *, density_kg_m3: float) -> SurfaceMetrics:
+    if density_kg_m3 <= 0:
+        raise ValueError("density must be positive")
+    post_processing = case_root / "postProcessing"
+    pressure_kinematic = _latest_function_value(post_processing / "pressureDrop")
+    inlet_volumetric = _latest_function_value(post_processing / "inletFlow")
+    outlet_volumetric = _latest_function_value(post_processing / "outletFlow")
+    return SurfaceMetrics(
+        pressure_drop_pa=abs(pressure_kinematic) * density_kg_m3,
+        inlet_mass_flow=abs(inlet_volumetric) * density_kg_m3,
+        outlet_mass_flow=-abs(outlet_volumetric) * density_kg_m3,
+    )
+
+
+def _latest_function_value(function_root: Path) -> float:
+    latest: tuple[float, float] | None = None
+    for data_file in function_root.glob("**/*.dat"):
+        for line in data_file.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            numbers = re.findall(r"[-+]?(?:\d*\.?\d+)(?:[eE][-+]?\d+)?", stripped)
+            if len(numbers) < 2:
+                continue
+            candidate = (float(numbers[0]), float(numbers[-1]))
+            if latest is None or candidate[0] > latest[0]:
+                latest = candidate
+    if latest is None:
+        raise RuntimeError(f"no OpenFOAM function-object data found for {function_root.name}")
+    return latest[1]
 
 
 def system_doctor(work_root: Path) -> DoctorReport:

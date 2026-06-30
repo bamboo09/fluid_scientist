@@ -98,9 +98,9 @@ class BenchmarkTarget(StaticTarget):
                     "final_residuals": {"Ux": 1e-8},
                     "global_continuity_error": 2e-10,
                     "cumulative_continuity_error": 3e-9,
-                    "inlet_mass_flow": None,
-                    "outlet_mass_flow": None,
-                    "pressure_drop_pa": None,
+                    "inlet_mass_flow": 0.031359,
+                    "outlet_mass_flow": -0.0313589,
+                    "pressure_drop_pa": 15.9712,
                 },
                 "case_manifest": {"system/controlDict": "a" * 64},
             }
@@ -249,4 +249,7 @@ def test_bound_benchmark_exposes_status_and_collected_results(tmp_path) -> None:
     assert status_response.status_code == 200
     assert status_response.json()["state"] == "running"
     assert results_response.status_code == 200
-    assert results_response.json()["mesh"]["cells"] == 8000
+    results = results_response.json()
+    assert results["collection"]["mesh"]["cells"] == 8000
+    assert results["validation"]["passed"] is True
+    assert results["project"]["workflow_state"] == "PILOT_VERIFIED"

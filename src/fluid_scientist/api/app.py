@@ -10,7 +10,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from fluid_scientist.adapters.fakes import build_demo_service
-from fluid_scientist.adapters.openfoam import LaminarPipeCase
+from fluid_scientist.adapters.openfoam import (
+    LaminarPipeCase,
+    PipeBenchmarkValidation,
+    validate_laminar_pipe,
+)
 from fluid_scientist.adapters.sql_repository import SQLWorkflowRepository
 from fluid_scientist.execution.ssh import RemoteExecutionError, SSHTransport
 from fluid_scientist.execution_targets.base import (
@@ -69,6 +73,14 @@ class BenchmarkSubmissionView(BaseModel):
 
     project: ProjectView
     job: JobRecord
+
+
+class BenchmarkResultsView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: ProjectView
+    collection: WorkerCollection
+    validation: PipeBenchmarkValidation
 
 
 def create_app(
@@ -187,9 +199,7 @@ def create_app(
         except RemoteExecutionError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
 
-    @application.get(
-        "/api/projects/{project_id}/benchmarks/{case_id}", response_model=JobRecord
-    )
+    @application.get("/api/projects/{project_id}/benchmarks/{case_id}", response_model=JobRecord)
     def benchmark_status(project_id: str, case_id: str, target_id: str) -> JobRecord:
         target, job_id = _bound_benchmark(
             project_service, target_registry, project_id, case_id, target_id
@@ -204,23 +214,41 @@ def create_app(
 
     @application.get(
         "/api/projects/{project_id}/benchmarks/{case_id}/results",
-        response_model=WorkerCollection,
+        response_model=BenchmarkResultsView,
     )
-    def benchmark_results(
-        project_id: str, case_id: str, target_id: str
-    ) -> WorkerCollection:
+    def benchmark_results(project_id: str, case_id: str, target_id: str) -> BenchmarkResultsView:
         target, job_id = _bound_benchmark(
             project_service, target_registry, project_id, case_id, target_id
         )
         collect = getattr(target, "collect", None)
         if not callable(collect):
-            raise HTTPException(
-                status_code=422, detail="execution target has no result collection"
-            )
+            raise HTTPException(status_code=422, detail="execution target has no result collection")
         try:
-            return collect(job_id)
+            job = target.status(job_id)
+            collection = collect(job_id)
+            validation = validate_laminar_pipe(
+                job.spec,
+                pressure_drop_pa=collection.solver.pressure_drop_pa,
+                inlet_mass_flow=collection.solver.inlet_mass_flow,
+                outlet_mass_flow=collection.solver.outlet_mass_flow,
+                final_residuals=collection.solver.final_residuals,
+            )
+            project = project_service.get(project_id)
+            if validation.passed:
+                project = project_service.verify_pilot(
+                    project_id,
+                    case_id=case_id,
+                    validation=validation.model_dump(),
+                )
+            return BenchmarkResultsView(
+                project=project,
+                collection=collection,
+                validation=validation,
+            )
         except RemoteExecutionError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @application.get("/api/execution-targets", response_model=tuple[ExecutionTargetCapability, ...])
     def list_execution_targets() -> tuple[ExecutionTargetCapability, ...]:

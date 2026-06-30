@@ -116,6 +116,31 @@ class ProjectService:
         self._persist_new_events(project_id, workflow, event_count)
         return self._view(workflow, new_version)
 
+    def verify_pilot(
+        self,
+        project_id: str,
+        *,
+        case_id: str,
+        validation: dict[str, object],
+        actor: str = "validator",
+    ) -> ProjectView:
+        workflow, version = self._load(project_id)
+        if workflow.state.name == "PILOT_VERIFIED":
+            return self._view(workflow, version)
+        if case_id not in workflow.state.external_jobs:
+            raise TransitionError(f"no external job is bound for {case_id}")
+        event_count = len(workflow.state.audit_events)
+        workflow.transition(
+            "VERIFY_PILOT",
+            actor=actor,
+            payload={"case_id": case_id, "validation": validation},
+        )
+        new_version = self._repository.save_snapshot(
+            project_id, workflow.to_json(), expected_version=version
+        )
+        self._persist_new_events(project_id, workflow, event_count)
+        return self._view(workflow, new_version)
+
     def _load(self, project_id: str) -> tuple[ResearchWorkflow, int]:
         stored = self._repository.load_snapshot(project_id)
         if stored is None:

@@ -123,6 +123,8 @@ class WorkstationOpenFOAMTarget:
             RemoteArg(_number(spec.mean_velocity_m_s)),
             RemoteArg("--nu"),
             RemoteArg(_number(spec.kinematic_viscosity_m2_s)),
+            RemoteArg("--density"),
+            RemoteArg(_number(spec.density_kg_m3)),
             RemoteArg("--axial-cells"),
             RemoteArg(str(spec.axial_cells)),
             RemoteArg("--radial-cells"),
@@ -132,14 +134,10 @@ class WorkstationOpenFOAMTarget:
         return self._job_command(args)
 
     def status(self, job_id: str) -> JobRecord:
-        return self._job_command(
-            (RemoteArg("status"), RemoteArg(job_id), RemoteArg("--json"))
-        )
+        return self._job_command((RemoteArg("status"), RemoteArg(job_id), RemoteArg("--json")))
 
     def cancel(self, job_id: str) -> JobRecord:
-        return self._job_command(
-            (RemoteArg("cancel"), RemoteArg(job_id), RemoteArg("--json"))
-        )
+        return self._job_command((RemoteArg("cancel"), RemoteArg(job_id), RemoteArg("--json")))
 
     def collect(self, job_id: str) -> WorkerCollection:
         transport = self._transport()

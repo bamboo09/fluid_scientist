@@ -27,6 +27,7 @@ def main(
     submit.add_argument("--length", required=True, type=float)
     submit.add_argument("--velocity", required=True, type=float)
     submit.add_argument("--nu", required=True, type=float)
+    submit.add_argument("--density", type=float, default=998.2)
     submit.add_argument("--axial-cells", type=int, default=80)
     submit.add_argument("--radial-cells", type=int, default=10)
     submit.add_argument("--json", action="store_true", dest="as_json")
@@ -63,6 +64,7 @@ def main(
                 length_m=args.length,
                 mean_velocity_m_s=args.velocity,
                 kinematic_viscosity_m2_s=args.nu,
+                density_kg_m3=args.density,
                 axial_cells=args.axial_cells,
                 radial_cells=args.radial_cells,
             )

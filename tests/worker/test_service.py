@@ -8,6 +8,7 @@ from fluid_scientist.worker.service import (
     OpenFOAM13JobRunner,
     WorkerJobService,
     build_doctor_report,
+    extract_surface_metrics,
 )
 
 
@@ -96,6 +97,7 @@ def pipe_spec(velocity: float = 0.1) -> LaminarPipeCase:
         length_m=2.0,
         mean_velocity_m_s=velocity,
         kinematic_viscosity_m2_s=1.0e-6,
+        density_kg_m3=1000.0,
     )
 
 
@@ -138,6 +140,16 @@ def test_worker_execute_and_collect_persist_credibility_outputs(tmp_path) -> Non
                     "",
                 )
             if argv[0] == "foamRun":
+                for name, value in (
+                    ("pressureDrop", "0.016"),
+                    ("inletFlow", "-3.14159e-5"),
+                    ("outletFlow", "3.14158e-5"),
+                ):
+                    output = cwd / "postProcessing" / name / "0"
+                    output.mkdir(parents=True)
+                    (output / "surfaceFieldValue.dat").write_text(
+                        f"# Time value\n2000 {value}\n", encoding="utf-8"
+                    )
                 return CommandResult(
                     0,
                     "Solving for Ux, Initial residual = 0.1, Final residual = 1e-8\n"
@@ -158,4 +170,24 @@ def test_worker_execute_and_collect_persist_credibility_outputs(tmp_path) -> Non
     assert completed.state == JobState.SUCCEEDED
     assert collected["mesh"]["cells"] == 8000
     assert collected["solver"]["completed"] is True
+    assert collected["solver"]["pressure_drop_pa"] == 16.0
+    assert collected["solver"]["inlet_mass_flow"] == 0.0314159
+    assert collected["solver"]["outlet_mass_flow"] == -0.0314158
     assert collected["case_manifest"]["system/controlDict"]
+
+
+def test_surface_metrics_use_latest_time_and_convert_openfoam_units(tmp_path) -> None:
+    for function_name, rows in (
+        ("pressureDrop", "0 0.01\n2000 0.016\n"),
+        ("inletFlow", "0 -3e-5\n2000 -3.14159e-5\n"),
+        ("outletFlow", "0 3e-5\n2000 3.14158e-5\n"),
+    ):
+        output = tmp_path / "postProcessing" / function_name / "0"
+        output.mkdir(parents=True)
+        (output / "surfaceFieldValue.dat").write_text("# Time value\n" + rows, encoding="utf-8")
+
+    metrics = extract_surface_metrics(tmp_path, density_kg_m3=1000.0)
+
+    assert metrics.pressure_drop_pa == 16.0
+    assert metrics.inlet_mass_flow == 0.0314159
+    assert metrics.outlet_mass_flow == -0.0314158

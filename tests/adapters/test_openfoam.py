@@ -1,6 +1,10 @@
 import pytest
 
-from fluid_scientist.adapters.openfoam import LaminarPipeCase, OpenFOAM13CaseRenderer
+from fluid_scientist.adapters.openfoam import (
+    LaminarPipeCase,
+    OpenFOAM13CaseRenderer,
+    validate_laminar_pipe,
+)
 from fluid_scientist.adapters.openfoam_parsers import (
     OpenFOAMFailure,
     hagen_poiseuille_pressure_drop,
@@ -131,4 +135,45 @@ def test_laminar_pipe_case_enforces_laminar_regime() -> None:
             length_m=1.0,
             mean_velocity_m_s=1.0,
             kinematic_viscosity_m2_s=1.0e-6,
+        )
+
+
+def test_pipe_benchmark_validation_combines_analytical_mass_and_residual_checks() -> None:
+    spec = LaminarPipeCase(
+        diameter_m=0.02,
+        length_m=2,
+        mean_velocity_m_s=0.1,
+        kinematic_viscosity_m2_s=1e-6,
+        density_kg_m3=1000,
+    )
+
+    result = validate_laminar_pipe(
+        spec,
+        pressure_drop_pa=15.84,
+        inlet_mass_flow=0.0314159,
+        outlet_mass_flow=-0.0314158,
+        final_residuals={"Ux": 1e-8, "p": 2e-8},
+    )
+
+    assert result.analytical_pressure_drop_pa == pytest.approx(16.0)
+    assert result.pressure_drop_error_percent == pytest.approx(1.0)
+    assert result.mass_imbalance_percent < 0.001
+    assert result.passed is True
+
+
+def test_pipe_benchmark_validation_fails_missing_credibility_metric() -> None:
+    spec = LaminarPipeCase(
+        diameter_m=0.02,
+        length_m=2,
+        mean_velocity_m_s=0.1,
+        kinematic_viscosity_m2_s=1e-6,
+    )
+
+    with pytest.raises(ValueError, match="required"):
+        validate_laminar_pipe(
+            spec,
+            pressure_drop_pa=None,
+            inlet_mass_flow=0.03,
+            outlet_mass_flow=-0.03,
+            final_residuals={"Ux": 1e-8},
         )

@@ -116,6 +116,8 @@ def test_submit_uses_fixed_worker_arguments_after_capability_selection() -> None
         "0.1",
         "--nu",
         "1e-06",
+        "--density",
+        "998.2",
         "--axial-cells",
         "80",
         "--radial-cells",
