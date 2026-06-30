@@ -2,11 +2,11 @@
 
 面向 OpenFOAM 与 HPC 的可信流体力学科研智能体。系统把自然语言研究问题转为严格的 ResearchSpec，通过文献证据、物理规则、Pilot、Slurm/OpenFOAM、确定性验证、Results Analyst 和 Scientific Reviewer 形成可追溯闭环。
 
-当前版本是第一条可运行纵向切片：单相、不可压缩、稳态 90° 弯管研究。默认使用 Fake 模式，不需要 OpenAI Key、HPC 地址或 OpenFOAM，适合本地演示和 CI。Fake 数值仅用于验证软件流程，不能作为科研结果。
+当前版本包含两条路径：单相、不可压缩、稳态 90° 弯管的 Fake 科研闭环，以及可在 OpenFOAM Foundation 13 工作站上执行的真实层流圆管基准。默认使用 Fake 模式，不需要 OpenAI Key、HPC 地址或 OpenFOAM，适合本地演示和 CI。Fake 数值仅用于验证软件流程，不能作为科研结果。
 
 ## 快速开始
 
-要求 Python 3.11 或更高版本。
+要求 Python 3.10 或更高版本。
 
 ```powershell
 python -m pip install -e ".[dev]"
@@ -25,6 +25,56 @@ python -m uvicorn fluid_scientist.api.app:app --host 127.0.0.1 --port 8000
 - 防命令注入的 Slurm 值对象、远程相对路径和固定 OpenFOAM 命令枚举。
 - 科研工作台，以及“实验结果分析与报告”视图；Skill 沉淀不出现在控制台。
 - `fluid-research-workflow` 基础 Skill 和 RED/GREEN/人工审批的候选 Skill 生命周期。
+
+## 执行平台
+
+实验设计和 Gate 2 审批支持明确选择执行平台：
+
+- `workstation_openfoam`：通过严格 host-key 校验的 SSH 调用固定 `fluid-worker` 协议，长任务在工作站脱离 SSH 会话继续运行。
+- `hpc_slurm`：数据节点准备不可变制品，Login 节点提交和查询 Slurm，计算节点运行 OpenFOAM。
+
+系统不会在平台不可用时静默切换到另一平台。真实主机、用户名、私钥路径和 `known_hosts` 路径只通过本地环境变量注入，不能提交到 Git。
+
+## 部署工作站 Worker
+
+工作站需要 Python 3.10+ 和 OpenFOAM Foundation 13。建议为 worker 使用独立虚拟环境，并创建一个负责加载 OpenFOAM 环境的固定包装器：
+
+```bash
+python3 -m venv ~/.local/share/fluid-scientist/venv
+~/.local/share/fluid-scientist/venv/bin/python -m pip install fluid_scientist-0.1.0-py3-none-any.whl
+
+mkdir -p ~/.local/bin
+cat > ~/.local/bin/fluid-worker <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+source /path/to/openfoam13/etc/bashrc
+exec "$HOME/.local/share/fluid-scientist/venv/bin/fluid-worker" "$@"
+EOF
+chmod 700 ~/.local/bin/fluid-worker
+```
+
+部署后先在工作站本地执行 `fluid-worker doctor --json`。控制平面只会远程调用以下固定命令：
+
+```text
+fluid-worker doctor --json
+fluid-worker submit --job-id <id> --diameter <m> --length <m> --velocity <m/s> --nu <m2/s> --density <kg/m3> --json
+fluid-worker status <id> --json
+fluid-worker cancel <id> --json
+fluid-worker collect <id> --json
+```
+
+首次连接前，必须让研究人员在工作站本机读取 SSH host-key 指纹并在控制平面侧独立核对；禁止自动接受未知主机密钥。
+
+## 真实层流圆管验收
+
+真实基准使用 `foamRun -solver incompressibleFluid`。系统把 OpenFOAM 的运动压力和体积流量按算例密度转换为 Pa 与 kg/s，然后与 Hagen–Poiseuille 解析压降比较。只有同时满足以下条件才可标记为通过：
+
+- `checkMesh` 通过且网格质量可接受；
+- 最终残差不高于配置阈值；
+- 入口/出口质量不平衡不高于 0.1%；
+- 数值压降相对解析解误差不高于 5%。
+
+求解器正常退出只代表作业完成，不代表基准可信；最终状态必须以 `collect` 结果和确定性验证为准。
 
 ## HPC 三节点契约
 
