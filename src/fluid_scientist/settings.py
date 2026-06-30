@@ -49,6 +49,14 @@ class OpenFOAMSettings(ConfigModel):
     shared_root: str | None = None
 
 
+class WorkstationSettings(ConfigModel):
+    hosts: tuple[str, ...] = ()
+    username: str | None = None
+    port: int = Field(default=22, ge=1, le=65_535)
+    identity_file: str | None = None
+    known_hosts_file: str | None = None
+
+
 class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="FLUID_",
@@ -63,13 +71,16 @@ class AppSettings(BaseSettings):
     login_node: NodeSettings = Field(default_factory=NodeSettings)
     slurm: SlurmSettings = Field(default_factory=SlurmSettings)
     openfoam: OpenFOAMSettings = Field(default_factory=OpenFOAMSettings)
+    workstation: WorkstationSettings = Field(default_factory=WorkstationSettings)
 
     @model_validator(mode="after")
     def require_real_integrations(self) -> "AppSettings":
         if self.app_mode == AppMode.FAKE:
             return self
-        required = {
-            "openai.api_key": self.openai.api_key,
+        missing = []
+        if self.openai.api_key is None:
+            missing.append("openai.api_key")
+        hpc = {
             "data_node.host": self.data_node.host,
             "data_node.username": self.data_node.username,
             "login_node.host": self.login_node.host,
@@ -78,7 +89,15 @@ class AppSettings(BaseSettings):
             "openfoam.module_name": self.openfoam.module_name,
             "openfoam.shared_root": self.openfoam.shared_root,
         }
-        missing = [name for name, value in required.items() if value in {None, ""}]
+        workstation = {
+            "workstation.hosts": self.workstation.hosts,
+            "workstation.username": self.workstation.username,
+            "workstation.known_hosts_file": self.workstation.known_hosts_file,
+        }
+        hpc_ready = all(value not in {None, ""} for value in hpc.values())
+        workstation_ready = all(value not in {None, "", ()} for value in workstation.values())
+        if not hpc_ready and not workstation_ready:
+            missing.append("one complete execution platform (workstation or HPC)")
         if missing:
             raise ValueError("real mode requires: " + ", ".join(missing))
         return self

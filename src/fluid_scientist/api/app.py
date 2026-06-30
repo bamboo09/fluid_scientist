@@ -1,5 +1,6 @@
 """FastAPI application for Fake demos and persistent research projects."""
 
+from collections.abc import Callable
 from pathlib import Path
 from typing import Literal
 
@@ -10,14 +11,17 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from fluid_scientist.adapters.fakes import build_demo_service
 from fluid_scientist.adapters.sql_repository import SQLWorkflowRepository
+from fluid_scientist.execution.ssh import SSHTransport
 from fluid_scientist.execution_targets.base import (
     ExecutionTargetAdapter,
     ExecutionTargetCapability,
 )
+from fluid_scientist.execution_targets.workstation import WorkstationOpenFOAMTarget
 from fluid_scientist.orchestration.workflow import TransitionError
 from fluid_scientist.ports import WorkflowRepository
 from fluid_scientist.services.projects import ProjectService, ProjectView
 from fluid_scientist.services.research import DemoResearchResult
+from fluid_scientist.settings import AppSettings, NodeSettings
 
 ROOT = Path(__file__).resolve().parents[3]
 WEB_ROOT = ROOT / "apps" / "web"
@@ -50,14 +54,22 @@ class ActionRequest(StrictRequest):
 
 def create_app(
     repository: WorkflowRepository | None = None,
-    execution_targets: tuple[ExecutionTargetAdapter, ...] = (),
+    execution_targets: tuple[ExecutionTargetAdapter, ...] | None = None,
+    *,
+    settings: AppSettings | None = None,
+    transport_factory: Callable[[NodeSettings], SSHTransport] = SSHTransport,
 ) -> FastAPI:
+    runtime_settings = settings or AppSettings()
+    configured_targets = execution_targets
+    if configured_targets is None:
+        configured_targets = build_execution_targets(runtime_settings, transport_factory)
     application = FastAPI(
         title="Fluid Scientist",
         version="0.2.0",
         description="Evidence-grounded fluid mechanics research workflow",
     )
     application.mount("/assets", StaticFiles(directory=WEB_ROOT), name="assets")
+    application.state.execution_targets = configured_targets
     project_service = ProjectService(repository or SQLWorkflowRepository("sqlite://"))
     demo_projects: dict[str, DemoResearchResult] = {}
 
@@ -67,7 +79,7 @@ def create_app(
 
     @application.get("/health")
     def health() -> dict[str, str]:
-        return {"status": "ok", "mode": "fake"}
+        return {"status": "ok", "mode": runtime_settings.app_mode.value}
 
     @application.post(
         "/api/demo",
@@ -92,9 +104,7 @@ def create_app(
     def create_project(request: ProjectRequest) -> ProjectView:
         return project_service.create(request.question)
 
-    @application.get(
-        "/api/projects/{project_id}", response_model=ProjectView | DemoResearchResult
-    )
+    @application.get("/api/projects/{project_id}", response_model=ProjectView | DemoResearchResult)
     def get_project(project_id: str) -> ProjectView | DemoResearchResult:
         if project_id in demo_projects:
             return demo_projects[project_id]
@@ -121,13 +131,41 @@ def create_app(
         except TransitionError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 
-    @application.get(
-        "/api/execution-targets", response_model=tuple[ExecutionTargetCapability, ...]
-    )
+    @application.get("/api/execution-targets", response_model=tuple[ExecutionTargetCapability, ...])
     def list_execution_targets() -> tuple[ExecutionTargetCapability, ...]:
-        return tuple(target.doctor() for target in execution_targets)
+        return tuple(target.doctor() for target in configured_targets)
 
     return application
+
+
+def build_execution_targets(
+    settings: AppSettings,
+    transport_factory: Callable[[NodeSettings], SSHTransport] = SSHTransport,
+) -> tuple[ExecutionTargetAdapter, ...]:
+    workstation = settings.workstation
+    if not workstation.hosts or not workstation.username or not workstation.known_hosts_file:
+        return ()
+    candidates = tuple(
+        (
+            f"candidate-{index}",
+            transport_factory(
+                NodeSettings(
+                    host=host,
+                    username=workstation.username,
+                    port=workstation.port,
+                    identity_file=workstation.identity_file,
+                    known_hosts_file=workstation.known_hosts_file,
+                )
+            ),
+        )
+        for index, host in enumerate(workstation.hosts, start=1)
+    )
+    return (
+        WorkstationOpenFOAMTarget(
+            target_id="workstation-openfoam",
+            candidates=candidates,
+        ),
+    )
 
 
 app = create_app()
