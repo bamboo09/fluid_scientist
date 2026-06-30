@@ -27,6 +27,13 @@ class SimulationResult:
     artifact_id: str
 
 
+@dataclass(frozen=True)
+class StoredWorkflow:
+    project_id: str
+    snapshot: str
+    version: int
+
+
 class LLMProvider(Protocol):
     def interpret(self, question: str) -> ResearchSpec: ...
 
@@ -67,7 +74,9 @@ class ArtifactStore(Protocol):
 
 
 class WorkflowRepository(Protocol):
-    def save(self, project_id: str, snapshot: str) -> None: ...
+    def save_snapshot(
+        self, project_id: str, snapshot: str, *, expected_version: int
+    ) -> int: ...
 
-    def load(self, project_id: str) -> str | None: ...
+    def load_snapshot(self, project_id: str) -> StoredWorkflow | None: ...
 
