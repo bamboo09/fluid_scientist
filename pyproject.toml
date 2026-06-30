@@ -27,8 +27,14 @@ dev = [
   "ruff>=0.6,<1",
 ]
 
+[project.scripts]
+fluid-worker = "fluid_scientist.worker.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"fluid_scientist.templates.openfoam13.laminar_pipe" = ["0/*", "constant/*", "system/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

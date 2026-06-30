@@ -1,5 +1,6 @@
 import pytest
 
+from fluid_scientist.adapters.openfoam import LaminarPipeCase, OpenFOAM13CaseRenderer
 from fluid_scientist.adapters.openfoam_parsers import (
     OpenFOAMFailure,
     hagen_poiseuille_pressure_drop,
@@ -70,3 +71,64 @@ def test_hagen_poiseuille_benchmark_and_relative_error() -> None:
 
     assert analytical == pytest.approx(16.0)
     assert relative_error_percent(15.84, analytical) == pytest.approx(1.0)
+
+
+def test_openfoam13_renderer_builds_a_complete_laminar_pipe_case(tmp_path) -> None:
+    renderer = OpenFOAM13CaseRenderer(tmp_path)
+    spec = LaminarPipeCase(
+        diameter_m=0.02,
+        length_m=2.0,
+        mean_velocity_m_s=0.1,
+        kinematic_viscosity_m2_s=1.0e-6,
+        axial_cells=100,
+        radial_cells=12,
+    )
+
+    manifest = renderer.render("pipe-study-001", spec)
+
+    expected = {
+        "0/U",
+        "0/p",
+        "constant/momentumTransport",
+        "constant/physicalProperties",
+        "system/blockMeshDict",
+        "system/controlDict",
+        "system/fvSchemes",
+        "system/fvSolution",
+    }
+    assert set(manifest.files) == expected
+    assert all(len(digest) == 64 for digest in manifest.files.values())
+    case_root = tmp_path / "pipe-study-001"
+    assert "solver          incompressibleFluid;" in (case_root / "system/controlDict").read_text()
+    control = (case_root / "system/controlDict").read_text()
+    assert "type            fieldValueDelta;" in control
+    assert "patch           inlet;" in control
+    assert "patch           outlet;" in control
+    assert "fields          (phi);" in control
+    assert "simulationType laminar;" in (case_root / "constant/momentumTransport").read_text()
+    assert "1e-06" in (case_root / "constant/physicalProperties").read_text()
+    assert "(100 12 12)" in (case_root / "system/blockMeshDict").read_text()
+    assert "uniform (0.1 0 0)" in (case_root / "0/U").read_text()
+
+
+def test_openfoam13_renderer_rejects_unsafe_case_id(tmp_path) -> None:
+    renderer = OpenFOAM13CaseRenderer(tmp_path)
+    spec = LaminarPipeCase(
+        diameter_m=0.02,
+        length_m=2.0,
+        mean_velocity_m_s=0.1,
+        kinematic_viscosity_m2_s=1.0e-6,
+    )
+
+    with pytest.raises(ValueError, match="case id"):
+        renderer.render("../outside", spec)
+
+
+def test_laminar_pipe_case_enforces_laminar_regime() -> None:
+    with pytest.raises(ValueError, match="laminar"):
+        LaminarPipeCase(
+            diameter_m=0.1,
+            length_m=1.0,
+            mean_velocity_m_s=1.0,
+            kinematic_viscosity_m2_s=1.0e-6,
+        )

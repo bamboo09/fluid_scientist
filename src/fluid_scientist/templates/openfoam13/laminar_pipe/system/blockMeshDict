@@ -1,0 +1,61 @@
+FoamFile
+{
+    format      ascii;
+    class       dictionary;
+    object      blockMeshDict;
+}
+convertToMeters 1;
+halfAngle 5;
+radius {{radius}};
+length {{length}};
+radHalfAngle #calc "degToRad($halfAngle)";
+y #calc "$radius*sin($radHalfAngle)";
+z #calc "$radius*cos($radHalfAngle)";
+vertices
+(
+    (0 0 0)
+    ($length 0 0)
+    ($length 0 0)
+    (0 0 0)
+    (0 #neg $y $z)
+    ($length #neg $y $z)
+    ($length $y $z)
+    (0 $y $z)
+);
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) ({{axial_cells}} {{radial_cells}} {{radial_cells}}) simpleGrading (1 1 1)
+);
+edges
+(
+    arc 4 7 (0 0 $radius)
+    arc 5 6 ($length 0 $radius)
+);
+boundary
+(
+    inlet
+    {
+        type patch;
+        faces ((0 4 7 3));
+    }
+    outlet
+    {
+        type patch;
+        faces ((1 2 6 5));
+    }
+    side1
+    {
+        type wedge;
+        faces ((0 1 5 4));
+    }
+    side2
+    {
+        type wedge;
+        faces ((7 6 2 3));
+    }
+    walls
+    {
+        type wall;
+        faces ((4 5 6 7) (3 2 1 0));
+    }
+);

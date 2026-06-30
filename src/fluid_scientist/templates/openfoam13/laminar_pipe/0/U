@@ -1,0 +1,27 @@
+FoamFile
+{
+    format      ascii;
+    class       volVectorField;
+    location    "0";
+    object      U;
+}
+dimensions      [0 1 -1 0 0 0 0];
+internalField   uniform ({{velocity}} 0 0);
+boundaryField
+{
+    #includeEtc "caseDicts/setConstraintTypes"
+    inlet
+    {
+        type            fixedValue;
+        value           uniform ({{velocity}} 0 0);
+    }
+    outlet
+    {
+        type            pressureInletOutletVelocity;
+        value           $internalField;
+    }
+    walls
+    {
+        type            noSlip;
+    }
+}

@@ -4,6 +4,7 @@ import json
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from fluid_scientist.adapters.openfoam import LaminarPipeCase
 from fluid_scientist.execution.ssh import (
     RemoteArg,
     RemoteExecutionError,
@@ -11,6 +12,7 @@ from fluid_scientist.execution.ssh import (
     SSHTransport,
 )
 from fluid_scientist.execution_targets.base import ExecutionTargetCapability
+from fluid_scientist.worker.service import JobRecord
 
 
 class WorkerDoctor(BaseModel):
@@ -37,6 +39,7 @@ class WorkstationOpenFOAMTarget:
         self.target_id = target_id
         self._candidates = candidates
         self._doctor_timeout = doctor_timeout
+        self._selected_transport: SSHTransport | None = None
 
     def doctor(self) -> ExecutionTargetCapability:
         reasons: list[str] = []
@@ -54,6 +57,7 @@ class WorkstationOpenFOAMTarget:
             if doctor.protocol_version != self.protocol_version:
                 reasons.append(f"{label}: worker protocol mismatch")
                 continue
+            self._selected_transport = transport
             return ExecutionTargetCapability(
                 target_id=self.target_id,
                 kind="workstation_openfoam",
@@ -72,3 +76,53 @@ class WorkstationOpenFOAMTarget:
             available=False,
             reason="; ".join(reasons) or "no workstation candidates configured",
         )
+
+    def submit(self, job_id: str, spec: LaminarPipeCase) -> JobRecord:
+        args = (
+            RemoteArg("submit"),
+            RemoteArg("--job-id"),
+            RemoteArg(job_id),
+            RemoteArg("--diameter"),
+            RemoteArg(_number(spec.diameter_m)),
+            RemoteArg("--length"),
+            RemoteArg(_number(spec.length_m)),
+            RemoteArg("--velocity"),
+            RemoteArg(_number(spec.mean_velocity_m_s)),
+            RemoteArg("--nu"),
+            RemoteArg(_number(spec.kinematic_viscosity_m2_s)),
+            RemoteArg("--axial-cells"),
+            RemoteArg(str(spec.axial_cells)),
+            RemoteArg("--radial-cells"),
+            RemoteArg(str(spec.radial_cells)),
+            RemoteArg("--json"),
+        )
+        return self._job_command(args)
+
+    def status(self, job_id: str) -> JobRecord:
+        return self._job_command(
+            (RemoteArg("status"), RemoteArg(job_id), RemoteArg("--json"))
+        )
+
+    def cancel(self, job_id: str) -> JobRecord:
+        return self._job_command(
+            (RemoteArg("cancel"), RemoteArg(job_id), RemoteArg("--json"))
+        )
+
+    def _job_command(self, args: tuple[RemoteArg, ...]) -> JobRecord:
+        transport = self._transport()
+        result = transport.execute(RemoteProgram.FLUID_WORKER, args, timeout=self._doctor_timeout)
+        try:
+            return JobRecord.model_validate_json(result.stdout)
+        except ValidationError as error:
+            raise RemoteExecutionError("fluid-worker returned an invalid job response") from error
+
+    def _transport(self) -> SSHTransport:
+        if self._selected_transport is None:
+            capability = self.doctor()
+            if not capability.available or self._selected_transport is None:
+                raise RemoteExecutionError(capability.reason or "workstation is unavailable")
+        return self._selected_transport
+
+
+def _number(value: float) -> str:
+    return f"{value:.12g}"
