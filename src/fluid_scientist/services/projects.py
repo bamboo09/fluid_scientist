@@ -6,7 +6,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict
 
 from fluid_scientist.domain.models import Approval
-from fluid_scientist.orchestration.workflow import ResearchWorkflow
+from fluid_scientist.orchestration.workflow import ResearchWorkflow, TransitionError
 from fluid_scientist.ports import WorkflowRepository
 
 
@@ -29,9 +29,7 @@ class ProjectService:
         project_id = str(uuid4())
         workflow = ResearchWorkflow(project_id)
         workflow.transition("INTERPRET", actor=actor, payload={"question": question})
-        version = self._repository.save_snapshot(
-            project_id, workflow.to_json(), expected_version=0
-        )
+        version = self._repository.save_snapshot(project_id, workflow.to_json(), expected_version=0)
         for event in workflow.state.audit_events:
             self._repository.append_audit_event(project_id, event)
         return self._view(workflow, version)
@@ -53,9 +51,7 @@ class ProjectService:
         workflow, version = self._load(project_id)
         event_count = len(workflow.state.audit_events)
         if decision == "approve":
-            approval = workflow.approve(
-                gate, approved_by=actor, subject_version=subject_version
-            )
+            approval = workflow.approve(gate, approved_by=actor, subject_version=subject_version)
             self._repository.record_approval(project_id, approval)
         else:
             workflow.reject(
@@ -74,6 +70,46 @@ class ProjectService:
         workflow, version = self._load(project_id)
         event_count = len(workflow.state.audit_events)
         workflow.transition(action, actor=actor)
+        new_version = self._repository.save_snapshot(
+            project_id, workflow.to_json(), expected_version=version
+        )
+        self._persist_new_events(project_id, workflow, event_count)
+        return self._view(workflow, new_version)
+
+    def prepare_pilot_submission(self, project_id: str, case_id: str) -> str | None:
+        workflow, _ = self._load(project_id)
+        existing = workflow.state.external_jobs.get(case_id)
+        if existing is not None:
+            return existing
+        if workflow.state.name != "PILOT_READY":
+            raise TransitionError(f"pilot submission is not allowed from {workflow.state.name}")
+        if "GATE_2" not in workflow.state.approvals:
+            raise TransitionError("GATE_2 approval is required before pilot submission")
+        return None
+
+    def record_pilot_submission(
+        self,
+        project_id: str,
+        *,
+        case_id: str,
+        job_id: str,
+        target_id: str,
+        actor: str,
+    ) -> ProjectView:
+        workflow, version = self._load(project_id)
+        event_count = len(workflow.state.audit_events)
+        existing = workflow.state.external_jobs.get(case_id)
+        if existing is not None:
+            if existing != job_id:
+                raise TransitionError(f"{case_id} is already bound to external job {existing}")
+            return self._view(workflow, version)
+        workflow.transition(
+            "SUBMIT_PILOT",
+            actor=actor,
+            payload={"target_id": target_id, "case_id": case_id, "job_id": job_id},
+        )
+        workflow.record_external_job(case_id, job_id)
+        self._repository.bind_external_job(project_id, case_id, job_id)
         new_version = self._repository.save_snapshot(
             project_id, workflow.to_json(), expected_version=version
         )

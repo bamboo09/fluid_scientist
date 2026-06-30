@@ -10,18 +10,23 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
 from fluid_scientist.adapters.fakes import build_demo_service
+from fluid_scientist.adapters.openfoam import LaminarPipeCase
 from fluid_scientist.adapters.sql_repository import SQLWorkflowRepository
-from fluid_scientist.execution.ssh import SSHTransport
+from fluid_scientist.execution.ssh import RemoteExecutionError, SSHTransport
 from fluid_scientist.execution_targets.base import (
     ExecutionTargetAdapter,
     ExecutionTargetCapability,
 )
-from fluid_scientist.execution_targets.workstation import WorkstationOpenFOAMTarget
+from fluid_scientist.execution_targets.workstation import (
+    WorkerCollection,
+    WorkstationOpenFOAMTarget,
+)
 from fluid_scientist.orchestration.workflow import TransitionError
 from fluid_scientist.ports import WorkflowRepository
 from fluid_scientist.services.projects import ProjectService, ProjectView
 from fluid_scientist.services.research import DemoResearchResult
 from fluid_scientist.settings import AppSettings, NodeSettings
+from fluid_scientist.worker.service import JobRecord
 
 ROOT = Path(__file__).resolve().parents[3]
 WEB_ROOT = ROOT / "apps" / "web"
@@ -52,6 +57,20 @@ class ActionRequest(StrictRequest):
     actor: str = Field(default="system", min_length=1, max_length=128)
 
 
+class BenchmarkSubmissionRequest(StrictRequest):
+    target_id: str = Field(min_length=1, max_length=128)
+    case_id: str = Field(default="pilot-pipe", pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    case: LaminarPipeCase
+    actor: str = Field(default="researcher", min_length=1, max_length=128)
+
+
+class BenchmarkSubmissionView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: ProjectView
+    job: JobRecord
+
+
 def create_app(
     repository: WorkflowRepository | None = None,
     execution_targets: tuple[ExecutionTargetAdapter, ...] | None = None,
@@ -70,6 +89,7 @@ def create_app(
     )
     application.mount("/assets", StaticFiles(directory=WEB_ROOT), name="assets")
     application.state.execution_targets = configured_targets
+    target_registry = {target.target_id: target for target in configured_targets}
     project_service = ProjectService(repository or SQLWorkflowRepository("sqlite://"))
     demo_projects: dict[str, DemoResearchResult] = {}
 
@@ -131,6 +151,77 @@ def create_app(
         except TransitionError as error:
             raise HTTPException(status_code=409, detail=str(error)) from error
 
+    @application.post(
+        "/api/projects/{project_id}/benchmarks",
+        response_model=BenchmarkSubmissionView,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def submit_benchmark(
+        project_id: str, request: BenchmarkSubmissionRequest
+    ) -> BenchmarkSubmissionView:
+        target = target_registry.get(request.target_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="execution target not found")
+        try:
+            existing = project_service.prepare_pilot_submission(project_id, request.case_id)
+            submit = getattr(target, "submit", None)
+            status_method = getattr(target, "status", None)
+            if not callable(submit) or not callable(status_method):
+                raise ValueError("execution target does not support benchmark jobs")
+            job_id = existing or f"{project_id}-{request.case_id}"
+            job = status_method(job_id) if existing else submit(job_id, request.case)
+            project = project_service.record_pilot_submission(
+                project_id,
+                case_id=request.case_id,
+                job_id=job.job_id,
+                target_id=request.target_id,
+                actor=request.actor,
+            )
+            return BenchmarkSubmissionView(project=project, job=job)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="project not found") from error
+        except TransitionError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except RemoteExecutionError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
+    @application.get(
+        "/api/projects/{project_id}/benchmarks/{case_id}", response_model=JobRecord
+    )
+    def benchmark_status(project_id: str, case_id: str, target_id: str) -> JobRecord:
+        target, job_id = _bound_benchmark(
+            project_service, target_registry, project_id, case_id, target_id
+        )
+        status_method = getattr(target, "status", None)
+        if not callable(status_method):
+            raise HTTPException(status_code=422, detail="execution target has no job status")
+        try:
+            return status_method(job_id)
+        except RemoteExecutionError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
+    @application.get(
+        "/api/projects/{project_id}/benchmarks/{case_id}/results",
+        response_model=WorkerCollection,
+    )
+    def benchmark_results(
+        project_id: str, case_id: str, target_id: str
+    ) -> WorkerCollection:
+        target, job_id = _bound_benchmark(
+            project_service, target_registry, project_id, case_id, target_id
+        )
+        collect = getattr(target, "collect", None)
+        if not callable(collect):
+            raise HTTPException(
+                status_code=422, detail="execution target has no result collection"
+            )
+        try:
+            return collect(job_id)
+        except RemoteExecutionError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
     @application.get("/api/execution-targets", response_model=tuple[ExecutionTargetCapability, ...])
     def list_execution_targets() -> tuple[ExecutionTargetCapability, ...]:
         return tuple(target.doctor() for target in configured_targets)
@@ -166,6 +257,24 @@ def build_execution_targets(
             candidates=candidates,
         ),
     )
+
+
+def _bound_benchmark(
+    project_service: ProjectService,
+    target_registry: dict[str, ExecutionTargetAdapter],
+    project_id: str,
+    case_id: str,
+    target_id: str,
+) -> tuple[ExecutionTargetAdapter, str]:
+    target = target_registry.get(target_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="execution target not found")
+    try:
+        project = project_service.get(project_id)
+        job_id = project.external_jobs[case_id]
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="benchmark job not found") from error
+    return target, job_id
 
 
 app = create_app()

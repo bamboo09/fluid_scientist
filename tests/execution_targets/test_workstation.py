@@ -135,3 +135,39 @@ def test_status_and_cancel_use_job_id_as_typed_argument() -> None:
     assert target.cancel("benchmark-001").state.value == "cancelled"
     assert transport.calls[1][1] == ("status", "benchmark-001", "--json")
     assert transport.calls[2][1] == ("cancel", "benchmark-001", "--json")
+
+
+def test_collect_validates_remote_credibility_payload() -> None:
+    collected = {
+        "job_id": "benchmark-001",
+        "state": "succeeded",
+        "mesh": {
+            "passed": True,
+            "cells": 8000,
+            "max_aspect_ratio": 2.0,
+            "max_non_orthogonality": 3.0,
+            "average_non_orthogonality": 0.5,
+            "max_skewness": 0.2,
+        },
+        "solver": {
+            "completed": True,
+            "final_residuals": {"Ux": 1e-8},
+            "global_continuity_error": 2e-10,
+            "cumulative_continuity_error": 3e-9,
+            "inlet_mass_flow": None,
+            "outlet_mass_flow": None,
+            "pressure_drop_pa": None,
+        },
+        "case_manifest": {"system/controlDict": "a" * 64},
+    }
+    transport = SequenceTransport((capability(), collected))
+    target = WorkstationOpenFOAMTarget(
+        target_id="workstation-openfoam",
+        candidates=(("primary", transport),),
+    )
+
+    result = target.collect("benchmark-001")
+
+    assert result.mesh.cells == 8000
+    assert result.solver.completed is True
+    assert transport.calls[1][1] == ("collect", "benchmark-001", "--json")

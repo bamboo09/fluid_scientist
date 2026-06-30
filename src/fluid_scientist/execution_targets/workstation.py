@@ -26,6 +26,39 @@ class WorkerDoctor(BaseModel):
     commands: tuple[str, ...]
 
 
+class WorkerMeshResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    passed: bool
+    cells: int
+    max_aspect_ratio: float
+    max_non_orthogonality: float
+    average_non_orthogonality: float
+    max_skewness: float
+
+
+class WorkerSolverResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    completed: bool
+    final_residuals: dict[str, float]
+    global_continuity_error: float | None
+    cumulative_continuity_error: float | None
+    inlet_mass_flow: float | None
+    outlet_mass_flow: float | None
+    pressure_drop_pa: float | None
+
+
+class WorkerCollection(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    job_id: str
+    state: str
+    mesh: WorkerMeshResult
+    solver: WorkerSolverResult
+    case_manifest: dict[str, str]
+
+
 class WorkstationOpenFOAMTarget:
     protocol_version = 1
 
@@ -107,6 +140,20 @@ class WorkstationOpenFOAMTarget:
         return self._job_command(
             (RemoteArg("cancel"), RemoteArg(job_id), RemoteArg("--json"))
         )
+
+    def collect(self, job_id: str) -> WorkerCollection:
+        transport = self._transport()
+        result = transport.execute(
+            RemoteProgram.FLUID_WORKER,
+            (RemoteArg("collect"), RemoteArg(job_id), RemoteArg("--json")),
+            timeout=self._doctor_timeout,
+        )
+        try:
+            return WorkerCollection.model_validate_json(result.stdout)
+        except ValidationError as error:
+            raise RemoteExecutionError(
+                "fluid-worker returned an invalid collection response"
+            ) from error
 
     def _job_command(self, args: tuple[RemoteArg, ...]) -> JobRecord:
         transport = self._transport()
