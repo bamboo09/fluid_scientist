@@ -9,8 +9,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime
-from enum import StrEnum
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -18,6 +17,7 @@ from pydantic import BaseModel, ConfigDict
 
 from fluid_scientist.adapters.openfoam import LaminarPipeCase, OpenFOAM13CaseRenderer
 from fluid_scientist.adapters.openfoam_parsers import parse_check_mesh, parse_solver_log
+from fluid_scientist.compat import UTC, StrEnum
 
 REQUIRED_COMMANDS = ("blockMesh", "checkMesh", "foamRun", "postProcess")
 
@@ -323,19 +323,28 @@ def _latest_function_value(function_root: Path) -> float:
 
 def system_doctor(work_root: Path) -> DoctorReport:
     command_paths = {name: shutil.which(name) or "" for name in REQUIRED_COMMANDS}
-    foam_version = subprocess.run(
-        ("foamVersion",),
-        capture_output=True,
-        text=True,
-        timeout=10,
-        check=False,
-    )
-    if foam_version.returncode != 0:
-        raise RuntimeError("foamVersion failed")
+    project_version = os.environ.get("WM_PROJECT_VERSION", "").strip()
+    if project_version:
+        foam_version_output = (
+            project_version
+            if project_version.startswith("OpenFOAM-")
+            else f"OpenFOAM-{project_version}"
+        )
+    else:
+        foam_version = subprocess.run(
+            ("foamVersion",),
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if foam_version.returncode != 0:
+            raise RuntimeError("foamVersion failed")
+        foam_version_output = foam_version.stdout
     usage = shutil.disk_usage(work_root)
     return build_doctor_report(
         command_paths=command_paths,
-        foam_version_output=foam_version.stdout,
+        foam_version_output=foam_version_output,
         cpu_count=os.cpu_count() or 1,
         memory_gb=_memory_bytes() / 1024**3,
         disk_free_gb=usage.free / 1024**3,

@@ -1,12 +1,13 @@
 """SQLAlchemy-backed workflow repository for SQLite and PostgreSQL."""
 
 import json
-from datetime import UTC, datetime
+from datetime import datetime
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from fluid_scientist.compat import UTC
 from fluid_scientist.db import (
     ApprovalRow,
     AuditEventRow,

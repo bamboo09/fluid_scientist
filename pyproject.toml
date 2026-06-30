@@ -7,7 +7,7 @@ name = "fluid-scientist"
 version = "0.1.0"
 description = "Evidence-grounded fluid mechanics research agent"
 readme = "README.md"
-requires-python = ">=3.11"
+requires-python = ">=3.10"
 dependencies = [
   "fastapi>=0.115,<0.116",
   "numpy>=2,<3",
@@ -41,7 +41,7 @@ testpaths = ["tests"]
 addopts = "--strict-markers --import-mode=importlib"
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py310"
 line-length = 100
 
 [tool.ruff.lint]

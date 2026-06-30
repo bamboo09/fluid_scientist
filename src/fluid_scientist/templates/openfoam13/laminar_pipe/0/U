@@ -12,7 +12,23 @@ boundaryField
     #includeEtc "caseDicts/setConstraintTypes"
     inlet
     {
-        type            fixedValue;
+        type            codedFixedValue;
+        name            fullyDevelopedPipeInlet;
+        code
+        #{
+            const vectorField& centres = patch().Cf();
+            vectorField profile(centres.size(), vector::zero);
+            const scalar radius = {{radius}};
+            const scalar meanVelocity = {{velocity}};
+            forAll(centres, facei)
+            {
+                const scalar radialSquared =
+                    sqr(centres[facei].y()) + sqr(centres[facei].z());
+                profile[facei].x() =
+                    2.0*meanVelocity*(1.0 - radialSquared/sqr(radius));
+            }
+            operator==(profile);
+        #};
         value           uniform ({{velocity}} 0 0);
     }
     outlet

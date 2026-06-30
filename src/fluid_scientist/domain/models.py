@@ -1,10 +1,11 @@
 """Strict domain models for research planning, execution, and reporting."""
 
 from datetime import datetime
-from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from fluid_scientist.compat import StrEnum
 
 
 class StrictModel(BaseModel):

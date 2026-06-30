@@ -2,8 +2,9 @@
 
 import re
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import PurePosixPath
+
+from fluid_scientist.compat import StrEnum
 
 
 class UnsafeValueError(ValueError):

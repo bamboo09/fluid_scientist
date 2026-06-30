@@ -3,10 +3,10 @@
 import re
 import subprocess
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from typing import Protocol
 
+from fluid_scientist.compat import StrEnum
 from fluid_scientist.settings import NodeSettings
 
 

@@ -1,11 +1,12 @@
 """Explicit workflow transitions with approval and idempotency guards."""
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from fluid_scientist.compat import UTC
 from fluid_scientist.domain.models import Approval, AuditEvent
 
 

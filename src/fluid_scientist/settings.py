@@ -1,9 +1,9 @@
 """Typed application configuration with explicit real-integration requirements."""
 
-from enum import StrEnum
-
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from fluid_scientist.compat import StrEnum
 
 
 class AppMode(StrEnum):

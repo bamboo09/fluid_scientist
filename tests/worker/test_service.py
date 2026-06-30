@@ -9,6 +9,7 @@ from fluid_scientist.worker.service import (
     WorkerJobService,
     build_doctor_report,
     extract_surface_metrics,
+    system_doctor,
 )
 
 
@@ -44,6 +45,20 @@ def test_doctor_report_identifies_foundation_13_and_fixed_commands(tmp_path) -> 
         "disk_free_gb": 430.25,
         "commands": ["blockMesh", "checkMesh", "foamRun", "postProcess"],
     }
+
+
+def test_system_doctor_uses_foundation_version_environment(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("WM_PROJECT_VERSION", "13")
+    monkeypatch.setattr(
+        "fluid_scientist.worker.service.shutil.which",
+        lambda command: f"/opt/openfoam13/bin/{command}",
+    )
+
+    report = system_doctor(tmp_path)
+
+    assert report.foam_version == "OpenFOAM-13"
 
 
 def test_openfoam_job_runner_uses_only_fixed_argv(tmp_path) -> None:

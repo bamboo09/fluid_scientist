@@ -112,7 +112,19 @@ def test_openfoam13_renderer_builds_a_complete_laminar_pipe_case(tmp_path) -> No
     assert "simulationType laminar;" in (case_root / "constant/momentumTransport").read_text()
     assert "1e-06" in (case_root / "constant/physicalProperties").read_text()
     assert "(100 12 12)" in (case_root / "system/blockMeshDict").read_text()
-    assert "uniform (0.1 0 0)" in (case_root / "0/U").read_text()
+    block_mesh = (case_root / "system/blockMeshDict").read_text()
+    assert block_mesh.count("type cyclic;") == 2
+    assert "neighbourPatch side2;" in block_mesh
+    assert "neighbourPatch side1;" in block_mesh
+    assert "bounded Gauss limitedLinearV 1" in (
+        case_root / "system/fvSchemes"
+    ).read_text()
+    inlet_velocity = (case_root / "0/U").read_text()
+    assert "type            codedFixedValue;" in inlet_velocity
+    assert "name            fullyDevelopedPipeInlet;" in inlet_velocity
+    assert "const scalar radius = 0.01;" in inlet_velocity
+    assert "const scalar meanVelocity = 0.1;" in inlet_velocity
+    assert "2.0*meanVelocity" in inlet_velocity
 
 
 def test_openfoam13_renderer_rejects_unsafe_case_id(tmp_path) -> None:

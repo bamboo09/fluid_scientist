@@ -1,9 +1,9 @@
 """Recoverable Slurm adapter over the typed SSH transport."""
 
 import re
-from enum import StrEnum
 from typing import Protocol
 
+from fluid_scientist.compat import StrEnum
 from fluid_scientist.execution.ssh import RemoteArg, RemoteProgram, SSHTransport
 
 
