@@ -49,6 +49,16 @@ def test_check_mesh_rejects_failed_mesh() -> None:
         parse_check_mesh("Failed 1 mesh checks.\nnegative volume cells: 2")
 
 
+def test_check_mesh_can_collect_metrics_from_a_failed_quality_report() -> None:
+    report = CHECK_MESH_OK.replace("Mesh OK.", "Failed 1 mesh checks.")
+
+    result = parse_check_mesh(report, require_passed=False)
+
+    assert result.passed is False
+    assert result.cells == 12_000
+    assert result.max_non_orthogonality == pytest.approx(18)
+
+
 def test_solver_parser_extracts_credibility_inputs() -> None:
     result = parse_solver_log(SOLVER_LOG)
 

@@ -39,9 +39,14 @@ def _required(pattern: str, text: str, name: str) -> re.Match[str]:
     return match
 
 
-def parse_check_mesh(text: str) -> CheckMeshResult:
+def parse_check_mesh(text: str, *, require_passed: bool = True) -> CheckMeshResult:
     lower = text.lower()
-    if "mesh ok" not in lower or "failed" in lower or "negative volume" in lower:
+    passed = (
+        "mesh ok" in lower
+        and "failed" not in lower
+        and "negative volume" not in lower
+    )
+    if require_passed and not passed:
         raise OpenFOAMFailure("mesh quality checks failed")
     cells = int(_required(r"cells:\s*([0-9]+)", text, "cell count").group(1))
     aspect = float(
@@ -56,7 +61,7 @@ def parse_check_mesh(text: str) -> CheckMeshResult:
         _required(rf"Max skewness\s*=\s*({_NUMBER})", text, "skewness").group(1)
     )
     return CheckMeshResult(
-        passed=True,
+        passed=passed,
         cells=cells,
         max_aspect_ratio=aspect,
         max_non_orthogonality=float(non_orthogonal.group(1)),

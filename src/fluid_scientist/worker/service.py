@@ -332,7 +332,10 @@ class WorkerJobService:
             ),
             key=float,
         )
-        mesh = parse_check_mesh((job_root / "checkMesh.log").read_text(encoding="utf-8"))
+        mesh = parse_check_mesh(
+            (job_root / "checkMesh.log").read_text(encoding="utf-8"),
+            require_passed=False,
+        )
         solver = parse_solver_log((job_root / "solver.log").read_text(encoding="utf-8"))
         return {
             "job_id": job_id,
