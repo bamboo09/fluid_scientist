@@ -4,7 +4,15 @@ from collections.abc import Callable
 from enum import Enum
 from typing import Annotated, Literal, TypeVar
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, RootModel, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    RootModel,
+    StringConstraints,
+    model_validator,
+)
 
 TupleItem = TypeVar("TupleItem")
 
@@ -15,7 +23,18 @@ def _json_list_to_tuple(value: object) -> object:
     return tuple(value) if isinstance(value, list) else value
 
 
+def _strip_string(value: object) -> object:
+    """Normalize provider whitespace without coercing non-string values."""
+
+    return value.strip() if isinstance(value, str) else value
+
+
 JsonTuple = Annotated[tuple[TupleItem, ...], BeforeValidator(_json_list_to_tuple)]
+NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+NarrativeText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=10)]
+ExperimentName = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)
+]
 
 
 class StrictModel(BaseModel):
@@ -96,18 +115,24 @@ class CavityOutput(str, Enum):
     RESIDUALS = "residuals"
 
 
-PipeOutputValue = Annotated[PipeOutput, Field(strict=False)]
-CylinderOutputValue = Annotated[CylinderOutput, Field(strict=False)]
-CavityOutputValue = Annotated[CavityOutput, Field(strict=False)]
+PipeOutputValue = Annotated[
+    PipeOutput, Field(strict=False), BeforeValidator(_strip_string)
+]
+CylinderOutputValue = Annotated[
+    CylinderOutput, Field(strict=False), BeforeValidator(_strip_string)
+]
+CavityOutputValue = Annotated[
+    CavityOutput, Field(strict=False), BeforeValidator(_strip_string)
+]
 
 
 class PlanBase(StrictModel):
-    experiment_name: str = Field(min_length=1, max_length=80)
-    objective: str = Field(min_length=10)
-    rationale: str = Field(min_length=10)
-    assumptions: JsonTuple[str] = Field(min_length=1)
-    limitations: JsonTuple[str] = Field(min_length=1)
-    requested_outputs: JsonTuple[str] = Field(min_length=1)
+    experiment_name: ExperimentName
+    objective: NarrativeText
+    rationale: NarrativeText
+    assumptions: JsonTuple[NonEmptyText] = Field(min_length=1)
+    limitations: JsonTuple[NonEmptyText] = Field(min_length=1)
+    requested_outputs: JsonTuple[NonEmptyText] = Field(min_length=1)
     convergence_targets: ConvergenceTargets
 
 
@@ -175,9 +200,13 @@ class CylinderFlowCase(StrictModel):
     def require_consistent_transient_specification(self) -> "CylinderFlowCase":
         if (self.time_step_s is None) == (self.max_courant is None):
             raise ValueError("provide exactly one of time_step_s or max_courant")
+        if self.time_step_s is not None and self.time_step_s > self.end_time_s:
+            raise ValueError("time_step_s cannot exceed end_time_s")
         calculated = (
             self.mean_velocity_m_s * self.diameter_m / self.kinematic_viscosity_m2_s
         )
+        if calculated > 300.0:
+            raise ValueError("calculated Reynolds number cannot exceed 300")
         relative_error = abs(calculated - self.reynolds_number) / self.reynolds_number
         if relative_error > 0.01:
             raise ValueError(
@@ -254,14 +283,22 @@ class CavityExperimentPlan(PlanBase):
         return self
 
 
-CustomOutput = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")]
+CustomOutput = Annotated[
+    str,
+    StringConstraints(
+        strip_whitespace=True,
+        min_length=2,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    ),
+]
 
 
 class CustomOpenFOAMCase(StrictModel):
-    geometry: str = Field(min_length=10)
-    boundary_conditions: JsonTuple[str] = Field(min_length=2)
-    mesh_strategy: str = Field(min_length=10)
-    run_strategy: str = Field(min_length=10)
+    geometry: NarrativeText
+    boundary_conditions: JsonTuple[NonEmptyText] = Field(min_length=2)
+    mesh_strategy: NarrativeText
+    run_strategy: NarrativeText
 
 
 class CustomExperimentPlan(PlanBase):
@@ -281,10 +318,3 @@ PlanVariant = Annotated[
 
 class ExperimentPlan(RootModel[PlanVariant]):
     """Discriminated provider-neutral experiment plan root."""
-
-
-# Descriptive aliases retained for callers that prefer geometry-first names.
-LaminarPipePlan = PipeExperimentPlan
-CylinderFlowPlan = CylinderExperimentPlan
-LidDrivenCavityPlan = CavityExperimentPlan
-CustomOpenFOAMPlan = CustomExperimentPlan
