@@ -1,9 +1,12 @@
 """OpenFOAM workstation target backed by the fixed fluid-worker protocol."""
 
 import json
+import tempfile
+from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from fluid_scientist.adapters.custom_openfoam import validate_custom_case_archive
 from fluid_scientist.adapters.openfoam import LaminarPipeCase
 from fluid_scientist.execution.ssh import (
     RemoteArg,
@@ -141,6 +144,29 @@ class WorkstationOpenFOAMTarget:
             RemoteArg("--json"),
         )
         return self._job_command(args)
+
+    def submit_custom(self, job_id: str, archive: bytes) -> JobRecord:
+        validate_custom_case_archive(archive)
+        transport = self._transport()
+        remote_name = f"{job_id}.tar.gz"
+        with tempfile.TemporaryDirectory(prefix="fluid-scientist-") as directory:
+            local_archive = Path(directory) / remote_name
+            local_archive.write_bytes(archive)
+            transport.upload_incoming(
+                local_archive,
+                remote_name,
+                timeout=max(self._doctor_timeout, 120.0),
+            )
+        return self._job_command(
+            (
+                RemoteArg("submit-custom"),
+                RemoteArg("--job-id"),
+                RemoteArg(job_id),
+                RemoteArg("--archive"),
+                RemoteArg(remote_name),
+                RemoteArg("--json"),
+            )
+        )
 
     def status(self, job_id: str) -> JobRecord:
         return self._job_command((RemoteArg("status"), RemoteArg(job_id), RemoteArg("--json")))

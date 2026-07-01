@@ -1,4 +1,6 @@
+import io
 import re
+import tarfile
 
 from fastapi.testclient import TestClient
 
@@ -8,7 +10,7 @@ from fluid_scientist.api.app import create_app
 from fluid_scientist.execution_targets.base import ExecutionTargetCapability
 from fluid_scientist.execution_targets.workstation import WorkerCollection
 from fluid_scientist.settings import AppSettings
-from fluid_scientist.worker.service import JobRecord, JobState
+from fluid_scientist.worker.service import CustomCaseSpec, JobRecord, JobState
 
 
 class StaticTarget:
@@ -264,3 +266,69 @@ def test_bound_benchmark_exposes_status_and_collected_results(tmp_path) -> None:
     assert results["collection"]["mesh"]["cells"] == 8000
     assert results["validation"]["passed"] is True
     assert results["project"]["workflow_state"] == "PILOT_VERIFIED"
+
+
+class CustomCaseTarget(BenchmarkTarget):
+    def submit_custom(self, job_id: str, archive: bytes) -> JobRecord:
+        self.submissions.append((job_id, archive))
+        return JobRecord(
+            job_id=job_id,
+            state=JobState.RUNNING,
+            spec=CustomCaseSpec(
+                archive_sha256="sha256:" + "a" * 64,
+                solver="incompressibleFluid",
+                needs_block_mesh=True,
+            ),
+            case_manifest={"system/controlDict": "a" * 64},
+            submitted_at="2026-07-01T00:00:00Z",
+            pid=456,
+        )
+
+
+def custom_archive() -> bytes:
+    output = io.BytesIO()
+    files = {
+        "0/U": "internalField uniform (0 0 0);",
+        "constant/physicalProperties": "nu 1e-6;",
+        "system/controlDict": "solver incompressibleFluid; endTime 100;",
+        "system/fvSchemes": "ddtSchemes {}",
+        "system/fvSolution": "solvers {}",
+        "system/blockMeshDict": "vertices ();",
+    }
+    with tarfile.open(fileobj=output, mode="w:gz") as bundle:
+        for name, text in files.items():
+            data = text.encode()
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            bundle.addfile(member, io.BytesIO(data))
+    return output.getvalue()
+
+
+def test_custom_case_can_be_submitted_polled_and_collected() -> None:
+    target = CustomCaseTarget()
+    client = TestClient(create_app(execution_targets=(target,)))
+    archive = custom_archive()
+
+    submitted = client.post(
+        "/api/custom-cases/submit",
+        params={
+            "target_id": "workstation-openfoam",
+            "experiment_name": "Cylinder Flow Re 100",
+        },
+        content=archive,
+        headers={"Content-Type": "application/gzip"},
+    )
+
+    assert submitted.status_code == 201
+    job_id = submitted.json()["job_id"]
+    assert re.fullmatch(r"\d{8}-\d{6}-cylinder-flow-re-100-[0-9a-f]{8}", job_id)
+    assert target.submissions == [(job_id, archive)]
+    status = client.get(
+        f"/api/custom-cases/{job_id}", params={"target_id": target.target_id}
+    )
+    results = client.get(
+        f"/api/custom-cases/{job_id}/results", params={"target_id": target.target_id}
+    )
+    assert status.status_code == 200
+    assert results.status_code == 200
+    assert results.json()["post_processing"]["paraview_file"].endswith(".foam")

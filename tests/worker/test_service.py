@@ -1,4 +1,6 @@
+import io
 import json
+import tarfile
 from pathlib import Path
 
 from fluid_scientist.adapters.openfoam import LaminarPipeCase
@@ -114,6 +116,54 @@ def pipe_spec(velocity: float = 0.1) -> LaminarPipeCase:
         kinematic_viscosity_m2_s=1.0e-6,
         density_kg_m3=1000.0,
     )
+
+
+def custom_archive() -> bytes:
+    files = {
+        "0/U": "internalField uniform (0 0 0);",
+        "0/p": "internalField uniform 0;",
+        "constant/physicalProperties": "nu 1e-6;",
+        "system/controlDict": "solver incompressibleFluid; endTime 100;",
+        "system/fvSchemes": "ddtSchemes {}",
+        "system/fvSolution": "solvers {}",
+        "system/blockMeshDict": "vertices ();",
+    }
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as bundle:
+        for name, text in files.items():
+            payload = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            bundle.addfile(info, io.BytesIO(payload))
+    return output.getvalue()
+
+
+def test_worker_submits_validated_custom_case_and_extracts_it_safely(tmp_path) -> None:
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    (incoming / "cylinder.tar.gz").write_bytes(custom_archive())
+    launcher = FakeLauncher()
+    service = WorkerJobService(tmp_path, launcher=launcher)
+
+    job = service.submit_custom("cylinder-001", "cylinder.tar.gz")
+
+    assert job.state == JobState.RUNNING
+    assert job.spec.kind == "custom_openfoam"
+    assert job.spec.needs_block_mesh is True
+    assert (tmp_path / "jobs/cylinder-001/case/system/controlDict").is_file()
+    assert launcher.job_ids == ["cylinder-001"]
+
+
+def test_custom_runner_uses_fixed_commands_and_optional_block_mesh(tmp_path) -> None:
+    runner = RecordingRunner()
+    job = OpenFOAM13JobRunner(runner=runner)
+
+    job.run(tmp_path, needs_block_mesh=False)
+
+    assert [call[0] for call in runner.calls] == [
+        ("checkMesh", "-allGeometry", "-allTopology"),
+        ("foamRun", "-solver", "incompressibleFluid"),
+    ]
 
 
 def test_worker_submit_is_persistent_and_idempotent(tmp_path) -> None:

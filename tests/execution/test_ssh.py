@@ -82,3 +82,36 @@ def test_workstation_worker_uses_home_relative_install_path(tmp_path) -> None:
 
     argv, _ = runner.calls[0]
     assert argv[-4:] == ("--", ".local/bin/fluid-worker", "doctor", "--json")
+
+
+def test_upload_uses_fixed_incoming_directory_and_strict_host_key(tmp_path) -> None:
+    runner = RecordingRunner(ProcessResult(returncode=0, stdout="", stderr=""))
+    transport = SSHTransport(node(tmp_path), runner=runner)
+    archive = tmp_path / "case.tar.gz"
+    archive.write_bytes(b"payload")
+
+    transport.upload_incoming(archive, "job-001.tar.gz", timeout=30)
+
+    mkdir_argv, _ = runner.calls[0]
+    scp_argv, _ = runner.calls[1]
+    assert mkdir_argv[-4:] == (
+        "--",
+        "mkdir",
+        "-p",
+        ".local/share/fluid-scientist/incoming",
+    )
+    assert scp_argv[0] == "scp"
+    assert "StrictHostKeyChecking=yes" in scp_argv
+    assert scp_argv[-1].endswith(":.local/share/fluid-scientist/incoming/job-001.tar.gz")
+
+
+def test_upload_rejects_remote_name_traversal(tmp_path) -> None:
+    transport = SSHTransport(
+        node(tmp_path),
+        runner=RecordingRunner(ProcessResult(returncode=0, stdout="", stderr="")),
+    )
+    archive = tmp_path / "case.tar.gz"
+    archive.write_bytes(b"payload")
+
+    with pytest.raises(ValueError):
+        transport.upload_incoming(archive, "../escape.tar.gz", timeout=30)

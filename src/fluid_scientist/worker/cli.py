@@ -32,6 +32,11 @@ def main(
     submit.add_argument("--radial-cells", type=int, default=10)
     submit.add_argument("--json", action="store_true", dest="as_json")
 
+    submit_custom = subparsers.add_parser("submit-custom")
+    submit_custom.add_argument("--job-id", required=True)
+    submit_custom.add_argument("--archive", required=True)
+    submit_custom.add_argument("--json", action="store_true", dest="as_json")
+
     for command in ("status", "cancel", "collect"):
         command_parser = subparsers.add_parser(command)
         command_parser.add_argument("job_id")
@@ -69,6 +74,8 @@ def main(
                 radial_cells=args.radial_cells,
             )
             output = jobs.submit(args.job_id, spec)
+        elif args.command == "submit-custom":
+            output = jobs.submit_custom(args.job_id, args.archive)
         elif args.command == "status":
             output = jobs.status(args.job_id)
         elif args.command == "cancel":

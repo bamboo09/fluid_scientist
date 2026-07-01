@@ -4,7 +4,7 @@ from dataclasses import asdict
 from typing import Any, Literal, TypeVar
 
 from openai import APIConnectionError, APITimeoutError, OpenAI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from fluid_scientist.adapters.openfoam import LaminarPipeCase
 from fluid_scientist.domain.models import (
@@ -42,14 +42,34 @@ class ReviewDecision(StrictOutput):
     reason: str = Field(min_length=1)
 
 
+class CustomOpenFOAMPlan(StrictOutput):
+    geometry: str = Field(min_length=10)
+    boundary_conditions: tuple[str, ...] = Field(min_length=2)
+    mesh_strategy: str = Field(min_length=10)
+    run_strategy: str = Field(min_length=10)
+
+
 class ExperimentDesign(StrictOutput):
     experiment_name: str = Field(min_length=1, max_length=80)
-    experiment_type: Literal["laminar_pipe"]
+    experiment_type: Literal["laminar_pipe", "custom_openfoam"]
     objective: str = Field(min_length=10)
     assumptions: tuple[str, ...] = Field(min_length=1)
     rationale: str = Field(min_length=10)
     requested_outputs: tuple[str, ...] = Field(min_length=1)
-    case: LaminarPipeCase
+    case: LaminarPipeCase | None = None
+    custom_case: CustomOpenFOAMPlan | None = None
+
+    @model_validator(mode="after")
+    def require_matching_case_payload(self) -> "ExperimentDesign":
+        if self.experiment_type == "laminar_pipe" and self.case is None:
+            raise ValueError("laminar_pipe design requires case")
+        if self.experiment_type == "custom_openfoam" and self.custom_case is None:
+            raise ValueError("custom_openfoam design requires custom_case")
+        if self.experiment_type == "laminar_pipe" and self.custom_case is not None:
+            raise ValueError("laminar_pipe design cannot include custom_case")
+        if self.experiment_type == "custom_openfoam" and self.case is not None:
+            raise ValueError("custom_openfoam design cannot include pipe case")
+        return self
 
 
 class OpenAIResponsesProvider:
@@ -95,7 +115,9 @@ class OpenAIResponsesProvider:
                 "Act as a fluid-mechanics experiment designer. Select only an experiment type "
                 "listed in capabilities. Produce SI parameters that satisfy the typed schema and "
                 "state assumptions, requested outputs, and scientific rationale. Do not invent "
-                "unsupported solver capabilities or bypass approval gates."
+                "unsupported solver capabilities or bypass approval gates. Use laminar_pipe only "
+                "for the built-in analytical pipe template; route cylinder, bend, external-flow, "
+                "transient, and other geometries to custom_openfoam with explicit case guidance."
             ),
             input_text=self._json(
                 {"question": question, "capabilities": list(capabilities)}

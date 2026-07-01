@@ -1,6 +1,6 @@
 ---
 name: fluid-research-workflow
-description: Use when planning, executing, validating, or reporting single-phase incompressible OpenFOAM pipe or 90-degree bend studies on a workstation or Slurm/HPC platform, especially with evidence retrieval, mesh independence, mass conservation, result analysis, or human approval gates.
+description: Use when planning, executing, validating, or reporting single-phase incompressible built-in or custom OpenFOAM studies on a workstation or Slurm/HPC platform, especially with model-designed experiments, safe case uploads, post-processing, evidence, credibility checks, or human approval gates.
 ---
 
 # Fluid Research Workflow
@@ -15,7 +15,7 @@ Treat solver completion, numerical convergence, physical credibility, and genera
 2. Obtain Gate 1 human approval before evidence-driven planning.
 3. Build an `EvidencePackage` with source locators. Use reviewed evidence for high-risk choices.
 4. Compute units, dimensionless numbers, parameter bounds, and rules with deterministic code. Never ask an LLM to supply numerical truth.
-5. Design a mandatory `Pilot` before a batch. Include coarse, medium, and fine meshes and relevant model sensitivity.
+5. Design a mandatory `Pilot` before a batch. Choose a verified built-in template only when its geometry and physics match; otherwise route to a custom OpenFOAM case. Include coarse, medium, and fine meshes and relevant model sensitivity.
 6. Obtain Gate 2 human approval for the solver, mesh, budget, and case count.
 7. Select the approved execution target. Use typed Slurm commands on HPC or the fixed `fluid-worker` protocol on a direct workstation; never emit or run arbitrary shell.
 8. Perform deterministic validation: residuals plus monitored quantities, conservation, mesh independence/GCI, benchmark agreement, and model sensitivity.
@@ -29,6 +29,8 @@ Treat solver completion, numerical convergence, physical credibility, and genera
 - Block first contact with a workstation until its SSH host fingerprint is verified out of band and recorded in `known_hosts`.
 - Limit controlled numerical repair to two recorded revisions per case.
 - Never hide failed cases, invent missing evidence, repair corrupt formulas, or generalize beyond the tested range.
+- Never execute a custom case before local and worker-side validation, and never let the model or user supply a remote destination or shell command.
+- Never call a case “ready for post-processing” without exposing its mesh, residuals, time directories, and result view to the researcher.
 - Never publish a candidate Skill without a failing baseline, passing forward test, redaction, and human approval.
 
 Read [references/workflow.md](references/workflow.md) when defining schemas, workflow states, HPC boundaries, validation outputs, or candidate Skill governance.

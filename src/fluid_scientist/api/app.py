@@ -5,11 +5,12 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Literal, Protocol
+from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SecretStr
 
 from fluid_scientist.adapters.custom_openfoam import (
     CustomCaseManifest,
@@ -43,7 +44,7 @@ from fluid_scientist.orchestration.workflow import TransitionError
 from fluid_scientist.ports import WorkflowRepository
 from fluid_scientist.services.projects import ProjectService, ProjectView
 from fluid_scientist.services.research import DemoResearchResult
-from fluid_scientist.settings import AppSettings, NodeSettings
+from fluid_scientist.settings import AppSettings, NodeSettings, OpenAISettings
 from fluid_scientist.worker.service import JobRecord
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -64,6 +65,20 @@ class ProjectRequest(StrictRequest):
 
 class ExperimentDesignRequest(StrictRequest):
     question: str = Field(min_length=10, max_length=2_000)
+
+
+class OpenAIConfigurationRequest(StrictRequest):
+    api_key: SecretStr = Field(min_length=1)
+    planner_model: str = Field(default="gpt-5.4", min_length=1, max_length=128)
+    extractor_model: str = Field(default="gpt-5.4-mini", min_length=1, max_length=128)
+
+
+class OpenAIConfigurationView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    configured: bool
+    planner_model: str
+    extractor_model: str
 
 
 class ExperimentDesigner(Protocol):
@@ -130,6 +145,7 @@ def create_app(
     )
     application.mount("/assets", StaticFiles(directory=WEB_ROOT), name="assets")
     application.state.execution_targets = configured_targets
+    application.state.experiment_designer = configured_designer
     target_registry = {target.target_id: target for target in configured_targets}
     project_service = ProjectService(
         repository or SQLWorkflowRepository(runtime_settings.database.url)
@@ -156,20 +172,42 @@ def create_app(
 
     @application.post("/api/experiment-designs", response_model=ExperimentDesign)
     def design_experiment(request: ExperimentDesignRequest) -> ExperimentDesign:
-        if configured_designer is None:
+        designer = application.state.experiment_designer
+        if designer is None:
             raise HTTPException(
                 status_code=503,
                 detail="OpenAI experiment designer is not configured",
             )
         try:
-            return configured_designer.design_experiment(
+            return designer.design_experiment(
                 request.question,
-                capabilities=("OpenFOAM-13", "workstation_openfoam", "laminar_pipe"),
+                capabilities=(
+                    "OpenFOAM-13",
+                    "workstation_openfoam",
+                    "laminar_pipe",
+                    "custom_openfoam",
+                ),
             )
         except ProviderOutputError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         except ProviderRequestError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
+
+    @application.post("/api/settings/openai", response_model=OpenAIConfigurationView)
+    def configure_openai(
+        request: OpenAIConfigurationRequest,
+    ) -> OpenAIConfigurationView:
+        model_settings = OpenAISettings(
+            api_key=request.api_key,
+            planner_model=request.planner_model,
+            extractor_model=request.extractor_model,
+        )
+        application.state.experiment_designer = OpenAIResponsesProvider(model_settings)
+        return OpenAIConfigurationView(
+            configured=True,
+            planner_model=model_settings.planner_model,
+            extractor_model=model_settings.extractor_model,
+        )
 
     @application.post("/api/custom-cases/validate", response_model=CustomCaseManifest)
     def validate_custom_case(
@@ -179,6 +217,56 @@ def create_app(
             return validate_custom_case_archive(payload)
         except CustomCaseRejected as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+
+    @application.post(
+        "/api/custom-cases/submit",
+        response_model=JobRecord,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def submit_custom_case(
+        target_id: str,
+        experiment_name: str,
+        payload: bytes = Body(media_type="application/gzip"),
+    ) -> JobRecord:
+        target = target_registry.get(target_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="execution target not found")
+        submit_custom = getattr(target, "submit_custom", None)
+        if not callable(submit_custom):
+            raise HTTPException(
+                status_code=422,
+                detail="execution target does not support custom OpenFOAM cases",
+            )
+        job_id = _experiment_job_id(str(uuid4()), experiment_name)
+        try:
+            return submit_custom(job_id, payload)
+        except CustomCaseRejected as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except (RemoteExecutionError, OSError) as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
+    @application.get("/api/custom-cases/{job_id}", response_model=JobRecord)
+    def custom_case_status(job_id: str, target_id: str) -> JobRecord:
+        target = target_registry.get(target_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="execution target not found")
+        try:
+            return target.status(job_id)
+        except RemoteExecutionError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
+    @application.get(
+        "/api/custom-cases/{job_id}/results",
+        response_model=WorkerCollection,
+    )
+    def custom_case_results(job_id: str, target_id: str) -> WorkerCollection:
+        target = target_registry.get(target_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="execution target not found")
+        try:
+            return target.collect(job_id)
+        except RemoteExecutionError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
 
     @application.get("/api/demo/{project_id}", response_model=DemoResearchResult)
     def get_demo(project_id: str) -> DemoResearchResult:

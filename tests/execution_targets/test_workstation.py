@@ -1,4 +1,6 @@
+import io
 import json
+import tarfile
 
 from fluid_scientist.adapters.openfoam import LaminarPipeCase
 from fluid_scientist.execution.ssh import ProcessResult, RemoteExecutionError, RemoteProgram
@@ -67,6 +69,15 @@ class SequenceTransport:
         return ProcessResult(0, json.dumps(next(self.payloads)), "")
 
 
+class UploadSequenceTransport(SequenceTransport):
+    def __init__(self, payloads) -> None:
+        super().__init__(payloads)
+        self.uploads = []
+
+    def upload_incoming(self, local_file, remote_name, *, timeout):
+        self.uploads.append((local_file.read_bytes(), remote_name, timeout))
+
+
 def worker_job(state="running") -> dict:
     return {
         "job_id": "benchmark-001",
@@ -84,6 +95,37 @@ def worker_job(state="running") -> dict:
         "pid": 123,
         "error": None,
     }
+
+
+def custom_case_archive() -> bytes:
+    output = io.BytesIO()
+    files = {
+        "0/U": "internalField uniform (0 0 0);",
+        "constant/physicalProperties": "nu 1e-6;",
+        "system/controlDict": "solver incompressibleFluid; endTime 100;",
+        "system/fvSchemes": "ddtSchemes {}",
+        "system/fvSolution": "solvers {}",
+        "system/blockMeshDict": "vertices ();",
+    }
+    with tarfile.open(fileobj=output, mode="w:gz") as bundle:
+        for name, text in files.items():
+            data = text.encode()
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            bundle.addfile(member, io.BytesIO(data))
+    return output.getvalue()
+
+
+def custom_worker_job(state="running") -> dict:
+    result = worker_job(state)
+    result["job_id"] = "cylinder-001"
+    result["spec"] = {
+        "kind": "custom_openfoam",
+        "archive_sha256": "sha256:" + "a" * 64,
+        "solver": "incompressibleFluid",
+        "needs_block_mesh": True,
+    }
+    return result
 
 
 def test_submit_uses_fixed_worker_arguments_after_capability_selection() -> None:
@@ -122,6 +164,29 @@ def test_submit_uses_fixed_worker_arguments_after_capability_selection() -> None
         "80",
         "--radial-cells",
         "10",
+        "--json",
+    )
+
+
+def test_submit_custom_uploads_validated_bundle_then_uses_fixed_worker_command() -> None:
+    archive = custom_case_archive()
+    transport = UploadSequenceTransport((capability(), custom_worker_job()))
+    target = WorkstationOpenFOAMTarget(
+        target_id="workstation-openfoam",
+        candidates=(("primary", transport),),
+    )
+
+    submitted = target.submit_custom("cylinder-001", archive)
+
+    assert submitted.job_id == "cylinder-001"
+    assert transport.uploads[0][0] == archive
+    assert transport.uploads[0][1] == "cylinder-001.tar.gz"
+    assert transport.calls[1][1] == (
+        "submit-custom",
+        "--job-id",
+        "cylinder-001",
+        "--archive",
+        "cylinder-001.tar.gz",
         "--json",
     )
 

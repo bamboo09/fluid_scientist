@@ -1,20 +1,24 @@
 """Safe local OpenFOAM execution primitives used by the remote worker."""
 
 import contextlib
+import hashlib
+import io
 import os
 import re
 import shutil
 import signal
 import subprocess
 import sys
+import tarfile
 import time
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict
 
+from fluid_scientist.adapters.custom_openfoam import validate_custom_case_archive
 from fluid_scientist.adapters.openfoam import LaminarPipeCase, OpenFOAM13CaseRenderer
 from fluid_scientist.adapters.openfoam_parsers import parse_check_mesh, parse_solver_log
 from fluid_scientist.compat import UTC, StrEnum
@@ -78,12 +82,21 @@ class JobState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class CustomCaseSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: Literal["custom_openfoam"] = "custom_openfoam"
+    archive_sha256: str
+    solver: Literal["incompressibleFluid"]
+    needs_block_mesh: bool
+
+
 class JobRecord(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     job_id: str
     state: JobState
-    spec: LaminarPipeCase
+    spec: LaminarPipeCase | CustomCaseSpec
     case_manifest: dict[str, str]
     submitted_at: datetime
     pid: int | None = None
@@ -129,10 +142,11 @@ class OpenFOAM13JobRunner:
         self._runner = runner or SubprocessCommandRunner()
         self._command_timeout = command_timeout
 
-    def run(self, case_root: Path) -> JobRunResult:
-        block = self._run(("blockMesh",), case_root)
-        if block.returncode != 0:
-            raise RuntimeError(_failure("blockMesh", block))
+    def run(self, case_root: Path, *, needs_block_mesh: bool = True) -> JobRunResult:
+        if needs_block_mesh:
+            block = self._run(("blockMesh",), case_root)
+            if block.returncode != 0:
+                raise RuntimeError(_failure("blockMesh", block))
 
         mesh = self._run(("checkMesh", "-allGeometry", "-allTopology"), case_root)
         if mesh.returncode != 0:
@@ -183,6 +197,61 @@ class WorkerJobService:
         self._write(running)
         return running
 
+    def submit_custom(self, job_id: str, archive_name: str) -> JobRecord:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", archive_name):
+            raise ValueError("archive name contains forbidden characters")
+        archive_path = (self._work_root / "incoming" / archive_name).resolve()
+        if archive_path.parent != (self._work_root / "incoming").resolve():
+            raise ValueError("archive escapes incoming directory")
+        payload = archive_path.read_bytes()
+        validated = validate_custom_case_archive(payload)
+        spec = CustomCaseSpec(
+            archive_sha256=validated.archive_sha256,
+            solver=validated.solver,
+            needs_block_mesh=validated.needs_block_mesh,
+        )
+        job_root = self._job_root(job_id)
+        if (job_root / "job.json").is_file():
+            existing = self.status(job_id)
+            if existing.spec != spec:
+                raise ValueError("job id already exists with a different case archive")
+            return existing
+
+        job_root.mkdir(parents=False)
+        case_root = job_root / "case"
+        case_root.mkdir()
+        case_manifest: dict[str, str] = {}
+        with tarfile.open(fileobj=io.BytesIO(payload), mode="r:*") as bundle:
+            for member in bundle.getmembers():
+                destination = case_root.joinpath(*member.name.split("/"))
+                if member.isdir():
+                    destination.mkdir(parents=True, exist_ok=True)
+                    continue
+                handle = bundle.extractfile(member)
+                if handle is None:
+                    raise ValueError("archive member could not be extracted")
+                content = handle.read()
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(content)
+                case_manifest[member.name] = hashlib.sha256(content).hexdigest()
+        queued = JobRecord(
+            job_id=job_id,
+            state=JobState.QUEUED,
+            spec=spec,
+            case_manifest=case_manifest,
+            submitted_at=datetime.now(UTC),
+        )
+        self._write(queued)
+        try:
+            pid = self._launcher.launch(job_id)
+        except OSError as error:
+            failed = queued.model_copy(update={"state": JobState.FAILED, "error": str(error)})
+            self._write(failed)
+            raise RuntimeError("could not start OpenFOAM worker") from error
+        running = queued.model_copy(update={"state": JobState.RUNNING, "pid": pid})
+        self._write(running)
+        return running
+
     def status(self, job_id: str) -> JobRecord:
         record_file = self._job_root(job_id) / "job.json"
         if not record_file.is_file():
@@ -209,14 +278,22 @@ class WorkerJobService:
             return record
         try:
             case_root = self._job_root(job_id) / "case"
-            result = (runner or OpenFOAM13JobRunner()).run(case_root)
-            metrics = extract_surface_metrics(case_root, density_kg_m3=record.spec.density_kg_m3)
-            solver_log = (
-                result.solver_log.rstrip()
-                + f"\ninlet massFlow = {metrics.inlet_mass_flow:.12g}"
-                + f"\noutlet massFlow = {metrics.outlet_mass_flow:.12g}"
-                + f"\npressureDrop = {metrics.pressure_drop_pa:.12g}\n"
+            custom_spec = record.spec if isinstance(record.spec, CustomCaseSpec) else None
+            result = (runner or OpenFOAM13JobRunner()).run(
+                case_root,
+                needs_block_mesh=custom_spec.needs_block_mesh if custom_spec else True,
             )
+            solver_log = result.solver_log
+            if isinstance(record.spec, LaminarPipeCase):
+                metrics = extract_surface_metrics(
+                    case_root, density_kg_m3=record.spec.density_kg_m3
+                )
+                solver_log = (
+                    solver_log.rstrip()
+                    + f"\ninlet massFlow = {metrics.inlet_mass_flow:.12g}"
+                    + f"\noutlet massFlow = {metrics.outlet_mass_flow:.12g}"
+                    + f"\npressureDrop = {metrics.pressure_drop_pa:.12g}\n"
+                )
             (self._job_root(job_id) / "checkMesh.log").write_text(result.mesh_log, encoding="utf-8")
             (self._job_root(job_id) / "solver.log").write_text(solver_log, encoding="utf-8")
             updated = record.model_copy(update={"state": JobState.SUCCEEDED})

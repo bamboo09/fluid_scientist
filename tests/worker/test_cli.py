@@ -2,7 +2,7 @@ import json
 
 from fluid_scientist.adapters.openfoam import LaminarPipeCase
 from fluid_scientist.worker.cli import main
-from fluid_scientist.worker.service import JobRecord, JobState
+from fluid_scientist.worker.service import CustomCaseSpec, JobRecord, JobState
 
 
 class FakeService:
@@ -12,6 +12,15 @@ class FakeService:
 
     def submit(self, job_id, spec):
         self.submitted = (job_id, spec)
+        return record(job_id, spec)
+
+    def submit_custom(self, job_id, archive_name):
+        spec = CustomCaseSpec(
+            archive_sha256="sha256:" + "a" * 64,
+            solver="incompressibleFluid",
+            needs_block_mesh=True,
+        )
+        self.submitted = (job_id, archive_name)
         return record(job_id, spec)
 
     def status(self, job_id):
@@ -72,6 +81,26 @@ def test_submit_cli_accepts_only_typed_pipe_parameters(capsys) -> None:
     assert exit_code == 0
     assert service.submitted == ("benchmark-001", pipe_spec())
     assert json.loads(capsys.readouterr().out)["state"] == "running"
+
+
+def test_submit_custom_cli_accepts_only_an_incoming_archive_name(capsys) -> None:
+    service = FakeService()
+
+    exit_code = main(
+        [
+            "submit-custom",
+            "--job-id",
+            "cylinder-001",
+            "--archive",
+            "cylinder-001.tar.gz",
+            "--json",
+        ],
+        service=service,
+    )
+
+    assert exit_code == 0
+    assert service.submitted == ("cylinder-001", "cylinder-001.tar.gz")
+    assert json.loads(capsys.readouterr().out)["spec"]["kind"] == "custom_openfoam"
 
 
 def test_status_cancel_collect_and_private_run_commands(capsys) -> None:

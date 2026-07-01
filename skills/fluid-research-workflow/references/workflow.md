@@ -20,6 +20,19 @@ Use the data node for transfer, download, compilation, checksums, and artifact p
 - Run direct workstation jobs through `fluid-worker doctor/submit/status/cancel/collect`. Do not route them through Slurm and do not pass free-form remote shell.
 - Require protocol-version and command capability checks before submission. Preserve deterministic job IDs so retries query the same job.
 
+### Custom OpenFOAM execution
+
+- Apply double validation: validate the tar.gz before transfer and repeat the same validation inside `fluid-worker` before extraction.
+- Reject absolute paths, traversal, links, oversized expansion, dynamic code, system calls, missing dictionaries, and non-allow-listed solvers.
+- Upload only to the fixed home-relative incoming directory. Accept an archive name, never a caller-selected remote path.
+- Execute only `submit-custom` with the fixed chain: optional `blockMesh`, mandatory `checkMesh -allGeometry -allTopology`, then `foamRun -solver incompressibleFluid`.
+- Collect the mesh report, solver completion marker, final residuals, numeric time directories, case manifest, and `.foam` marker. Present these results in the browser; retain ParaView as an advanced workstation view.
+- Do not apply pipe pressure-drop or mass-flow acceptance thresholds to cylinder, bend, or other custom geometries unless their case defines and validates equivalent observables.
+
+### Model configuration
+
+Keep an interactively supplied OpenAI API key only in server-process memory. Never echo it, place it in browser storage, write it to project files, or include it in logs and Skills. Require re-entry after service restart.
+
 ## OpenFOAM Foundation 13 benchmark
 
 Use the Foundation distribution semantics, not similarly named OpenCFD releases. OpenFOAM Foundation 13 uses `foamRun -solver incompressibleFluid`, with `solver incompressibleFluid` in `controlDict`, viscosity in `constant/physicalProperties`, and laminar selection in `constant/momentumTransport`.

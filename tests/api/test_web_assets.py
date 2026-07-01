@@ -97,3 +97,39 @@ def test_workbench_can_validate_custom_openfoam_archive_without_submitting_it() 
     assert 'id="custom-case-result"' in html
     assert '"/api/custom-cases/validate"' in script
     assert "尚未提交" in html
+
+
+def test_workbench_opens_postprocessing_results_in_browser() -> None:
+    html = (ROOT / "apps/web/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "apps/web/app.js").read_text(encoding="utf-8")
+
+    assert 'id="view-postprocess"' in html
+    assert 'id="postprocess-results"' in html
+    assert "renderPostprocessResults" in script
+    assert "latestBenchmarkResults" in script
+    assert "后处理 Case 已准备" not in html
+    assert "后处理结果" in html
+
+
+def test_workbench_can_configure_model_without_persisting_api_key() -> None:
+    html = (ROOT / "apps/web/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "apps/web/app.js").read_text(encoding="utf-8")
+
+    assert 'id="openai-api-key"' in html
+    assert 'id="configure-model"' in html
+    assert 'type="password"' in html
+    assert '"/api/settings/openai"' in script
+    assert "localStorage.setItem(targetStorageKey" in script
+    assert "localStorage.setItem(\"openai" not in script
+
+
+def test_workbench_can_submit_and_poll_a_validated_custom_case() -> None:
+    html = (ROOT / "apps/web/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "apps/web/app.js").read_text(encoding="utf-8")
+
+    assert 'id="custom-experiment-name"' in html
+    assert 'id="submit-custom-case"' in html
+    assert '"/api/custom-cases/submit"' in script
+    assert "pollCustomCase" in script
+    assert 'design.experiment_type === "custom_openfoam"' in script
+    assert "VALIDATION ONLY" not in html

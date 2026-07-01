@@ -93,6 +93,29 @@ def test_model_experiment_design_requires_configured_provider() -> None:
     assert "OpenAI" in response.json()["detail"]
 
 
+def test_model_can_be_configured_in_memory_without_echoing_api_key() -> None:
+    secret = "sk-test-runtime-only-secret"
+    api = TestClient(create_app(experiment_designer=None))
+
+    response = api.post(
+        "/api/settings/openai",
+        json={
+            "api_key": secret,
+            "planner_model": "gpt-5.4",
+            "extractor_model": "gpt-5.4-mini",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "configured": True,
+        "planner_model": "gpt-5.4",
+        "extractor_model": "gpt-5.4-mini",
+    }
+    assert secret not in response.text
+    assert secret not in repr(api.app.state.experiment_designer)
+
+
 def test_custom_openfoam_case_can_be_validated_before_submission() -> None:
     files = {
         "0/U": "internalField uniform (0 0 0);",

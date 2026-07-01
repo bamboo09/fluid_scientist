@@ -92,6 +92,42 @@ class SSHTransport:
             raise RemoteExecutionError(f"remote {program.value} failed: {detail}")
         return result
 
+    def upload_incoming(
+        self,
+        local_file: Path,
+        remote_name: str,
+        *,
+        timeout: float,
+    ) -> None:
+        if not local_file.is_file():
+            raise ValueError("upload source does not exist")
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", remote_name):
+            raise ValueError("remote upload name contains forbidden characters")
+        incoming = ".local/share/fluid-scientist/incoming"
+        self.execute(
+            RemoteProgram.MKDIR,
+            (RemoteArg("-p"), RemoteArg(incoming)),
+            timeout=timeout,
+        )
+        argv = (
+            "scp",
+            "-P",
+            str(self._node.port),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={self._node.known_hosts_file}",
+        )
+        if self._node.identity_file:
+            argv += ("-i", self._node.identity_file)
+        destination = f"{self._node.username}@{self._node.host}:{incoming}/{remote_name}"
+        result = self._runner.run(argv + (str(local_file), destination), timeout=timeout)
+        if result.returncode != 0:
+            detail = result.stderr.strip() or f"exit code {result.returncode}"
+            raise RemoteExecutionError(f"secure upload failed: {detail}")
+
     def _base_argv(self) -> tuple[str, ...]:
         argv = (
             "ssh",

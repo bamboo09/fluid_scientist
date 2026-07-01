@@ -4,6 +4,7 @@ import pytest
 from pydantic import SecretStr
 
 from fluid_scientist.adapters.openai_provider import (
+    CustomOpenFOAMPlan,
     ExperimentDesign,
     OpenAIResponsesProvider,
     ProviderOutputError,
@@ -108,6 +109,39 @@ def test_experiment_designer_returns_typed_openfoam_plan() -> None:
     assert result == design
     assert responses.calls[0]["text_format"] is ExperimentDesign
     assert "OpenFOAM-13" in responses.calls[0]["input"]
+
+
+def test_experiment_designer_can_route_non_pipe_request_to_custom_openfoam() -> None:
+    design = ExperimentDesign(
+        experiment_name="Cylinder Wake Re 100",
+        experiment_type="custom_openfoam",
+        objective="Resolve transient vortex shedding behind a circular cylinder.",
+        assumptions=("Two-dimensional incompressible laminar flow",),
+        rationale="A transient custom case is required because the pipe template is unsuitable.",
+        requested_outputs=("drag_coefficient", "lift_coefficient", "Strouhal_number"),
+        custom_case=CustomOpenFOAMPlan(
+            geometry="Circular cylinder in a rectangular far-field domain",
+            boundary_conditions=("uniform inlet", "no-slip cylinder", "pressure outlet"),
+            mesh_strategy="Refine the cylinder wall and near wake; verify y+ and mesh sensitivity.",
+            run_strategy="Transient incompressible run covering at least ten shedding periods.",
+        ),
+    )
+
+    assert design.case is None
+    assert design.custom_case is not None
+    assert design.experiment_type == "custom_openfoam"
+
+
+def test_experiment_design_rejects_type_without_matching_payload() -> None:
+    with pytest.raises(ValueError, match="custom_case"):
+        ExperimentDesign(
+            experiment_name="Cylinder Wake",
+            experiment_type="custom_openfoam",
+            objective="Resolve transient vortex shedding behind a circular cylinder.",
+            assumptions=("Two-dimensional incompressible laminar flow",),
+            rationale="The built-in pipe case cannot represent external flow.",
+            requested_outputs=("drag_coefficient",),
+        )
 
 
 def test_results_analyst_returns_evidence_linked_claims() -> None:
