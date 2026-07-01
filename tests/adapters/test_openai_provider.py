@@ -4,6 +4,7 @@ import pytest
 from pydantic import SecretStr
 
 from fluid_scientist.adapters.openai_provider import (
+    ExperimentDesign,
     OpenAIResponsesProvider,
     ProviderOutputError,
 )
@@ -77,6 +78,36 @@ def test_interpret_uses_structured_responses_parse() -> None:
     assert responses.calls[0]["model"] == "planner-model"
     assert responses.calls[0]["text_format"] is ResearchSpec
     assert provider.last_request_id == "req-123"
+
+
+def test_experiment_designer_returns_typed_openfoam_plan() -> None:
+    from fluid_scientist.adapters.openfoam import LaminarPipeCase
+
+    design = ExperimentDesign(
+        experiment_name="Laminar Pipe Reynolds Sweep",
+        experiment_type="laminar_pipe",
+        objective="Measure pressure loss while remaining in the laminar regime.",
+        assumptions=("Single-phase incompressible flow",),
+        rationale="Start with an analytical benchmark before extending the study.",
+        requested_outputs=("pressure_drop_pa", "mass_imbalance_percent"),
+        case=LaminarPipeCase(
+            diameter_m=0.02,
+            length_m=2.0,
+            mean_velocity_m_s=0.08,
+            kinematic_viscosity_m2_s=1e-6,
+        ),
+    )
+    responses = FakeResponses([design])
+    provider = OpenAIResponsesProvider(settings(), client=SimpleNamespace(responses=responses))
+
+    result = provider.design_experiment(
+        "Design a trustworthy laminar pipe pressure-loss experiment.",
+        capabilities=("OpenFOAM-13", "laminar_pipe"),
+    )
+
+    assert result == design
+    assert responses.calls[0]["text_format"] is ExperimentDesign
+    assert "OpenFOAM-13" in responses.calls[0]["input"]
 
 
 def test_results_analyst_returns_evidence_linked_claims() -> None:

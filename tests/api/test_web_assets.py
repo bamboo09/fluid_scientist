@@ -34,6 +34,7 @@ def test_workbench_exposes_real_workstation_submission_and_result_polling() -> N
 
     for field_id in (
         "benchmark-form",
+        "experiment-name",
         "pipe-diameter",
         "pipe-length",
         "pipe-velocity",
@@ -63,3 +64,25 @@ def test_workbench_persists_and_resumes_the_active_project() -> None:
     assert "/api/projects/recent" in script
     assert 'workflow_state === "PILOT_RUNNING"' in script
     assert 'workflow_state === "PILOT_VERIFIED"' in script
+
+
+def test_workbench_shows_reproducible_paraview_instructions() -> None:
+    html = (ROOT / "apps/web/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "apps/web/app.js").read_text(encoding="utf-8")
+
+    assert 'id="postprocess-command"' in html
+    assert "collection.post_processing" in script
+    assert "postProcessing.case_path" in script
+    assert "postProcessing.paraview_file" in script
+    assert "paraFoam" in script
+
+
+def test_workbench_can_request_and_apply_model_designed_experiment() -> None:
+    html = (ROOT / "apps/web/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "apps/web/app.js").read_text(encoding="utf-8")
+
+    assert 'id="design-experiment"' in html
+    assert 'id="design-rationale"' in html
+    assert '"/api/experiment-designs"' in script
+    assert "applyExperimentDesign" in script
+    assert "design.case" in script

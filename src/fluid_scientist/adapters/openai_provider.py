@@ -1,11 +1,12 @@
 """OpenAI Responses API provider using strict Pydantic structured outputs."""
 
 from dataclasses import asdict
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from openai import APIConnectionError, APITimeoutError, OpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
+from fluid_scientist.adapters.openfoam import LaminarPipeCase
 from fluid_scientist.domain.models import (
     AnalysisResult,
     EvidenceLinkedClaim,
@@ -41,6 +42,16 @@ class ReviewDecision(StrictOutput):
     reason: str = Field(min_length=1)
 
 
+class ExperimentDesign(StrictOutput):
+    experiment_name: str = Field(min_length=1, max_length=80)
+    experiment_type: Literal["laminar_pipe"]
+    objective: str = Field(min_length=10)
+    assumptions: tuple[str, ...] = Field(min_length=1)
+    rationale: str = Field(min_length=10)
+    requested_outputs: tuple[str, ...] = Field(min_length=1)
+    case: LaminarPipeCase
+
+
 class OpenAIResponsesProvider:
     def __init__(self, settings: OpenAISettings, *, client: Any | None = None) -> None:
         if client is None:
@@ -72,6 +83,23 @@ class OpenAIResponsesProvider:
                 "Do not silently invent material conditions that change the conclusion."
             ),
             input_text=question,
+        )
+
+    def design_experiment(
+        self, question: str, *, capabilities: tuple[str, ...]
+    ) -> ExperimentDesign:
+        return self._parse(
+            model=self._settings.planner_model,
+            text_format=ExperimentDesign,
+            instructions=(
+                "Act as a fluid-mechanics experiment designer. Select only an experiment type "
+                "listed in capabilities. Produce SI parameters that satisfy the typed schema and "
+                "state assumptions, requested outputs, and scientific rationale. Do not invent "
+                "unsupported solver capabilities or bypass approval gates."
+            ),
+            input_text=self._json(
+                {"question": question, "capabilities": list(capabilities)}
+            ),
         )
 
     def analyze(

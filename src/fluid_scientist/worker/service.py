@@ -241,6 +241,20 @@ class WorkerJobService:
         if record.state != JobState.SUCCEEDED:
             raise RuntimeError("job results are not ready")
         job_root = self._job_root(job_id)
+        case_root = job_root / "case"
+        poly_mesh = case_root / "constant" / "polyMesh"
+        if not poly_mesh.is_dir():
+            raise RuntimeError("OpenFOAM mesh is missing from constant/polyMesh")
+        paraview_file = case_root / f"{job_id}.foam"
+        paraview_file.write_text("", encoding="utf-8")
+        time_directories = sorted(
+            (
+                path.name
+                for path in case_root.iterdir()
+                if path.is_dir() and _is_numeric_time(path.name)
+            ),
+            key=float,
+        )
         mesh = parse_check_mesh((job_root / "checkMesh.log").read_text(encoding="utf-8"))
         solver = parse_solver_log((job_root / "solver.log").read_text(encoding="utf-8"))
         return {
@@ -249,6 +263,11 @@ class WorkerJobService:
             "mesh": asdict(mesh),
             "solver": asdict(solver),
             "case_manifest": record.case_manifest,
+            "post_processing": {
+                "case_path": f"jobs/{job_id}/case",
+                "paraview_file": paraview_file.name,
+                "time_directories": time_directories,
+            },
         }
 
     def _job_root(self, job_id: str) -> Path:
@@ -319,6 +338,14 @@ def _latest_function_value(function_root: Path) -> float:
     if latest is None:
         raise RuntimeError(f"no OpenFOAM function-object data found for {function_root.name}")
     return latest[1]
+
+
+def _is_numeric_time(value: str) -> bool:
+    try:
+        float(value)
+    except ValueError:
+        return False
+    return True
 
 
 def system_doctor(work_root: Path) -> DoctorReport:

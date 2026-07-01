@@ -1,3 +1,5 @@
+import re
+
 from fastapi.testclient import TestClient
 
 from fluid_scientist.adapters.openfoam import LaminarPipeCase
@@ -103,6 +105,11 @@ class BenchmarkTarget(StaticTarget):
                     "pressure_drop_pa": 15.9712,
                 },
                 "case_manifest": {"system/controlDict": "a" * 64},
+                "post_processing": {
+                    "case_path": f"jobs/{job_id}/case",
+                    "paraview_file": f"{job_id}.foam",
+                    "time_directories": ["0", "2000"],
+                },
             }
         )
 
@@ -175,6 +182,7 @@ def test_gate_two_submission_calls_selected_target_and_persists_job(tmp_path) ->
         json={
             "target_id": "workstation-openfoam",
             "case_id": "pilot-pipe",
+            "experiment_name": "Laminar Pipe Pressure Loss",
             "case": pipe_spec().model_dump(),
             "actor": "researcher",
         },
@@ -184,7 +192,10 @@ def test_gate_two_submission_calls_selected_target_and_persists_job(tmp_path) ->
     body = response.json()
     assert body["project"]["workflow_state"] == "PILOT_RUNNING"
     assert body["project"]["external_jobs"]["pilot-pipe"] == body["job"]["job_id"]
-    assert target.submissions[0][0].endswith("-pilot-pipe")
+    assert re.fullmatch(
+        r"\d{8}-\d{6}-laminar-pipe-pressure-loss-[0-9a-f]{8}",
+        target.submissions[0][0],
+    )
 
 
 def test_benchmark_submission_is_blocked_until_gate_two(tmp_path) -> None:

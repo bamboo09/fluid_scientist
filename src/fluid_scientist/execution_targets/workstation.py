@@ -49,6 +49,14 @@ class WorkerSolverResult(BaseModel):
     pressure_drop_pa: float | None
 
 
+class WorkerPostProcessing(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    case_path: str
+    paraview_file: str
+    time_directories: tuple[str, ...]
+
+
 class WorkerCollection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -57,6 +65,7 @@ class WorkerCollection(BaseModel):
     mesh: WorkerMeshResult
     solver: WorkerSolverResult
     case_manifest: dict[str, str]
+    post_processing: WorkerPostProcessing | None = None
 
 
 class WorkstationOpenFOAMTarget:

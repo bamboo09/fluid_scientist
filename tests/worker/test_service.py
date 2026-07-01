@@ -146,6 +146,9 @@ def test_worker_execute_and_collect_persist_credibility_outputs(tmp_path) -> Non
     class CredibleRunner(RecordingRunner):
         def run(self, argv, *, cwd, timeout):
             self.calls.append((argv, cwd, timeout))
+            if argv[0] == "blockMesh":
+                (cwd / "constant/polyMesh").mkdir(parents=True)
+                return CommandResult(0, "ok", "")
             if argv[0] == "checkMesh":
                 return CommandResult(
                     0,
@@ -155,6 +158,7 @@ def test_worker_execute_and_collect_persist_credibility_outputs(tmp_path) -> Non
                     "",
                 )
             if argv[0] == "foamRun":
+                (cwd / "2000").mkdir()
                 for name, value in (
                     ("pressureDrop", "0.016"),
                     ("inletFlow", "-3.14159e-5"),
@@ -189,6 +193,12 @@ def test_worker_execute_and_collect_persist_credibility_outputs(tmp_path) -> Non
     assert collected["solver"]["inlet_mass_flow"] == 0.0314159
     assert collected["solver"]["outlet_mass_flow"] == -0.0314158
     assert collected["case_manifest"]["system/controlDict"]
+    assert collected["post_processing"] == {
+        "case_path": "jobs/benchmark-001/case",
+        "paraview_file": "benchmark-001.foam",
+        "time_directories": ["0", "2000"],
+    }
+    assert (tmp_path / "jobs/benchmark-001/case/benchmark-001.foam").is_file()
 
 
 def test_surface_metrics_use_latest_time_and_convert_openfoam_units(tmp_path) -> None:

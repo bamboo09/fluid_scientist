@@ -2,6 +2,7 @@ const form = document.querySelector("#research-form");
 const button = document.querySelector("#run-button");
 const message = document.querySelector("#form-message");
 const createProjectButton = document.querySelector("#create-project");
+const designExperimentButton = document.querySelector("#design-experiment");
 const approveButton = document.querySelector("#gate-approve");
 const rejectButton = document.querySelector("#gate-reject");
 const advanceButton = document.querySelector("#gate-advance");
@@ -52,6 +53,7 @@ async function loadExecutionTargets() {
 }
 
 function renderResult(result) {
+  document.querySelector("#postprocess-card").hidden = true;
   document.querySelector("#secondary-metric-label").textContent = "标准差";
   document.querySelector("#third-metric-label").textContent = "细网格 GCI";
   document.querySelector("#project-status").textContent = result.workflow_state;
@@ -160,6 +162,22 @@ function pipeCasePayload() {
   };
 }
 
+function applyExperimentDesign(design) {
+  document.querySelector("#experiment-name").value = design.experiment_name;
+  document.querySelector("#pipe-diameter").value = design.case.diameter_m;
+  document.querySelector("#pipe-length").value = design.case.length_m;
+  document.querySelector("#pipe-velocity").value = design.case.mean_velocity_m_s;
+  document.querySelector("#pipe-nu").value = design.case.kinematic_viscosity_m2_s;
+  document.querySelector("#pipe-density").value = design.case.density_kg_m3;
+  document.querySelector("#axial-cells").value = design.case.axial_cells;
+  document.querySelector("#radial-cells").value = design.case.radial_cells;
+  const rationale = document.querySelector("#design-rationale");
+  rationale.textContent =
+    `${design.objective} 设计理由：${design.rationale} `
+    + `假设：${design.assumptions.join("；")}。`;
+  rationale.hidden = false;
+}
+
 function renderBenchmarkResults(results) {
   const { collection, validation, project } = results;
   currentProject = project;
@@ -198,6 +216,18 @@ function renderBenchmarkResults(results) {
   document.querySelector("#scope-note").textContent = validation.passed
     ? "该结果已通过网格、残差、质量守恒和 Hagen–Poiseuille 解析基准门禁。"
     : "该算例已完成，但未通过全部可信性门禁，不能用于科研结论。";
+  const postProcessing = collection.post_processing;
+  if (postProcessing) {
+    const postprocessCommand =
+      `cd ~/.local/share/fluid-scientist/${postProcessing.case_path} && paraFoam`;
+    document.querySelector("#postprocess-command").textContent = postprocessCommand;
+    document.querySelector("#postprocess-times").textContent =
+      `可用时间目录：${postProcessing.time_directories.join(", ")} · `
+      + `ParaView 文件：${postProcessing.paraview_file}`;
+    document.querySelector("#postprocess-card").hidden = false;
+  } else {
+    document.querySelector("#postprocess-card").hidden = true;
+  }
   document.querySelector("#report").hidden = false;
   message.textContent = validation.passed
     ? "真实工作站仿真完成，确定性可信性验收通过。"
@@ -308,6 +338,24 @@ createProjectButton.addEventListener("click", async () => {
   }
 });
 
+designExperimentButton.addEventListener("click", async () => {
+  designExperimentButton.disabled = true;
+  message.textContent = "模型正在根据研究问题和 OpenFOAM 能力设计实验…";
+  try {
+    const design = await requestJson("/api/experiment-designs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question: document.querySelector("#question").value }),
+    });
+    applyExperimentDesign(design);
+    message.textContent = "模型实验设计已写入参数表；仍需人工检查并完成 Gate 2 审批。";
+  } catch (error) {
+    message.textContent = `模型设计不可用：${error.message}`;
+  } finally {
+    designExperimentButton.disabled = false;
+  }
+});
+
 approveButton.addEventListener("click", async () => {
   if (!currentProject) return;
   const gate = gateForState(currentProject.workflow_state);
@@ -385,6 +433,7 @@ benchmarkForm.addEventListener("submit", async (event) => {
         body: JSON.stringify({
           target_id: selectedTarget,
           case_id: benchmarkCaseId,
+          experiment_name: document.querySelector("#experiment-name").value,
           case: pipeCasePayload(),
           actor: "researcher",
         }),

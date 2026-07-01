@@ -1,21 +1,35 @@
 """FastAPI application for Fake demos and persistent research projects."""
 
+import re
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import Body, FastAPI, HTTPException, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field
 
+from fluid_scientist.adapters.custom_openfoam import (
+    CustomCaseManifest,
+    CustomCaseRejected,
+    validate_custom_case_archive,
+)
 from fluid_scientist.adapters.fakes import build_demo_service
+from fluid_scientist.adapters.openai_provider import (
+    ExperimentDesign,
+    OpenAIResponsesProvider,
+    ProviderOutputError,
+    ProviderRequestError,
+)
 from fluid_scientist.adapters.openfoam import (
     LaminarPipeCase,
     PipeBenchmarkValidation,
     validate_laminar_pipe,
 )
 from fluid_scientist.adapters.sql_repository import SQLWorkflowRepository
+from fluid_scientist.compat import UTC
 from fluid_scientist.execution.ssh import RemoteExecutionError, SSHTransport
 from fluid_scientist.execution_targets.base import (
     ExecutionTargetAdapter,
@@ -48,6 +62,16 @@ class ProjectRequest(StrictRequest):
     question: str = Field(min_length=10, max_length=2_000)
 
 
+class ExperimentDesignRequest(StrictRequest):
+    question: str = Field(min_length=10, max_length=2_000)
+
+
+class ExperimentDesigner(Protocol):
+    def design_experiment(
+        self, question: str, *, capabilities: tuple[str, ...]
+    ) -> ExperimentDesign: ...
+
+
 class ApprovalRequest(StrictRequest):
     gate: Literal["GATE_1", "GATE_2", "GATE_3"]
     decision: Literal["approve", "reject"]
@@ -64,6 +88,7 @@ class ActionRequest(StrictRequest):
 class BenchmarkSubmissionRequest(StrictRequest):
     target_id: str = Field(min_length=1, max_length=128)
     case_id: str = Field(default="pilot-pipe", pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    experiment_name: str = Field(default="laminar-pipe", min_length=1, max_length=80)
     case: LaminarPipeCase
     actor: str = Field(default="researcher", min_length=1, max_length=128)
 
@@ -89,11 +114,15 @@ def create_app(
     *,
     settings: AppSettings | None = None,
     transport_factory: Callable[[NodeSettings], SSHTransport] = SSHTransport,
+    experiment_designer: ExperimentDesigner | None = None,
 ) -> FastAPI:
     runtime_settings = settings or AppSettings()
     configured_targets = execution_targets
     if configured_targets is None:
         configured_targets = build_execution_targets(runtime_settings, transport_factory)
+    configured_designer = experiment_designer
+    if configured_designer is None and runtime_settings.openai.api_key is not None:
+        configured_designer = OpenAIResponsesProvider(runtime_settings.openai)
     application = FastAPI(
         title="Fluid Scientist",
         version="0.2.0",
@@ -124,6 +153,32 @@ def create_app(
         result = build_demo_service().run_approved_demo(request.question)
         demo_projects[result.project_id] = result
         return result
+
+    @application.post("/api/experiment-designs", response_model=ExperimentDesign)
+    def design_experiment(request: ExperimentDesignRequest) -> ExperimentDesign:
+        if configured_designer is None:
+            raise HTTPException(
+                status_code=503,
+                detail="OpenAI experiment designer is not configured",
+            )
+        try:
+            return configured_designer.design_experiment(
+                request.question,
+                capabilities=("OpenFOAM-13", "workstation_openfoam", "laminar_pipe"),
+            )
+        except ProviderOutputError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except ProviderRequestError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
+    @application.post("/api/custom-cases/validate", response_model=CustomCaseManifest)
+    def validate_custom_case(
+        payload: bytes = Body(media_type="application/gzip"),
+    ) -> CustomCaseManifest:
+        try:
+            return validate_custom_case_archive(payload)
+        except CustomCaseRejected as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @application.get("/api/demo/{project_id}", response_model=DemoResearchResult)
     def get_demo(project_id: str) -> DemoResearchResult:
@@ -189,7 +244,7 @@ def create_app(
             status_method = getattr(target, "status", None)
             if not callable(submit) or not callable(status_method):
                 raise ValueError("execution target does not support benchmark jobs")
-            job_id = existing or f"{project_id}-{request.case_id}"
+            job_id = existing or _experiment_job_id(project_id, request.experiment_name)
             job = status_method(job_id) if existing else submit(job_id, request.case)
             project = project_service.record_pilot_submission(
                 project_id,
@@ -312,6 +367,14 @@ def _bound_benchmark(
     except KeyError as error:
         raise HTTPException(status_code=404, detail="benchmark job not found") from error
     return target, job_id
+
+
+def _experiment_job_id(project_id: str, experiment_name: str) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", experiment_name.lower()).strip("-")
+    slug = (slug or "openfoam-experiment")[:48].rstrip("-")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    project_suffix = project_id.replace("-", "")[:8].lower()
+    return f"{timestamp}-{slug}-{project_suffix}"
 
 
 app = create_app()

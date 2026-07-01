@@ -161,6 +161,11 @@ def test_collect_validates_remote_credibility_payload() -> None:
             "pressure_drop_pa": None,
         },
         "case_manifest": {"system/controlDict": "a" * 64},
+        "post_processing": {
+            "case_path": "jobs/benchmark-001/case",
+            "paraview_file": "benchmark-001.foam",
+            "time_directories": ["0", "2000"],
+        },
     }
     transport = SequenceTransport((capability(), collected))
     target = WorkstationOpenFOAMTarget(

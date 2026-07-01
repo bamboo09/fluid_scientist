@@ -1,6 +1,11 @@
+import io
+import tarfile
+
 from fastapi.testclient import TestClient
 
-from fluid_scientist.api.app import app
+from fluid_scientist.adapters.openai_provider import ExperimentDesign
+from fluid_scientist.adapters.openfoam import LaminarPipeCase
+from fluid_scientist.api.app import app, create_app
 
 
 def client() -> TestClient:
@@ -41,3 +46,76 @@ def test_static_workbench_does_not_expose_skill_navigation() -> None:
 
     assert "实验结果分析与报告" in html
     assert "Skill 候选" not in html
+
+
+class FakeExperimentDesigner:
+    def design_experiment(self, question, *, capabilities):
+        assert question.startswith("Design")
+        assert "laminar_pipe" in capabilities
+        return ExperimentDesign(
+            experiment_name="Model Designed Pipe Study",
+            experiment_type="laminar_pipe",
+            objective="Validate pressure loss against an analytical benchmark.",
+            assumptions=("Single-phase incompressible laminar flow",),
+            rationale="Use the verified workstation template before broader experiments.",
+            requested_outputs=("pressure_drop_pa", "mass_imbalance_percent"),
+            case=LaminarPipeCase(
+                diameter_m=0.02,
+                length_m=2,
+                mean_velocity_m_s=0.08,
+                kinematic_viscosity_m2_s=1e-6,
+            ),
+        )
+
+
+def test_model_experiment_design_endpoint_returns_typed_plan() -> None:
+    api = TestClient(create_app(experiment_designer=FakeExperimentDesigner()))
+
+    response = api.post(
+        "/api/experiment-designs",
+        json={"question": "Design a laminar pipe pressure-loss experiment."},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["experiment_name"] == "Model Designed Pipe Study"
+    assert response.json()["case"]["mean_velocity_m_s"] == 0.08
+
+
+def test_model_experiment_design_requires_configured_provider() -> None:
+    api = TestClient(create_app(experiment_designer=None))
+
+    response = api.post(
+        "/api/experiment-designs",
+        json={"question": "Design a laminar pipe pressure-loss experiment."},
+    )
+
+    assert response.status_code == 503
+    assert "OpenAI" in response.json()["detail"]
+
+
+def test_custom_openfoam_case_can_be_validated_before_submission() -> None:
+    files = {
+        "0/U": "internalField uniform (0 0 0);",
+        "constant/physicalProperties": "nu 1e-6;",
+        "system/controlDict": "solver incompressibleFluid; endTime 100;",
+        "system/fvSchemes": "ddtSchemes {}",
+        "system/fvSolution": "solvers {}",
+        "system/blockMeshDict": "vertices ();",
+    }
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as bundle:
+        for name, text in files.items():
+            payload = text.encode()
+            info = tarfile.TarInfo(name)
+            info.size = len(payload)
+            bundle.addfile(info, io.BytesIO(payload))
+
+    response = client().post(
+        "/api/custom-cases/validate",
+        content=output.getvalue(),
+        headers={"Content-Type": "application/gzip"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["solver"] == "incompressibleFluid"
+    assert response.json()["needs_block_mesh"] is True
