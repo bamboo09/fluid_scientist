@@ -86,3 +86,14 @@ def test_workbench_can_request_and_apply_model_designed_experiment() -> None:
     assert '"/api/experiment-designs"' in script
     assert "applyExperimentDesign" in script
     assert "design.case" in script
+
+
+def test_workbench_can_validate_custom_openfoam_archive_without_submitting_it() -> None:
+    html = (ROOT / "apps/web/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "apps/web/app.js").read_text(encoding="utf-8")
+
+    assert 'id="custom-case-file"' in html
+    assert 'id="validate-custom-case"' in html
+    assert 'id="custom-case-result"' in html
+    assert '"/api/custom-cases/validate"' in script
+    assert "尚未提交" in html

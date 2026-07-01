@@ -105,6 +105,15 @@
             </form>
           </article>
 
+          <article id="experiment" class="panel custom-case-panel">
+            <div class="panel-kicker"><span>CUSTOM CASE</span><em>VALIDATION ONLY</em></div>
+            <h2>自定义 OpenFOAM Case</h2>
+            <p>上传以 Case 根目录打包的 tar.gz。系统先检查结构、求解器和危险内容；校验通过仍是“尚未提交”。</p>
+            <input id="custom-case-file" type="file" accept=".tar.gz,.tgz,application/gzip">
+            <button id="validate-custom-case" class="secondary" type="button"><span>安全校验 Case</span><b>✓</b></button>
+            <output id="custom-case-result">尚未提交</output>
+          </article>
+
           <article id="jobs" class="panel job-panel">
             <div class="panel-kicker"><span>EXECUTION TARGET</span><em id="job-state">IDLE</em></div>
             <h2>工作站 / HPC 执行边界</h2>

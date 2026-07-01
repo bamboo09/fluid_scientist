@@ -9,6 +9,8 @@ const advanceButton = document.querySelector("#gate-advance");
 const benchmarkForm = document.querySelector("#benchmark-form");
 const submitBenchmarkButton = document.querySelector("#submit-benchmark");
 const executionTarget = document.querySelector("#execution-target");
+const customCaseFile = document.querySelector("#custom-case-file");
+const validateCustomCaseButton = document.querySelector("#validate-custom-case");
 let currentProject = null;
 let selectedTarget = "";
 let pollTimer = null;
@@ -353,6 +355,33 @@ designExperimentButton.addEventListener("click", async () => {
     message.textContent = `模型设计不可用：${error.message}`;
   } finally {
     designExperimentButton.disabled = false;
+  }
+});
+
+validateCustomCaseButton.addEventListener("click", async () => {
+  const file = customCaseFile.files[0];
+  const output = document.querySelector("#custom-case-result");
+  if (!file) {
+    output.textContent = "请先选择 tar.gz Case 包；尚未提交。";
+    return;
+  }
+  validateCustomCaseButton.disabled = true;
+  output.textContent = "正在检查路径、链接、动态代码、求解器和 Case 结构…";
+  try {
+    const response = await fetch("/api/custom-cases/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/gzip" },
+      body: file,
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || `API returned ${response.status}`);
+    output.textContent =
+      `校验通过但尚未提交 · solver=${payload.solver} · `
+      + `needsBlockMesh=${payload.needs_block_mesh} · ${payload.archive_sha256}`;
+  } catch (error) {
+    output.textContent = `校验拒绝：${error.message}；尚未提交。`;
+  } finally {
+    validateCustomCaseButton.disabled = false;
   }
 });
 

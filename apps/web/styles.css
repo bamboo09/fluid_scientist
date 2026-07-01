@@ -115,6 +115,9 @@ button.secondary:hover { border-color: var(--blue); background: rgba(118,199,213
 .parameter-grid input { width: 100%; margin-top: 7px; padding: 10px 9px; color: var(--paper); background: rgba(8,16,19,.72); border: 1px solid var(--line); outline: 0; font: 12px var(--mono); }
 .parameter-grid input:focus { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(118,199,213,.08); }
 .benchmark-form > button { min-height: 42px; margin-left: auto; }
+.custom-case-panel input[type="file"] { width: 100%; margin: 14px 0 10px; color: var(--muted); font: 10px var(--mono); }
+.custom-case-panel button { min-height: 38px; }
+.custom-case-panel output { display: block; margin-top: 12px; color: var(--muted); font: 9px/1.6 var(--mono); overflow-wrap: anywhere; }
 .job-panel { grid-column: span 2; }
 .job-identity { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: baseline; margin: 18px 0 6px; }
 .job-identity span { color: var(--blue); font: 9px var(--mono); letter-spacing: .12em; }
