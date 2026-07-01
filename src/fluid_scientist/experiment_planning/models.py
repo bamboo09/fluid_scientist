@@ -1,5 +1,6 @@
 """Provider-neutral contracts for deterministic CFD experiment planning."""
 
+import math
 from collections.abc import Callable
 from enum import Enum
 from typing import Annotated, Literal, TypeVar
@@ -205,7 +206,8 @@ class CylinderFlowCase(StrictModel):
         calculated = (
             self.mean_velocity_m_s * self.diameter_m / self.kinematic_viscosity_m2_s
         )
-        if calculated > 300.0:
+        reynolds_limit = 300.0
+        if calculated > reynolds_limit + math.ulp(reynolds_limit):
             raise ValueError("calculated Reynolds number cannot exceed 300")
         relative_error = abs(calculated - self.reynolds_number) / self.reynolds_number
         if relative_error > 0.01:

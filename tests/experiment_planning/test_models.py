@@ -327,6 +327,24 @@ def test_cylinder_rejects_calculated_reynolds_above_release_limit() -> None:
         )
 
 
+def test_cylinder_accepts_mathematically_exact_reynolds_limit() -> None:
+    velocity = 300.0 * 0.0001 / 0.03
+    calculated_reynolds = velocity * 0.03 / 0.0001
+    assert calculated_reynolds == 300.00000000000006
+
+    case = CylinderFlowCase.model_validate(
+        cylinder_case()
+        | {
+            "diameter_m": 0.03,
+            "reynolds_number": 300.0,
+            "kinematic_viscosity_m2_s": 0.0001,
+            "mean_velocity_m_s": velocity,
+        }
+    )
+
+    assert case.reynolds_number == 300.0
+
+
 def test_cylinder_cannot_accept_pipe_payload() -> None:
     payload = pipe_plan() | {"experiment_type": "cylinder_flow"}
 
