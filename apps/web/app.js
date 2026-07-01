@@ -5,15 +5,20 @@ const createProjectButton = document.querySelector("#create-project");
 const approveButton = document.querySelector("#gate-approve");
 const rejectButton = document.querySelector("#gate-reject");
 const advanceButton = document.querySelector("#gate-advance");
+const benchmarkForm = document.querySelector("#benchmark-form");
+const submitBenchmarkButton = document.querySelector("#submit-benchmark");
+const executionTarget = document.querySelector("#execution-target");
 let currentProject = null;
+let selectedTarget = "";
+let pollTimer = null;
+const benchmarkCaseId = "pilot-pipe";
 
 const number = (value, digits = 2) => Number(value).toFixed(digits);
 
 async function loadExecutionTargets() {
-  const select = document.querySelector("#execution-target");
   try {
     const targets = await requestJson("/api/execution-targets");
-    select.replaceChildren(...targets.map((target) => {
+    executionTarget.replaceChildren(...targets.map((target) => {
       const option = document.createElement("option");
       option.value = target.target_id;
       option.disabled = !target.available;
@@ -23,13 +28,27 @@ async function loadExecutionTargets() {
         : `${platform} · 不可用：${target.reason}`;
       return option;
     }));
-    if (!targets.length) select.innerHTML = '<option value="">尚未配置真实执行平台</option>';
+    const available = targets.find((target) => target.available);
+    if (available) {
+      executionTarget.value = available.target_id;
+      selectedTarget = available.target_id;
+      document.querySelector("#system-state").innerHTML =
+        `<span></span> REAL TARGET · ${available.foam_version || "OPENFOAM"}`;
+    } else {
+      executionTarget.innerHTML = '<option value="">尚未配置真实执行平台</option>';
+      document.querySelector("#system-state").innerHTML =
+        "<span></span> FAKE MODE · 未配置真实平台";
+    }
+    refreshBenchmarkControls();
   } catch (error) {
-    select.innerHTML = `<option value="">能力检查失败：${error.message}</option>`;
+    executionTarget.innerHTML = `<option value="">能力检查失败：${error.message}</option>`;
+    document.querySelector("#system-state").innerHTML = "<span></span> TARGET CHECK FAILED";
   }
 }
 
 function renderResult(result) {
+  document.querySelector("#secondary-metric-label").textContent = "标准差";
+  document.querySelector("#third-metric-label").textContent = "细网格 GCI";
   document.querySelector("#project-status").textContent = result.workflow_state;
   document.querySelector("#job-state").textContent = "COMPLETED 3 / 3";
   document.querySelector("#job-progress").style.width = "100%";
@@ -76,8 +95,6 @@ const gateForState = (state) => ({
 const actionForState = (state) => ({
   SPEC_READY: "RETRIEVE_EVIDENCE",
   EVIDENCE_READY: "DESIGN_PILOT",
-  PILOT_READY: "SUBMIT_PILOT",
-  PILOT_RUNNING: "VERIFY_PILOT",
   PILOT_VERIFIED: "DESIGN_FULL",
   FULL_READY: "SUBMIT_FULL",
   FULL_RUNNING: "ANALYZE",
@@ -94,9 +111,16 @@ function renderProject(project) {
   approveButton.disabled = !gate || approved;
   rejectButton.disabled = !gate;
   advanceButton.disabled = !actionForState(project.workflow_state) || (gate && !approved);
-  message.textContent = gate
-    ? `${project.workflow_state}：等待 ${gate} 人工审批。`
-    : `${project.workflow_state}：可执行下一工作流动作。`;
+  if (project.workflow_state === "PILOT_READY" && approved) {
+    message.textContent = "Gate 2 已批准：请检查圆管参数并提交真实工作站算例。";
+  } else if (project.workflow_state === "PILOT_RUNNING") {
+    message.textContent = "真实算例已提交，正在轮询工作站状态。";
+  } else {
+    message.textContent = gate
+      ? `${project.workflow_state}：等待 ${gate} 人工审批。`
+      : `${project.workflow_state}：可执行下一工作流动作。`;
+  }
+  refreshBenchmarkControls();
 }
 
 async function requestJson(url, options = {}) {
@@ -106,6 +130,98 @@ async function requestJson(url, options = {}) {
     throw new Error(body.detail || `API returned ${response.status}`);
   }
   return response.json();
+}
+
+function gateTwoApproved() {
+  return Boolean(currentProject?.approvals.some((item) => item.gate === "GATE_2"));
+}
+
+function refreshBenchmarkControls() {
+  const ready = currentProject?.workflow_state === "PILOT_READY" && gateTwoApproved();
+  benchmarkForm.hidden = !ready;
+  submitBenchmarkButton.disabled = !ready || !selectedTarget;
+}
+
+function pipeCasePayload() {
+  return {
+    diameter_m: Number(document.querySelector("#pipe-diameter").value),
+    length_m: Number(document.querySelector("#pipe-length").value),
+    mean_velocity_m_s: Number(document.querySelector("#pipe-velocity").value),
+    kinematic_viscosity_m2_s: Number(document.querySelector("#pipe-nu").value),
+    density_kg_m3: Number(document.querySelector("#pipe-density").value),
+    axial_cells: Number(document.querySelector("#axial-cells").value),
+    radial_cells: Number(document.querySelector("#radial-cells").value),
+  };
+}
+
+function renderBenchmarkResults(results) {
+  const { collection, validation, project } = results;
+  currentProject = project;
+  document.querySelector("#project-status").textContent = project.workflow_state;
+  document.querySelector("#job-state").textContent = collection.state.toUpperCase();
+  document.querySelector("#job-progress").style.width = "100%";
+  document.querySelector("#credibility-state").textContent = validation.passed ? "PASSED" : "FAILED";
+  document.querySelector("#mass-balance").textContent =
+    `${number(validation.mass_imbalance_percent, 4)}%`;
+  document.querySelector("#mesh-score").textContent = collection.mesh.passed ? "MESH OK" : "FAILED";
+  document.querySelector("#benchmark-score").textContent =
+    `${number(validation.pressure_drop_error_percent, 2)}% ERR`;
+  document.querySelector("#mean-pressure").textContent =
+    number(validation.numerical_pressure_drop_pa, 3);
+  document.querySelector("#secondary-metric-label").textContent = "解析压降";
+  document.querySelector("#std-pressure").textContent =
+    number(validation.analytical_pressure_drop_pa, 3);
+  document.querySelector("#third-metric-label").textContent = "解析误差";
+  document.querySelector("#gci").textContent =
+    number(validation.pressure_drop_error_percent, 3);
+  document.querySelector("#audit-count").textContent =
+    `${project.audit_event_count} AUDIT EVENTS`;
+  const claims = [
+    `网格检查通过，共 ${collection.mesh.cells} 个单元。`,
+    `入口与出口质量不平衡为 ${number(validation.mass_imbalance_percent, 4)}%。`,
+    `数值压降 ${number(validation.numerical_pressure_drop_pa, 3)} Pa，`
+      + `相对解析解误差 ${number(validation.pressure_drop_error_percent, 2)}%。`,
+  ];
+  const list = document.querySelector("#claim-list");
+  list.replaceChildren(...claims.map((text) => {
+    const item = document.createElement("li");
+    item.textContent = text;
+    return item;
+  }));
+  document.querySelector("#scope-note").textContent = validation.passed
+    ? "该结果已通过网格、残差、质量守恒和 Hagen–Poiseuille 解析基准门禁。"
+    : "该算例已完成，但未通过全部可信性门禁，不能用于科研结论。";
+  document.querySelector("#report").hidden = false;
+  message.textContent = validation.passed
+    ? "真实工作站仿真完成，确定性可信性验收通过。"
+    : "真实工作站仿真完成，但可信性验收未通过。";
+}
+
+async function pollBenchmark(projectId, targetId) {
+  const query = `target_id=${encodeURIComponent(targetId)}`;
+  try {
+    const job = await requestJson(
+      `/api/projects/${projectId}/benchmarks/${benchmarkCaseId}?${query}`,
+    );
+    document.querySelector("#job-state").textContent = job.state.toUpperCase();
+    document.querySelector("#job-progress").style.width =
+      job.state === "running" ? "58%" : "18%";
+    if (job.state === "succeeded") {
+      const results = await requestJson(
+        `/api/projects/${projectId}/benchmarks/${benchmarkCaseId}/results?${query}`,
+      );
+      renderBenchmarkResults(results);
+      return;
+    }
+    if (["failed", "cancelled"].includes(job.state)) {
+      message.textContent = `工作站算例终止：${job.error || job.state}`;
+      return;
+    }
+    pollTimer = window.setTimeout(() => pollBenchmark(projectId, targetId), 1500);
+  } catch (error) {
+    message.textContent = `状态查询失败：${error.message}，稍后自动重试。`;
+    pollTimer = window.setTimeout(() => pollBenchmark(projectId, targetId), 3000);
+  }
 }
 
 form.addEventListener("submit", async (event) => {
@@ -198,6 +314,44 @@ advanceButton.addEventListener("click", async () => {
     renderProject(project);
   } catch (error) {
     message.textContent = `工作流操作失败：${error.message}`;
+  }
+});
+
+executionTarget.addEventListener("change", () => {
+  selectedTarget = executionTarget.value;
+  refreshBenchmarkControls();
+});
+
+benchmarkForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  if (!currentProject || !selectedTarget || !gateTwoApproved()) return;
+  submitBenchmarkButton.disabled = true;
+  message.textContent = "正在提交类型化圆管算例到工作站…";
+  if (pollTimer) window.clearTimeout(pollTimer);
+  try {
+    const submission = await requestJson(
+      `/api/projects/${currentProject.project_id}/benchmarks`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_id: selectedTarget,
+          case_id: benchmarkCaseId,
+          case: pipeCasePayload(),
+          actor: "researcher",
+        }),
+      },
+    );
+    currentProject = submission.project;
+    document.querySelector("#project-status").textContent = currentProject.workflow_state;
+    document.querySelector("#job-state").textContent = submission.job.state.toUpperCase();
+    document.querySelector("#job-progress").style.width = "18%";
+    benchmarkForm.hidden = true;
+    message.textContent = `作业 ${submission.job.job_id} 已提交，正在等待 OpenFOAM。`;
+    pollBenchmark(currentProject.project_id, selectedTarget);
+  } catch (error) {
+    message.textContent = `提交失败：${error.message}`;
+    submitBenchmarkButton.disabled = false;
   }
 });
 

@@ -26,3 +26,27 @@ def test_skill_governance_is_not_exposed_in_the_workbench() -> None:
 
     assert "候选 Skill" not in assets
     assert "Skill 治理" not in assets
+
+
+def test_workbench_exposes_real_workstation_submission_and_result_polling() -> None:
+    html = (ROOT / "apps/web/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "apps/web/app.js").read_text(encoding="utf-8")
+
+    for field_id in (
+        "benchmark-form",
+        "pipe-diameter",
+        "pipe-length",
+        "pipe-velocity",
+        "pipe-nu",
+        "pipe-density",
+        "axial-cells",
+        "radial-cells",
+        "submit-benchmark",
+    ):
+        assert f'id="{field_id}"' in html
+
+    assert "/benchmarks" in script
+    assert "/results" in script
+    assert "pollBenchmark" in script
+    assert "validation.passed" in script
+    assert 'PILOT_READY: "SUBMIT_PILOT"' not in script

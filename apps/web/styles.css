@@ -101,6 +101,16 @@ button.secondary:hover { border-color: var(--blue); background: rgba(118,199,213
 .action-panel dd { margin: 0 0 4px; font: 26px var(--display); }
 .gate-controls { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 22px; }
 .gate-controls button { min-height: 38px; padding: 0 14px; }
+.benchmark-form { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
+.benchmark-form[hidden] { display: none; }
+.form-heading { display: flex; justify-content: space-between; color: var(--blue); font: 9px var(--mono); letter-spacing: .12em; }
+.form-heading em { color: var(--muted); font-style: normal; }
+.parameter-grid { display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; margin: 15px 0; }
+.parameter-grid label { color: var(--muted); font: 10px var(--mono); }
+.parameter-grid label small { float: right; color: #56656b; font-size: 8px; }
+.parameter-grid input { width: 100%; margin-top: 7px; padding: 10px 9px; color: var(--paper); background: rgba(8,16,19,.72); border: 1px solid var(--line); outline: 0; font: 12px var(--mono); }
+.parameter-grid input:focus { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(118,199,213,.08); }
+.benchmark-form > button { min-height: 42px; margin-left: auto; }
 .job-panel { grid-column: span 2; }
 .job-panel ol { list-style: none; padding: 0; display: flex; gap: 18px; }
 .job-panel li { flex: 1; color: var(--muted); font-size: 11px; }
@@ -144,6 +154,7 @@ button.secondary:hover { border-color: var(--blue); background: rgba(118,199,213
   .sidebar { display: none; }
   .dashboard-grid { grid-template-columns: 1fr 1fr; }
   .action-panel, .job-panel { grid-column: span 2; }
+  .parameter-grid { grid-template-columns: repeat(2, minmax(120px, 1fr)); }
 }
 @media (max-width: 650px) {
   .topbar { padding: 0 16px; }
@@ -157,5 +168,7 @@ button.secondary:hover { border-color: var(--blue); background: rgba(118,199,213
   .stage-rail { grid-template-columns: repeat(4, 1fr); }
   .dashboard-grid, .report-grid { grid-template-columns: 1fr; }
   .action-panel, .job-panel { grid-column: auto; }
+  .parameter-grid { grid-template-columns: 1fr; }
+  .benchmark-form > button { margin-left: 0; }
 }
 

@@ -69,3 +69,16 @@ def test_nonzero_remote_exit_is_classified(tmp_path) -> None:
     with pytest.raises(RemoteExecutionError, match="denied"):
         transport.execute(RemoteProgram.SQUEUE, (RemoteArg("123"),), timeout=10)
 
+
+def test_workstation_worker_uses_home_relative_install_path(tmp_path) -> None:
+    runner = RecordingRunner(ProcessResult(returncode=0, stdout="{}", stderr=""))
+    transport = SSHTransport(node(tmp_path), runner=runner)
+
+    transport.execute(
+        RemoteProgram.FLUID_WORKER,
+        (RemoteArg("doctor"), RemoteArg("--json")),
+        timeout=15,
+    )
+
+    argv, _ = runner.calls[0]
+    assert argv[-4:] == ("--", ".local/bin/fluid-worker", "doctor", "--json")

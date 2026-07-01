@@ -14,7 +14,7 @@
         <span class="brand-mark">φ</span>
         <div><strong>FLUID SCIENTIST</strong><small>可信数值研究系统</small></div>
       </div>
-      <div class="system-state"><span></span> FAKE MODE · 无需外部凭据</div>
+      <div id="system-state" class="system-state"><span></span> 正在检查执行平台</div>
     </header>
 
     <div class="shell">
@@ -76,19 +76,35 @@
         <section class="dashboard-grid reveal">
           <article class="panel action-panel">
             <div class="panel-kicker"><span>ACTION</span><em>GATE 2</em></div>
-            <h2>Pilot 方案已锁定</h2>
-            <p>中心工况 × 三套网格。Fake 模式自动记录批准，但保留完整审计链。</p>
-            <dl><div><dt>算例</dt><dd>3</dd></div><div><dt>估算预算</dt><dd>18 CPU·h</dd></div></dl>
+            <h2>层流圆管可信性 Pilot</h2>
+            <p>完成 Gate 2 审批后，可将严格参数化算例直接提交到已验证的 OpenFOAM 工作站。</p>
+            <dl><div><dt>算例</dt><dd>1</dd></div><div><dt>验收</dt><dd>4 项</dd></div></dl>
             <div class="gate-controls" aria-label="人工审批控制">
               <button id="gate-approve" type="button" disabled>批准当前 Gate</button>
               <button id="gate-reject" class="secondary" type="button" disabled>驳回</button>
               <button id="gate-advance" class="secondary" type="button" disabled>执行下一动作</button>
             </div>
+            <form id="benchmark-form" class="benchmark-form" hidden>
+              <div class="form-heading">
+                <span>REAL CASE PARAMETERS</span>
+                <em>SI UNITS</em>
+              </div>
+              <div class="parameter-grid">
+                <label>管径 <small>m</small><input id="pipe-diameter" type="number" value="0.02" min="0.000001" step="0.001" required></label>
+                <label>管长 <small>m</small><input id="pipe-length" type="number" value="2" min="0.000001" step="0.1" required></label>
+                <label>平均速度 <small>m/s</small><input id="pipe-velocity" type="number" value="0.1" min="0.000001" step="0.01" required></label>
+                <label>运动黏度 <small>m²/s</small><input id="pipe-nu" type="number" value="0.000001" min="0.000000000001" step="0.0000001" required></label>
+                <label>密度 <small>kg/m³</small><input id="pipe-density" type="number" value="998.2" min="0.000001" step="0.1" required></label>
+                <label>轴向单元 <small>count</small><input id="axial-cells" type="number" value="100" min="10" max="10000" step="1" required></label>
+                <label>径向单元 <small>count</small><input id="radial-cells" type="number" value="12" min="3" max="500" step="1" required></label>
+              </div>
+              <button id="submit-benchmark" type="submit" disabled><span>提交到工作站</span><b>↗</b></button>
+            </form>
           </article>
 
           <article id="jobs" class="panel job-panel">
-            <div class="panel-kicker"><span>HPC / SLURM</span><em id="job-state">IDLE</em></div>
-            <h2>三节点执行边界</h2>
+            <div class="panel-kicker"><span>EXECUTION TARGET</span><em id="job-state">IDLE</em></div>
+            <h2>工作站 / HPC 执行边界</h2>
             <ol>
               <li><span>DATA</span>制品构建与校验</li>
               <li><span>LOGIN</span>作业提交与查询</li>
@@ -124,8 +140,8 @@
             <article class="metric-sheet">
               <p>确定性计算</p>
               <div><span>平均压降</span><strong id="mean-pressure">—</strong><small>Pa</small></div>
-              <div><span>标准差</span><strong id="std-pressure">—</strong><small>Pa</small></div>
-              <div><span>细网格 GCI</span><strong id="gci">—</strong><small>%</small></div>
+              <div><span id="secondary-metric-label">标准差</span><strong id="std-pressure">—</strong><small>Pa</small></div>
+              <div><span id="third-metric-label">细网格 GCI</span><strong id="gci">—</strong><small>%</small></div>
             </article>
             <article class="claim-sheet"><p>证据化结论</p><ol id="claim-list"></ol></article>
           </div>
