@@ -24,7 +24,11 @@ Use the data node for transfer, download, compilation, checksums, and artifact p
 
 Use the Foundation distribution semantics, not similarly named OpenCFD releases. OpenFOAM Foundation 13 uses `foamRun -solver incompressibleFluid`, with `solver incompressibleFluid` in `controlDict`, viscosity in `constant/physicalProperties`, and laminar selection in `constant/momentumTransport`.
 
-Treat OpenFOAM incompressible `p` as kinematic pressure and `phi` as volumetric flow. Convert pressure drop to Pa and flow to kg/s using the case density before comparing against Hagen鈥揚oiseuille or checking mass conservation. Require mesh quality, final residual, mass imbalance, and analytical benchmark thresholds before marking the Pilot verified.
+Treat OpenFOAM incompressible `p` as kinematic pressure and `phi` as volumetric flow. Convert pressure drop to Pa and flow to kg/s using the case density before comparing against Hagen-Poiseuille or checking mass conservation. Require mesh quality, final residual, mass imbalance, and analytical benchmark thresholds before marking the Pilot verified.
+
+For a blockMesh axisymmetric pipe with a collapsed centreline, use a one-cell wedge in the circumferential direction. Subdividing that direction creates extremely thin centreline cells, high aspect ratio, and small determinant failures even when the solver exits normally.
+
+Do not classify the normal `SIGFPE` trapping banner as a floating-point crash. Require an actual exception or fatal-error record; preserve a regression case containing the trapping banner followed by a normal `End` marker.
 
 ## Failure routing
 

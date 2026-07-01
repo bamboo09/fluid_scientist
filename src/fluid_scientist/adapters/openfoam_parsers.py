@@ -67,7 +67,7 @@ def parse_check_mesh(text: str) -> CheckMeshResult:
 
 def parse_solver_log(text: str) -> SolverLogResult:
     lower = text.lower()
-    if "floating point exception" in lower:
+    if re.search(r"floating point exception(?!\s+trapping)", lower):
         raise OpenFOAMFailure("solver failed with floating point exception")
     if "foam fatal error" in lower:
         raise OpenFOAMFailure("solver reported a FOAM fatal error")

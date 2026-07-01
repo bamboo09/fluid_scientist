@@ -85,3 +85,13 @@ def test_repository_skill_covers_safe_openfoam13_workstation_execution() -> None
     assert "10.129.177.241" not in combined
     assert "192.168.1.102" not in combined
     assert "username: ls" not in combined
+
+
+def test_repository_skill_captures_axisymmetric_mesh_and_log_parser_failures() -> None:
+    reference = Path("skills/fluid-research-workflow/references/workflow.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "one-cell wedge" in reference
+    assert "SIGFPE" in reference
+    assert "trapping banner" in reference

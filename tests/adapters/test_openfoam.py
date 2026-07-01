@@ -65,6 +65,18 @@ def test_solver_parser_classifies_floating_point_failure() -> None:
         parse_solver_log("FOAM FATAL ERROR: Floating point exception")
 
 
+def test_solver_parser_ignores_sigfpe_trapping_banner() -> None:
+    result = parse_solver_log(
+        "sigFpe : Enabling floating point exception trapping (FOAM_SIGFPE).\n"
+        "smoothSolver:  Solving for Ux, Initial residual = 1e-5, "
+        "Final residual = 1e-9, No Iterations 1\n"
+        "End\n"
+    )
+
+    assert result.completed is True
+    assert result.final_residuals == {"Ux": 1e-9}
+
+
 def test_hagen_poiseuille_benchmark_and_relative_error() -> None:
     analytical = hagen_poiseuille_pressure_drop(
         dynamic_viscosity_pa_s=1.0e-3,
@@ -111,14 +123,16 @@ def test_openfoam13_renderer_builds_a_complete_laminar_pipe_case(tmp_path) -> No
     assert "fields          (phi);" in control
     assert "simulationType laminar;" in (case_root / "constant/momentumTransport").read_text()
     assert "1e-06" in (case_root / "constant/physicalProperties").read_text()
-    assert "(100 12 12)" in (case_root / "system/blockMeshDict").read_text()
+    assert "(100 1 12)" in (case_root / "system/blockMeshDict").read_text()
     block_mesh = (case_root / "system/blockMeshDict").read_text()
-    assert block_mesh.count("type cyclic;") == 2
-    assert "neighbourPatch side2;" in block_mesh
-    assert "neighbourPatch side1;" in block_mesh
+    assert block_mesh.count("type wedge;") == 2
+    assert "type cyclic;" not in block_mesh
     assert "bounded Gauss limitedLinearV 1" in (
         case_root / "system/fvSchemes"
     ).read_text()
+    fv_solution = (case_root / "system/fvSolution").read_text()
+    u_solver = fv_solution.split("    U\n    {", maxsplit=1)[1].split("    }", maxsplit=1)[0]
+    assert "relTol          0;" in u_solver
     inlet_velocity = (case_root / "0/U").read_text()
     assert "type            codedFixedValue;" in inlet_velocity
     assert "name            fullyDevelopedPipeInlet;" in inlet_velocity
