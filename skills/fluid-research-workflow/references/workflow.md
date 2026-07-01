@@ -25,7 +25,7 @@ Use the data node for transfer, download, compilation, checksums, and artifact p
 - Apply double validation: validate the tar.gz before transfer and repeat the same validation inside `fluid-worker` before extraction.
 - Reject absolute paths, traversal, links, oversized expansion, dynamic code, system calls, missing dictionaries, and non-allow-listed solvers.
 - Upload only to the fixed home-relative incoming directory. Accept an archive name, never a caller-selected remote path.
-- Execute only `submit-custom` with the fixed chain: optional `blockMesh`, mandatory `checkMesh -allGeometry -allTopology`, then `foamRun -solver incompressibleFluid`.
+- Execute only `submit-custom` with the fixed chain: optional `blockMesh`, optional `mirrorMesh` when `system/mirrorMeshDict` is present, mandatory `checkMesh -allGeometry -allTopology`, then `foamRun -solver incompressibleFluid`.
 - Collect the mesh report, solver completion marker, final residuals, numeric time directories, case manifest, and `.foam` marker. Present these results in the browser; retain ParaView as an advanced workstation view.
 - Do not apply pipe pressure-drop or mass-flow acceptance thresholds to cylinder, bend, or other custom geometries unless their case defines and validates equivalent observables.
 

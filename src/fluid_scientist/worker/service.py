@@ -23,7 +23,7 @@ from fluid_scientist.adapters.openfoam import LaminarPipeCase, OpenFOAM13CaseRen
 from fluid_scientist.adapters.openfoam_parsers import parse_check_mesh, parse_solver_log
 from fluid_scientist.compat import UTC, StrEnum
 
-REQUIRED_COMMANDS = ("blockMesh", "checkMesh", "foamRun", "postProcess")
+REQUIRED_COMMANDS = ("blockMesh", "mirrorMesh", "checkMesh", "foamRun", "postProcess")
 
 
 class DoctorReport(BaseModel):
@@ -89,6 +89,7 @@ class CustomCaseSpec(BaseModel):
     archive_sha256: str
     solver: Literal["incompressibleFluid"]
     needs_block_mesh: bool
+    needs_mirror_mesh: bool = False
 
 
 class JobRecord(BaseModel):
@@ -142,11 +143,22 @@ class OpenFOAM13JobRunner:
         self._runner = runner or SubprocessCommandRunner()
         self._command_timeout = command_timeout
 
-    def run(self, case_root: Path, *, needs_block_mesh: bool = True) -> JobRunResult:
+    def run(
+        self,
+        case_root: Path,
+        *,
+        needs_block_mesh: bool = True,
+        needs_mirror_mesh: bool = False,
+    ) -> JobRunResult:
         if needs_block_mesh:
             block = self._run(("blockMesh",), case_root)
             if block.returncode != 0:
                 raise RuntimeError(_failure("blockMesh", block))
+
+        if needs_mirror_mesh:
+            mirrored = self._run(("mirrorMesh",), case_root)
+            if mirrored.returncode != 0:
+                raise RuntimeError(_failure("mirrorMesh", mirrored))
 
         mesh = self._run(("checkMesh", "-allGeometry", "-allTopology"), case_root)
         if mesh.returncode != 0:
@@ -209,6 +221,7 @@ class WorkerJobService:
             archive_sha256=validated.archive_sha256,
             solver=validated.solver,
             needs_block_mesh=validated.needs_block_mesh,
+            needs_mirror_mesh=validated.needs_mirror_mesh,
         )
         job_root = self._job_root(job_id)
         if (job_root / "job.json").is_file():
@@ -282,6 +295,7 @@ class WorkerJobService:
             result = (runner or OpenFOAM13JobRunner()).run(
                 case_root,
                 needs_block_mesh=custom_spec.needs_block_mesh if custom_spec else True,
+                needs_mirror_mesh=custom_spec.needs_mirror_mesh if custom_spec else False,
             )
             solver_log = result.solver_log
             if isinstance(record.spec, LaminarPipeCase):

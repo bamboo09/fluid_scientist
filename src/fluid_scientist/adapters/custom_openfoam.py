@@ -22,6 +22,7 @@ class CustomCaseManifest(BaseModel):
     members: tuple[str, ...]
     has_mesh: bool
     needs_block_mesh: bool
+    needs_mirror_mesh: bool
     uncompressed_bytes: int = Field(ge=0)
 
 
@@ -112,5 +113,6 @@ def validate_custom_case_archive(
         members=tuple(sorted(name_set)),
         has_mesh=has_mesh,
         needs_block_mesh=not has_mesh,
+        needs_mirror_mesh="system/mirrorMeshDict" in name_set,
         uncompressed_bytes=total_size,
     )

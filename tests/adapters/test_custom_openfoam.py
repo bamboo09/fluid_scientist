@@ -47,6 +47,14 @@ def test_valid_custom_case_returns_immutable_manifest() -> None:
     assert "system/controlDict" in result.members
 
 
+def test_custom_case_detects_fixed_mirror_mesh_preprocessing() -> None:
+    files = {**valid_files(), "system/mirrorMeshDict": "planeType pointAndNormal;"}
+
+    result = validate_custom_case_archive(archive(files))
+
+    assert result.needs_mirror_mesh is True
+
+
 @pytest.mark.parametrize(
     "files, message",
     [
@@ -68,4 +76,3 @@ def test_custom_case_rejects_links() -> None:
         validate_custom_case_archive(
             archive(valid_files(), symlink=("constant/polyMesh", "/etc"))
         )
-

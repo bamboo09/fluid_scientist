@@ -13,6 +13,7 @@ def test_workflow_skill_preserves_custom_openfoam_safety_and_result_contracts() 
     assert "double validation" in reference
     assert "submit-custom" in reference
     assert "blockMesh" in reference
+    assert "optional `mirrorMesh`" in reference
     assert "checkMesh" in reference
     assert "foamRun -solver incompressibleFluid" in reference
     assert "browser" in reference

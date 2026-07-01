@@ -27,7 +27,7 @@ class RecordingRunner:
 def test_doctor_report_identifies_foundation_13_and_fixed_commands(tmp_path) -> None:
     commands = {
         name: f"/opt/openfoam13/platforms/linux64GccDPInt32Opt/bin/{name}"
-        for name in ("blockMesh", "checkMesh", "foamRun", "postProcess")
+        for name in ("blockMesh", "mirrorMesh", "checkMesh", "foamRun", "postProcess")
     }
 
     report = build_doctor_report(
@@ -45,7 +45,7 @@ def test_doctor_report_identifies_foundation_13_and_fixed_commands(tmp_path) -> 
         "cpu_count": 32,
         "memory_gb": 125.5,
         "disk_free_gb": 430.25,
-        "commands": ["blockMesh", "checkMesh", "foamRun", "postProcess"],
+        "commands": ["blockMesh", "mirrorMesh", "checkMesh", "foamRun", "postProcess"],
     }
 
 
@@ -161,6 +161,23 @@ def test_custom_runner_uses_fixed_commands_and_optional_block_mesh(tmp_path) -> 
     job.run(tmp_path, needs_block_mesh=False)
 
     assert [call[0] for call in runner.calls] == [
+        ("checkMesh", "-allGeometry", "-allTopology"),
+        ("foamRun", "-solver", "incompressibleFluid"),
+    ]
+
+
+def test_custom_runner_allows_only_fixed_mirror_mesh_preprocessing(tmp_path) -> None:
+    runner = RecordingRunner()
+
+    OpenFOAM13JobRunner(runner=runner).run(
+        tmp_path,
+        needs_block_mesh=True,
+        needs_mirror_mesh=True,
+    )
+
+    assert [call[0] for call in runner.calls] == [
+        ("blockMesh",),
+        ("mirrorMesh",),
         ("checkMesh", "-allGeometry", "-allTopology"),
         ("foamRun", "-solver", "incompressibleFluid"),
     ]

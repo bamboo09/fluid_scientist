@@ -548,7 +548,8 @@ validateCustomCaseButton.addEventListener("click", async () => {
     if (!response.ok) throw new Error(payload.detail || `API returned ${response.status}`);
     output.textContent =
       `校验通过但尚未提交 · solver=${payload.solver} · `
-      + `needsBlockMesh=${payload.needs_block_mesh} · ${payload.archive_sha256}`;
+      + `needsBlockMesh=${payload.needs_block_mesh} · `
+      + `needsMirrorMesh=${payload.needs_mirror_mesh} · ${payload.archive_sha256}`;
     submitCustomCaseButton.disabled = !selectedTarget;
   } catch (error) {
     output.textContent = `校验拒绝：${error.message}；尚未提交。`;
