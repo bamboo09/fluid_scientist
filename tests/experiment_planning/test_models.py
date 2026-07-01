@@ -1,3 +1,5 @@
+import json
+
 import pytest
 from pydantic import ValidationError
 
@@ -112,6 +114,32 @@ def test_discriminated_union_routes_to_matching_plan(
     assert plan.model_dump(mode="json")["experiment_type"] == payload["experiment_type"]
 
 
+@pytest.mark.parametrize("payload", [pipe_plan(), cylinder_plan(), cavity_plan(), custom_plan()])
+def test_provider_style_json_list_payloads_validate(payload: dict[str, object]) -> None:
+    provider_payload = json.loads(json.dumps(payload))
+
+    plan = ExperimentPlan.model_validate(provider_payload)
+
+    assert isinstance(plan.root.assumptions, tuple)
+    assert isinstance(plan.root.limitations, tuple)
+    assert isinstance(plan.root.requested_outputs, tuple)
+    if plan.root.experiment_type == "custom_openfoam":
+        assert isinstance(plan.root.case.boundary_conditions, tuple)
+    else:
+        assert isinstance(plan.root.parameter_sweeps, tuple)
+
+
+@pytest.mark.parametrize("payload", [pipe_plan(), cylinder_plan(), cavity_plan(), custom_plan()])
+def test_json_mode_dump_round_trips_through_model_validate(
+    payload: dict[str, object],
+) -> None:
+    original = ExperimentPlan.model_validate(payload)
+
+    round_tripped = ExperimentPlan.model_validate(original.model_dump(mode="json"))
+
+    assert round_tripped == original
+
+
 def test_all_contracts_reject_extra_fields() -> None:
     payload = pipe_plan() | {"solver_backdoor": "shell command"}
 
@@ -125,6 +153,12 @@ def test_strict_contract_rejects_numeric_strings() -> None:
 
     with pytest.raises(ValidationError, match="valid integer"):
         ExperimentPlan.model_validate(payload)
+
+
+@pytest.mark.parametrize("assumptions", ["not a sequence", {"not", "json"}])
+def test_tuple_compatibility_does_not_coerce_non_list_inputs(assumptions: object) -> None:
+    with pytest.raises(ValidationError, match="valid tuple"):
+        ExperimentPlan.model_validate(pipe_plan() | {"assumptions": assumptions})
 
 
 @pytest.mark.parametrize(

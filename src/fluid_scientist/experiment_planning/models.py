@@ -2,9 +2,20 @@
 
 from collections.abc import Callable
 from enum import Enum
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, RootModel, model_validator
+
+TupleItem = TypeVar("TupleItem")
+
+
+def _json_list_to_tuple(value: object) -> object:
+    """Accept JSON's sole sequence type without weakening element validation."""
+
+    return tuple(value) if isinstance(value, list) else value
+
+
+JsonTuple = Annotated[tuple[TupleItem, ...], BeforeValidator(_json_list_to_tuple)]
 
 
 class StrictModel(BaseModel):
@@ -24,7 +35,7 @@ class ParameterSweep(StrictModel):
     """A small, explicit one-factor sweep for deterministic compilation."""
 
     parameter: str = Field(min_length=1, max_length=64)
-    values: tuple[float, ...] = Field(min_length=2, max_length=20)
+    values: JsonTuple[float] = Field(min_length=2, max_length=20)
 
     @model_validator(mode="after")
     def require_positive_increasing_values(self) -> "ParameterSweep":
@@ -94,9 +105,9 @@ class PlanBase(StrictModel):
     experiment_name: str = Field(min_length=1, max_length=80)
     objective: str = Field(min_length=10)
     rationale: str = Field(min_length=10)
-    assumptions: tuple[str, ...] = Field(min_length=1)
-    limitations: tuple[str, ...] = Field(min_length=1)
-    requested_outputs: tuple[str, ...] = Field(min_length=1)
+    assumptions: JsonTuple[str] = Field(min_length=1)
+    limitations: JsonTuple[str] = Field(min_length=1)
+    requested_outputs: JsonTuple[str] = Field(min_length=1)
     convergence_targets: ConvergenceTargets
 
 
@@ -124,9 +135,9 @@ class LaminarPipeCase(StrictModel):
 
 class PipeExperimentPlan(PlanBase):
     experiment_type: Literal["laminar_pipe"]
-    requested_outputs: tuple[PipeOutputValue, ...] = Field(min_length=1)
+    requested_outputs: JsonTuple[PipeOutputValue] = Field(min_length=1)
     case: LaminarPipeCase
-    parameter_sweeps: tuple[ParameterSweep, ...] = Field(default=(), max_length=4)
+    parameter_sweeps: JsonTuple[ParameterSweep] = Field(default=(), max_length=4)
 
     @model_validator(mode="after")
     def require_meaningful_sweeps(self) -> "PipeExperimentPlan":
@@ -196,9 +207,9 @@ def _cylinder_coupled_sweep_updates(
 
 class CylinderExperimentPlan(PlanBase):
     experiment_type: Literal["cylinder_flow"]
-    requested_outputs: tuple[CylinderOutputValue, ...] = Field(min_length=1)
+    requested_outputs: JsonTuple[CylinderOutputValue] = Field(min_length=1)
     case: CylinderFlowCase
-    parameter_sweeps: tuple[ParameterSweep, ...] = Field(default=(), max_length=4)
+    parameter_sweeps: JsonTuple[ParameterSweep] = Field(default=(), max_length=4)
 
     @model_validator(mode="after")
     def require_meaningful_sweeps(self) -> "CylinderExperimentPlan":
@@ -224,9 +235,9 @@ class LidDrivenCavityCase(StrictModel):
 
 class CavityExperimentPlan(PlanBase):
     experiment_type: Literal["lid_driven_cavity"]
-    requested_outputs: tuple[CavityOutputValue, ...] = Field(min_length=1)
+    requested_outputs: JsonTuple[CavityOutputValue] = Field(min_length=1)
     case: LidDrivenCavityCase
-    parameter_sweeps: tuple[ParameterSweep, ...] = Field(default=(), max_length=4)
+    parameter_sweeps: JsonTuple[ParameterSweep] = Field(default=(), max_length=4)
 
     @model_validator(mode="after")
     def require_meaningful_sweeps(self) -> "CavityExperimentPlan":
@@ -248,14 +259,14 @@ CustomOutput = Annotated[str, Field(pattern=r"^[a-z][a-z0-9_]{1,63}$")]
 
 class CustomOpenFOAMCase(StrictModel):
     geometry: str = Field(min_length=10)
-    boundary_conditions: tuple[str, ...] = Field(min_length=2)
+    boundary_conditions: JsonTuple[str] = Field(min_length=2)
     mesh_strategy: str = Field(min_length=10)
     run_strategy: str = Field(min_length=10)
 
 
 class CustomExperimentPlan(PlanBase):
     experiment_type: Literal["custom_openfoam"]
-    requested_outputs: tuple[CustomOutput, ...] = Field(min_length=1)
+    requested_outputs: JsonTuple[CustomOutput] = Field(min_length=1)
     case: CustomOpenFOAMCase
 
 
