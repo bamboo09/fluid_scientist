@@ -1,5 +1,6 @@
 """Provider-neutral contracts for deterministic CFD experiment planning."""
 
+from collections.abc import Callable
 from enum import Enum
 from typing import Annotated, Literal
 
@@ -9,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, RootModel, model_validator
 class StrictModel(BaseModel):
     """Base for closed planning contracts."""
 
-    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, strict=True)
 
 
 class ConvergenceTargets(StrictModel):
@@ -35,6 +36,34 @@ class ParameterSweep(StrictModel):
         return self
 
 
+SweepUpdates = Callable[[StrictModel, str, float], dict[str, float]]
+
+
+def _validate_case_sweeps(
+    case: StrictModel,
+    sweeps: tuple[ParameterSweep, ...],
+    *,
+    allowed_parameters: set[str],
+    label: str,
+    bounds_context: str = "case bounds",
+    coupled_updates: SweepUpdates | None = None,
+) -> None:
+    """Revalidate every sweep point through its case model's own constraints."""
+
+    if any(sweep.parameter not in allowed_parameters for sweep in sweeps):
+        raise ValueError(f"unsupported {label} sweep parameter")
+    case_values = case.model_dump()
+    try:
+        for sweep in sweeps:
+            for value in sweep.values:
+                updates = {sweep.parameter: value}
+                if coupled_updates is not None:
+                    updates.update(coupled_updates(case, sweep.parameter, value))
+                type(case).model_validate(case_values | updates)
+    except ValueError as error:
+        raise ValueError(f"{label} sweep values must remain within {bounds_context}") from error
+
+
 class PipeOutput(str, Enum):
     PRESSURE_DROP = "pressure_drop"
     MASS_IMBALANCE = "mass_imbalance"
@@ -54,6 +83,11 @@ class CavityOutput(str, Enum):
     PRESSURE_PROBES = "pressure_probes"
     MASS_IMBALANCE = "mass_imbalance"
     RESIDUALS = "residuals"
+
+
+PipeOutputValue = Annotated[PipeOutput, Field(strict=False)]
+CylinderOutputValue = Annotated[CylinderOutput, Field(strict=False)]
+CavityOutputValue = Annotated[CavityOutput, Field(strict=False)]
 
 
 class PlanBase(StrictModel):
@@ -90,29 +124,24 @@ class LaminarPipeCase(StrictModel):
 
 class PipeExperimentPlan(PlanBase):
     experiment_type: Literal["laminar_pipe"]
-    requested_outputs: tuple[PipeOutput, ...] = Field(min_length=1)
+    requested_outputs: tuple[PipeOutputValue, ...] = Field(min_length=1)
     case: LaminarPipeCase
     parameter_sweeps: tuple[ParameterSweep, ...] = Field(default=(), max_length=4)
 
     @model_validator(mode="after")
     def require_meaningful_sweeps(self) -> "PipeExperimentPlan":
-        allowed = {
-            "diameter_m",
-            "length_m",
-            "mean_velocity_m_s",
-            "kinematic_viscosity_m2_s",
-        }
-        if any(sweep.parameter not in allowed for sweep in self.parameter_sweeps):
-            raise ValueError("unsupported laminar pipe sweep parameter")
-        case_values = self.case.model_dump()
-        try:
-            for sweep in self.parameter_sweeps:
-                for value in sweep.values:
-                    LaminarPipeCase.model_validate(case_values | {sweep.parameter: value})
-        except ValueError as error:
-            raise ValueError(
-                "pipe sweep values must remain within the laminar regime and case bounds"
-            ) from error
+        _validate_case_sweeps(
+            self.case,
+            self.parameter_sweeps,
+            allowed_parameters={
+                "diameter_m",
+                "length_m",
+                "mean_velocity_m_s",
+                "kinematic_viscosity_m2_s",
+            },
+            label="laminar pipe",
+            bounds_context="the laminar regime and case bounds",
+        )
         return self
 
 
@@ -146,17 +175,41 @@ class CylinderFlowCase(StrictModel):
         return self
 
 
+def _cylinder_coupled_sweep_updates(
+    case: StrictModel, parameter: str, value: float
+) -> dict[str, float]:
+    """Keep the cylinder Reynolds definition coherent at each sweep point."""
+
+    if not isinstance(case, CylinderFlowCase):
+        raise TypeError("cylinder sweep coupling requires CylinderFlowCase")
+    if parameter == "reynolds_number":
+        velocity = value * case.kinematic_viscosity_m2_s / case.diameter_m
+        return {"mean_velocity_m_s": velocity}
+    if parameter == "mean_velocity_m_s":
+        reynolds = value * case.diameter_m / case.kinematic_viscosity_m2_s
+        return {"reynolds_number": reynolds}
+    if parameter == "diameter_m":
+        velocity = case.reynolds_number * case.kinematic_viscosity_m2_s / value
+        return {"mean_velocity_m_s": velocity}
+    return {}
+
+
 class CylinderExperimentPlan(PlanBase):
     experiment_type: Literal["cylinder_flow"]
-    requested_outputs: tuple[CylinderOutput, ...] = Field(min_length=1)
+    requested_outputs: tuple[CylinderOutputValue, ...] = Field(min_length=1)
     case: CylinderFlowCase
     parameter_sweeps: tuple[ParameterSweep, ...] = Field(default=(), max_length=4)
 
     @model_validator(mode="after")
     def require_meaningful_sweeps(self) -> "CylinderExperimentPlan":
-        allowed = {"diameter_m", "reynolds_number", "mean_velocity_m_s"}
-        if any(sweep.parameter not in allowed for sweep in self.parameter_sweeps):
-            raise ValueError("unsupported cylinder flow sweep parameter")
+        _validate_case_sweeps(
+            self.case,
+            self.parameter_sweeps,
+            allowed_parameters={"diameter_m", "reynolds_number", "mean_velocity_m_s"},
+            label="cylinder flow",
+            bounds_context="case bounds and Reynolds consistency",
+            coupled_updates=_cylinder_coupled_sweep_updates,
+        )
         return self
 
 
@@ -171,15 +224,22 @@ class LidDrivenCavityCase(StrictModel):
 
 class CavityExperimentPlan(PlanBase):
     experiment_type: Literal["lid_driven_cavity"]
-    requested_outputs: tuple[CavityOutput, ...] = Field(min_length=1)
+    requested_outputs: tuple[CavityOutputValue, ...] = Field(min_length=1)
     case: LidDrivenCavityCase
     parameter_sweeps: tuple[ParameterSweep, ...] = Field(default=(), max_length=4)
 
     @model_validator(mode="after")
     def require_meaningful_sweeps(self) -> "CavityExperimentPlan":
-        allowed = {"side_length_m", "lid_velocity_m_s", "kinematic_viscosity_m2_s"}
-        if any(sweep.parameter not in allowed for sweep in self.parameter_sweeps):
-            raise ValueError("unsupported lid-driven cavity sweep parameter")
+        _validate_case_sweeps(
+            self.case,
+            self.parameter_sweeps,
+            allowed_parameters={
+                "side_length_m",
+                "lid_velocity_m_s",
+                "kinematic_viscosity_m2_s",
+            },
+            label="lid-driven cavity",
+        )
         return self
 
 
