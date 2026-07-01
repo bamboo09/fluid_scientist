@@ -12,6 +12,8 @@ let currentProject = null;
 let selectedTarget = "";
 let pollTimer = null;
 const benchmarkCaseId = "pilot-pipe";
+const projectStorageKey = "fluid-scientist-project-id";
+const targetStorageKey = "fluid-scientist-target-id";
 
 const number = (value, digits = 2) => Number(value).toFixed(digits);
 
@@ -28,7 +30,10 @@ async function loadExecutionTargets() {
         : `${platform} · 不可用：${target.reason}`;
       return option;
     }));
-    const available = targets.find((target) => target.available);
+    const savedTarget = localStorage.getItem(targetStorageKey);
+    const available = targets.find(
+      (target) => target.available && target.target_id === savedTarget,
+    ) || targets.find((target) => target.available);
     if (available) {
       executionTarget.value = available.target_id;
       selectedTarget = available.target_id;
@@ -104,6 +109,7 @@ const actionForState = (state) => ({
 
 function renderProject(project) {
   currentProject = project;
+  localStorage.setItem(projectStorageKey, project.project_id);
   document.querySelector("#project-status").textContent = project.workflow_state;
   document.querySelector("#audit-count").textContent = `${project.audit_event_count} AUDIT EVENTS`;
   const gate = gateForState(project.workflow_state);
@@ -159,6 +165,7 @@ function renderBenchmarkResults(results) {
   currentProject = project;
   document.querySelector("#project-status").textContent = project.workflow_state;
   document.querySelector("#job-state").textContent = collection.state.toUpperCase();
+  document.querySelector("#job-id").textContent = collection.job_id;
   document.querySelector("#job-progress").style.width = "100%";
   document.querySelector("#credibility-state").textContent = validation.passed ? "PASSED" : "FAILED";
   document.querySelector("#mass-balance").textContent =
@@ -203,6 +210,7 @@ async function pollBenchmark(projectId, targetId) {
     const job = await requestJson(
       `/api/projects/${projectId}/benchmarks/${benchmarkCaseId}?${query}`,
     );
+    document.querySelector("#job-id").textContent = job.job_id;
     document.querySelector("#job-state").textContent = job.state.toUpperCase();
     document.querySelector("#job-progress").style.width =
       job.state === "running" ? "58%" : "18%";
@@ -222,6 +230,45 @@ async function pollBenchmark(projectId, targetId) {
     message.textContent = `状态查询失败：${error.message}，稍后自动重试。`;
     pollTimer = window.setTimeout(() => pollBenchmark(projectId, targetId), 3000);
   }
+}
+
+async function resumeProject() {
+  const savedProjectId = localStorage.getItem(projectStorageKey);
+  try {
+    let project;
+    if (savedProjectId) {
+      project = await requestJson(`/api/projects/${savedProjectId}`);
+    } else {
+      const response = await fetch("/api/projects/recent");
+      if (response.status === 404) return;
+      if (!response.ok) throw new Error(`API returned ${response.status}`);
+      project = await response.json();
+    }
+    renderProject(project);
+    const jobId = project.external_jobs?.[benchmarkCaseId];
+    if (jobId) document.querySelector("#job-id").textContent = jobId;
+    const targetId = localStorage.getItem(targetStorageKey) || selectedTarget;
+    if (!jobId || !targetId) return;
+    if (project.workflow_state === "PILOT_RUNNING") {
+      message.textContent = "已恢复未完成项目，正在重新连接工作站作业。";
+      pollBenchmark(project.project_id, targetId);
+    } else if (project.workflow_state === "PILOT_VERIFIED") {
+      const query = `target_id=${encodeURIComponent(targetId)}`;
+      const results = await requestJson(
+        `/api/projects/${project.project_id}/benchmarks/${benchmarkCaseId}/results?${query}`,
+      );
+      renderBenchmarkResults(results);
+      message.textContent = "已恢复上次工作站实验及可信性结果。";
+    }
+  } catch (error) {
+    localStorage.removeItem(projectStorageKey);
+    message.textContent = `项目恢复失败：${error.message}`;
+  }
+}
+
+async function bootstrap() {
+  await loadExecutionTargets();
+  await resumeProject();
 }
 
 form.addEventListener("submit", async (event) => {
@@ -319,6 +366,7 @@ advanceButton.addEventListener("click", async () => {
 
 executionTarget.addEventListener("change", () => {
   selectedTarget = executionTarget.value;
+  if (selectedTarget) localStorage.setItem(targetStorageKey, selectedTarget);
   refreshBenchmarkControls();
 });
 
@@ -343,8 +391,11 @@ benchmarkForm.addEventListener("submit", async (event) => {
       },
     );
     currentProject = submission.project;
+    localStorage.setItem(projectStorageKey, currentProject.project_id);
+    localStorage.setItem(targetStorageKey, selectedTarget);
     document.querySelector("#project-status").textContent = currentProject.workflow_state;
     document.querySelector("#job-state").textContent = submission.job.state.toUpperCase();
+    document.querySelector("#job-id").textContent = submission.job.job_id;
     document.querySelector("#job-progress").style.width = "18%";
     benchmarkForm.hidden = true;
     message.textContent = `作业 ${submission.job.job_id} 已提交，正在等待 OpenFOAM。`;
@@ -355,4 +406,4 @@ benchmarkForm.addEventListener("submit", async (event) => {
   }
 });
 
-loadExecutionTargets();
+bootstrap();

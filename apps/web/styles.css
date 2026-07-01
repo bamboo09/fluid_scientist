@@ -112,6 +112,10 @@ button.secondary:hover { border-color: var(--blue); background: rgba(118,199,213
 .parameter-grid input:focus { border-color: var(--blue); box-shadow: 0 0 0 2px rgba(118,199,213,.08); }
 .benchmark-form > button { min-height: 42px; margin-left: auto; }
 .job-panel { grid-column: span 2; }
+.job-identity { display: grid; grid-template-columns: auto 1fr; gap: 12px; align-items: baseline; margin: 18px 0 6px; }
+.job-identity span { color: var(--blue); font: 9px var(--mono); letter-spacing: .12em; }
+.job-identity strong { color: var(--paper); font: 11px var(--mono); overflow-wrap: anywhere; }
+.runtime-note { margin: 0 0 16px; padding-left: 10px; border-left: 1px solid var(--amber); }
 .job-panel ol { list-style: none; padding: 0; display: flex; gap: 18px; }
 .job-panel li { flex: 1; color: var(--muted); font-size: 11px; }
 .job-panel li span { display: block; color: var(--blue); font: 9px var(--mono); margin-bottom: 6px; }

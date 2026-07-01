@@ -82,6 +82,15 @@ class SQLWorkflowRepository:
                 version=row.version,
             )
 
+    def latest_project_id(self) -> str | None:
+        with self._sessions() as session:
+            project_id = session.scalar(
+                select(WorkflowSnapshotRow.project_id)
+                .order_by(WorkflowSnapshotRow.updated_at.desc())
+                .limit(1)
+            )
+            return project_id
+
     def record_approval(self, project_id: str, approval: Approval) -> None:
         with self._sessions.begin() as session:
             self._require_project(session, project_id)

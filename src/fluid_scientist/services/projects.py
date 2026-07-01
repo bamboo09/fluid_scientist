@@ -38,6 +38,12 @@ class ProjectService:
         workflow, version = self._load(project_id)
         return self._view(workflow, version)
 
+    def recent(self) -> ProjectView:
+        project_id = self._repository.latest_project_id()
+        if project_id is None:
+            raise KeyError("no projects exist")
+        return self.get(project_id)
+
     def decide(
         self,
         project_id: str,

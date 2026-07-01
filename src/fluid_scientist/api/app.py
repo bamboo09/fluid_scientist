@@ -102,7 +102,9 @@ def create_app(
     application.mount("/assets", StaticFiles(directory=WEB_ROOT), name="assets")
     application.state.execution_targets = configured_targets
     target_registry = {target.target_id: target for target in configured_targets}
-    project_service = ProjectService(repository or SQLWorkflowRepository("sqlite://"))
+    project_service = ProjectService(
+        repository or SQLWorkflowRepository(runtime_settings.database.url)
+    )
     demo_projects: dict[str, DemoResearchResult] = {}
 
     @application.get("/", include_in_schema=False)
@@ -135,6 +137,13 @@ def create_app(
     )
     def create_project(request: ProjectRequest) -> ProjectView:
         return project_service.create(request.question)
+
+    @application.get("/api/projects/recent", response_model=ProjectView)
+    def recent_project() -> ProjectView:
+        try:
+            return project_service.recent()
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="no projects exist") from error
 
     @application.get("/api/projects/{project_id}", response_model=ProjectView | DemoResearchResult)
     def get_project(project_id: str) -> ProjectView | DemoResearchResult:

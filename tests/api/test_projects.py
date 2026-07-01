@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 
 from fluid_scientist.adapters.sql_repository import SQLWorkflowRepository
 from fluid_scientist.api.app import create_app
+from fluid_scientist.settings import AppSettings
 
 
 def make_client(db_url: str) -> TestClient:
@@ -96,3 +97,37 @@ def test_workbench_exposes_project_and_gate_controls(tmp_path) -> None:
     assert 'id="gate-approve"' in html
     assert 'id="gate-reject"' in html
     assert "Skill 候选" not in html
+
+
+def test_app_uses_configured_database_when_repository_is_not_injected(tmp_path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'configured.db'}"
+    settings = AppSettings(app_mode="fake", database={"url": database_url})
+    first = TestClient(create_app(settings=settings))
+    project = first.post(
+        "/api/projects",
+        json={"question": "Can this project survive an application restart?"},
+    ).json()
+
+    reopened = TestClient(create_app(settings=settings))
+    response = reopened.get(f"/api/projects/{project['project_id']}")
+
+    assert response.status_code == 200
+    assert response.json()["workflow_state"] == "SPEC_READY"
+
+
+def test_recent_project_endpoint_returns_latest_persistent_project(tmp_path) -> None:
+    client = make_client(f"sqlite:///{tmp_path / 'projects.db'}")
+    first = client.post(
+        "/api/projects",
+        json={"question": "Does the first project remain available?"},
+    ).json()
+    latest = client.post(
+        "/api/projects",
+        json={"question": "Should this latest project be restored after refresh?"},
+    ).json()
+
+    response = client.get("/api/projects/recent")
+
+    assert response.status_code == 200
+    assert response.json()["project_id"] == latest["project_id"]
+    assert response.json()["project_id"] != first["project_id"]

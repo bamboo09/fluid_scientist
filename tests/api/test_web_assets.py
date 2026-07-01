@@ -50,3 +50,16 @@ def test_workbench_exposes_real_workstation_submission_and_result_polling() -> N
     assert "pollBenchmark" in script
     assert "validation.passed" in script
     assert 'PILOT_READY: "SUBMIT_PILOT"' not in script
+
+
+def test_workbench_persists_and_resumes_the_active_project() -> None:
+    html = (ROOT / "apps/web/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "apps/web/app.js").read_text(encoding="utf-8")
+
+    assert 'id="job-id"' in html
+    assert "fluid-scientist-project-id" in script
+    assert "localStorage.setItem" in script
+    assert "resumeProject" in script
+    assert "/api/projects/recent" in script
+    assert 'workflow_state === "PILOT_RUNNING"' in script
+    assert 'workflow_state === "PILOT_VERIFIED"' in script
