@@ -9,6 +9,7 @@ import pytest
 from openai import (
     APIConnectionError,
     APIResponseValidationError,
+    APIStatusError,
     APITimeoutError,
     AuthenticationError,
     BadRequestError,
@@ -90,7 +91,24 @@ class FakeClient:
         self.chat = SimpleNamespace(completions=self.completions)
 
 
-class FakeParsedResponses:
+@dataclass(frozen=True)
+class FakeRawParseOutcome:
+    outcome: object
+    request_id: str | None
+
+
+class FakeRawResponse:
+    def __init__(self, outcome: object, request_id: str | None) -> None:
+        self.outcome = outcome
+        self.request_id = request_id
+
+    def parse(self) -> object:
+        if isinstance(self.outcome, BaseException):
+            raise self.outcome
+        return SimpleNamespace(output_parsed=self.outcome)
+
+
+class FakeRawResponses:
     def __init__(self, outcomes: list[object]) -> None:
         self.outcomes = list(outcomes)
         self.calls: list[dict[str, object]] = []
@@ -98,18 +116,20 @@ class FakeParsedResponses:
     def parse(self, **kwargs: object) -> object:
         self.calls.append(kwargs)
         outcome = self.outcomes.pop(0)
+        if isinstance(outcome, FakeRawParseOutcome):
+            return FakeRawResponse(outcome.outcome, outcome.request_id)
         if isinstance(outcome, BaseException):
             raise outcome
-        return SimpleNamespace(output_parsed=outcome, _request_id="req-openai-123")
+        return FakeRawResponse(outcome, "req-openai-123")
 
 
 class FakeResponsesClient:
     def __init__(self, outcomes: list[object]) -> None:
-        self.parsed_responses = FakeParsedResponses(outcomes)
-        self.responses = self.parsed_responses
+        self.parsed_responses = FakeRawResponses(outcomes)
+        self.responses = SimpleNamespace(with_raw_response=self.parsed_responses)
 
 
-class ConcurrentParsedResponses:
+class ConcurrentRawResponses:
     def __init__(self) -> None:
         self.barrier = Barrier(2, timeout=1)
         self.state_lock = Lock()
@@ -125,9 +145,7 @@ class ConcurrentParsedResponses:
             self.max_active = max(self.max_active, self.active)
         try:
             self.barrier.wait()
-            return SimpleNamespace(
-                output_parsed=openai_envelope(), _request_id=request_id
-            )
+            return FakeRawResponse(openai_envelope(), request_id)
         finally:
             with self.state_lock:
                 self.active -= 1
@@ -135,7 +153,8 @@ class ConcurrentParsedResponses:
 
 class ConcurrentResponsesClient:
     def __init__(self) -> None:
-        self.responses = ConcurrentParsedResponses()
+        self.raw_responses = ConcurrentRawResponses()
+        self.responses = SimpleNamespace(with_raw_response=self.raw_responses)
 
 
 class ConcurrentCompletions:
@@ -198,6 +217,14 @@ def openai_envelope() -> object:
     return OpenAIPlanResponse(plan=ExperimentPlan.model_validate(valid_pipe_plan()))
 
 
+def openai_plan_validation_error() -> ValidationError:
+    try:
+        openai_envelope().__class__.model_validate({"plan": {"unexpected": "secret"}})
+    except ValidationError as error:
+        return error
+    raise AssertionError("invalid plan unexpectedly passed validation")
+
+
 @pytest.mark.parametrize(
     ("provider", "expected_type"),
     [
@@ -220,7 +247,7 @@ def test_plan_provider_factory_selects_configured_adapter(
     assert isinstance(adapter, expected_type)
 
 
-def test_openai_plan_provider_uses_native_structured_parse() -> None:
+def test_openai_plan_provider_uses_native_raw_structured_parse() -> None:
     from pydantic import BaseModel
 
     client = FakeResponsesClient([openai_envelope()])
@@ -313,25 +340,26 @@ def sdk_status_error(status_code: int, request_id: str) -> Exception:
     )
     if status_code == 429:
         return RateLimitError("raw-rate-limit-secret", response=response, body=None)
-    return InternalServerError("raw-server-secret", response=response, body=None)
+    if status_code >= 500:
+        return InternalServerError("raw-server-secret", response=response, body=None)
+    return APIStatusError("raw-status-secret", response=response, body=None)
 
 
-@pytest.mark.parametrize("status_code", [429, 500])
-def test_openai_plan_provider_retries_transient_status(status_code: int) -> None:
+@pytest.mark.parametrize("status_code", [408, 409, 429, 500])
+def test_openai_plan_provider_retries_transient_status_with_exact_bound(
+    status_code: int,
+) -> None:
     client = FakeResponsesClient(
-        [
-            sdk_status_error(status_code, "req-transient-1"),
-            sdk_status_error(status_code, "req-transient-2"),
-            openai_envelope(),
-        ]
+        [sdk_status_error(status_code, f"req-transient-{attempt}") for attempt in range(3)]
     )
     adapter = OpenAIPlanProvider(settings("openai", max_retries=2), client=client)
 
-    result = adapter.design_experiment("Validate", capabilities=("laminar_pipe",))
+    with pytest.raises(ProviderRequestError) as caught:
+        adapter.design_experiment("Validate", capabilities=("laminar_pipe",))
 
-    assert result.root.experiment_type == "laminar_pipe"
     assert len(client.parsed_responses.calls) == 3
-    assert adapter.last_request_id == "req-openai-123"
+    assert caught.value.request_id == "req-transient-2"
+    assert adapter.last_request_id == "req-transient-2"
 
 
 def test_openai_plan_provider_preserves_final_transient_status_request_id() -> None:
@@ -387,7 +415,9 @@ def test_openai_response_validation_error_is_typed_sanitized_and_keeps_id() -> N
         {"raw": "never-print-this"},
         message="schema body has never-print-this",
     )
-    client = FakeResponsesClient([failure, openai_envelope()])
+    client = FakeResponsesClient(
+        [FakeRawParseOutcome(failure, "req-validation"), openai_envelope()]
+    )
     adapter = OpenAIPlanProvider(
         settings("openai", api_key="never-print-this"), client=client
     )
@@ -400,6 +430,37 @@ def test_openai_response_validation_error_is_typed_sanitized_and_keeps_id() -> N
     assert adapter.last_request_id == "req-validation"
     assert "never-print-this" not in str(caught.value)
     assert "never-print-this" not in repr(caught.value)
+
+
+def test_openai_pydantic_post_parser_error_keeps_raw_response_id() -> None:
+    client = FakeResponsesClient(
+        [FakeRawParseOutcome(openai_plan_validation_error(), "req-post-parser")]
+    )
+    adapter = OpenAIPlanProvider(settings("openai", api_key="never-print-this"), client=client)
+
+    with pytest.raises(ProviderSchemaError, match="schema") as caught:
+        adapter.design_experiment("Validate", capabilities=("laminar_pipe",))
+
+    assert caught.value.request_id == "req-post-parser"
+    assert adapter.last_request_id == "req-post-parser"
+    assert "secret" not in str(caught.value)
+    assert "never-print-this" not in repr(caught.value)
+
+
+def test_openai_pydantic_post_parser_error_without_id_clears_prior_id() -> None:
+    client = FakeResponsesClient(
+        [openai_envelope(), FakeRawParseOutcome(openai_plan_validation_error(), None)]
+    )
+    adapter = OpenAIPlanProvider(settings("openai", max_retries=0), client=client)
+
+    adapter.design_experiment("First", capabilities=("laminar_pipe",))
+    assert adapter.last_request_id == "req-openai-123"
+
+    with pytest.raises(ProviderSchemaError) as caught:
+        adapter.design_experiment("Second", capabilities=("laminar_pipe",))
+
+    assert caught.value.request_id is None
+    assert adapter.last_request_id is None
 
 
 def test_openai_connection_exhaustion_is_bounded_and_sanitized() -> None:
@@ -436,7 +497,7 @@ def test_openai_concurrent_callers_have_context_local_request_ids() -> None:
         beta = executor.submit(design, "beta")
 
     assert {alpha.result(), beta.result()} == {"req-openai-alpha", "req-openai-beta"}
-    assert client.responses.max_active == 2
+    assert client.raw_responses.max_active == 2
 
 
 def test_openai_plan_provider_clears_request_id_between_calls() -> None:

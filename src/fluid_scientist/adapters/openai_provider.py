@@ -111,8 +111,9 @@ class OpenAIPlanProvider(plan_providers._PlanProviderSupport):
     ) -> ExperimentPlan:
         self._begin_request()
         for attempt in range(self._settings.max_retries + 1):
+            request_id: str | None = None
             try:
-                response = self._client.responses.parse(
+                raw_response = self._client.responses.with_raw_response.parse(
                     model=self._settings.model,
                     instructions=(
                         "Act as a fluid-mechanics experiment designer. Return a strict typed "
@@ -127,7 +128,8 @@ class OpenAIPlanProvider(plan_providers._PlanProviderSupport):
                     store=False,
                     timeout=self._settings.timeout_seconds,
                 )
-                request_id = self._request_id(response)
+                request_id = self._publish_request_id(raw_response)
+                response = raw_response.parse()
                 parsed = getattr(response, "output_parsed", None)
                 if parsed is None:
                     self._last_request_id.set(request_id)
@@ -166,16 +168,17 @@ class OpenAIPlanProvider(plan_providers._PlanProviderSupport):
                     request_id=self.last_request_id,
                 ) from None
             except APIResponseValidationError as error:
-                self._publish_error_id(error)
+                request_id = self._request_id(error) or request_id
+                self._last_request_id.set(request_id)
                 raise self._error(
                     plan_providers.ProviderSchemaError,
                     "provider structured output failed strict plan schema validation",
-                    request_id=self.last_request_id,
+                    request_id=request_id,
                 ) from None
             except APIStatusError as error:
                 self._publish_error_id(error)
                 if (
-                    error.status_code == 429 or error.status_code >= 500
+                    error.status_code in (408, 409, 429) or error.status_code >= 500
                 ) and attempt < self._settings.max_retries:
                     continue
                 raise self._error(
@@ -184,10 +187,11 @@ class OpenAIPlanProvider(plan_providers._PlanProviderSupport):
                     request_id=self.last_request_id,
                 ) from None
             except ValidationError:
+                self._last_request_id.set(request_id)
                 raise self._error(
                     plan_providers.ProviderSchemaError,
                     "provider structured output failed strict plan schema validation",
-                    request_id=None,
+                    request_id=request_id,
                 ) from None
             except (TimeoutError, APITimeoutError) as error:
                 if attempt == self._settings.max_retries:
