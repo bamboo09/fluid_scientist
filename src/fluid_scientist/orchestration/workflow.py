@@ -7,7 +7,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, Field
 
 from fluid_scientist.compat import UTC
-from fluid_scientist.domain.models import Approval, AuditEvent
+from fluid_scientist.domain.models import Approval, ApprovedArtifact, AuditEvent
 
 
 class TransitionError(RuntimeError):
@@ -20,6 +20,7 @@ class WorkflowSnapshot(BaseModel):
     project_id: str = Field(min_length=1)
     name: str = Field(min_length=1)
     approvals: dict[str, Approval] = Field(default_factory=dict)
+    approved_artifacts: dict[str, ApprovedArtifact] = Field(default_factory=dict)
     external_jobs: dict[str, str] = Field(default_factory=dict)
     audit_events: tuple[AuditEvent, ...] = ()
     counters: dict[str, int] = Field(default_factory=dict)
@@ -83,6 +84,33 @@ class ResearchWorkflow:
             {"gate": gate, "subject_version": subject_version},
         )
         return approval
+
+    def bind_approved_artifact(
+        self,
+        plan_id: str,
+        *,
+        plan_version: int,
+        archive_sha256: str,
+        actor: str,
+    ) -> ApprovedArtifact:
+        binding = ApprovedArtifact(
+            plan_version=plan_version,
+            archive_sha256=archive_sha256,
+        )
+        existing = self.state.approved_artifacts.get(plan_id)
+        if existing is not None and existing != binding:
+            raise TransitionError(f"plan {plan_id} already has a different approved digest")
+        self.state.approved_artifacts[plan_id] = binding
+        self._audit(
+            "ARTIFACT_APPROVED",
+            actor,
+            {
+                "plan_id": plan_id,
+                "plan_version": plan_version,
+                "archive_sha256": archive_sha256,
+            },
+        )
+        return binding
 
     def reject(
         self,

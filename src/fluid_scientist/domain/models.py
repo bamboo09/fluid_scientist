@@ -166,6 +166,11 @@ class Approval(FrozenModel):
     subject_version: int = Field(ge=1)
 
 
+class ApprovedArtifact(FrozenModel):
+    plan_version: int = Field(ge=1)
+    archive_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
 class AuditEvent(FrozenModel):
     event_id: str = Field(min_length=1)
     event_type: str = Field(min_length=1)

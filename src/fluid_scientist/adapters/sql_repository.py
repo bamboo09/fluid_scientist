@@ -12,12 +12,18 @@ from fluid_scientist.db import (
     ApprovalRow,
     AuditEventRow,
     Base,
+    CompiledExperimentRow,
+    ExperimentPlanRow,
     ExternalJobRow,
     ProjectRow,
     WorkflowSnapshotRow,
 )
 from fluid_scientist.domain.models import Approval, AuditEvent
-from fluid_scientist.ports import StoredWorkflow
+from fluid_scientist.ports import (
+    StoredCompiledExperiment,
+    StoredExperimentPlan,
+    StoredWorkflow,
+)
 
 
 class ConcurrentUpdateError(RuntimeError):
@@ -26,6 +32,10 @@ class ConcurrentUpdateError(RuntimeError):
 
 class ExternalJobConflict(RuntimeError):
     """Raised when a case is rebound to a different external job."""
+
+
+class ExperimentArtifactConflict(RuntimeError):
+    """Raised when immutable plan or compiled bytes are replaced."""
 
 
 class SQLWorkflowRepository:
@@ -90,6 +100,78 @@ class SQLWorkflowRepository:
                 .limit(1)
             )
             return project_id
+
+    def store_experiment_plan(self, plan: StoredExperimentPlan) -> StoredExperimentPlan:
+        with self._sessions.begin() as session:
+            if plan.project_id is not None:
+                self._require_project(session, plan.project_id)
+            row = session.get(ExperimentPlanRow, plan.plan_id)
+            if row is not None:
+                existing = self._stored_plan(row)
+                if existing != plan:
+                    raise ExperimentArtifactConflict(
+                        f"plan {plan.plan_id} is immutable and already exists"
+                    )
+                return existing
+            session.add(
+                ExperimentPlanRow(
+                    plan_id=plan.plan_id,
+                    project_id=plan.project_id,
+                    version=plan.version,
+                    provider=plan.provider,
+                    model=plan.model,
+                    plan_json=plan.plan_json,
+                    created_at=datetime.now(UTC).isoformat(),
+                )
+            )
+            return plan
+
+    def load_experiment_plan(self, plan_id: str) -> StoredExperimentPlan | None:
+        with self._sessions() as session:
+            row = session.get(ExperimentPlanRow, plan_id)
+            return None if row is None else self._stored_plan(row)
+
+    def store_compiled_experiment(
+        self, compiled: StoredCompiledExperiment
+    ) -> StoredCompiledExperiment:
+        with self._sessions.begin() as session:
+            row = session.scalar(
+                select(CompiledExperimentRow).where(
+                    CompiledExperimentRow.plan_id == compiled.plan_id,
+                    CompiledExperimentRow.plan_version == compiled.plan_version,
+                )
+            )
+            if row is not None:
+                existing = self._stored_compiled(row)
+                if existing != compiled:
+                    raise ExperimentArtifactConflict(
+                        "compiled plan "
+                        f"{compiled.plan_id} version {compiled.plan_version} is immutable"
+                    )
+                return existing
+            session.add(
+                CompiledExperimentRow(
+                    plan_id=compiled.plan_id,
+                    plan_version=compiled.plan_version,
+                    archive_sha256=compiled.archive_sha256,
+                    archive=compiled.archive,
+                    preview_json=compiled.preview_json,
+                    created_at=datetime.now(UTC).isoformat(),
+                )
+            )
+            return compiled
+
+    def load_compiled_experiment(
+        self, plan_id: str, plan_version: int
+    ) -> StoredCompiledExperiment | None:
+        with self._sessions() as session:
+            row = session.scalar(
+                select(CompiledExperimentRow).where(
+                    CompiledExperimentRow.plan_id == plan_id,
+                    CompiledExperimentRow.plan_version == plan_version,
+                )
+            )
+            return None if row is None else self._stored_compiled(row)
 
     def record_approval(self, project_id: str, approval: Approval) -> None:
         with self._sessions.begin() as session:
@@ -182,3 +264,24 @@ class SQLWorkflowRepository:
     def _require_project(session: Session, project_id: str) -> None:
         if session.get(ProjectRow, project_id) is None:
             raise KeyError(f"project not found: {project_id}")
+
+    @staticmethod
+    def _stored_plan(row: ExperimentPlanRow) -> StoredExperimentPlan:
+        return StoredExperimentPlan(
+            plan_id=row.plan_id,
+            project_id=row.project_id,
+            version=row.version,
+            provider=row.provider,
+            model=row.model,
+            plan_json=row.plan_json,
+        )
+
+    @staticmethod
+    def _stored_compiled(row: CompiledExperimentRow) -> StoredCompiledExperiment:
+        return StoredCompiledExperiment(
+            plan_id=row.plan_id,
+            plan_version=row.plan_version,
+            archive_sha256=row.archive_sha256,
+            archive=row.archive,
+            preview_json=row.preview_json,
+        )

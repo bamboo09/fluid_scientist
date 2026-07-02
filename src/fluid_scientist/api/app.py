@@ -17,6 +17,7 @@ from pydantic import (
     SecretStr,
     StringConstraints,
     field_validator,
+    model_validator,
 )
 
 from fluid_scientist.adapters.custom_openfoam import (
@@ -59,8 +60,17 @@ from fluid_scientist.experiment_planning import (
     ProviderRequestError,
     create_plan_provider,
 )
+from fluid_scientist.experiment_planning.compilers import (
+    CompilationError,
+    UnsupportedCompilation,
+    compile_plan,
+)
 from fluid_scientist.orchestration.workflow import TransitionError
-from fluid_scientist.ports import WorkflowRepository
+from fluid_scientist.ports import (
+    StoredCompiledExperiment,
+    StoredExperimentPlan,
+    WorkflowRepository,
+)
 from fluid_scientist.services.model_configuration import (
     LegacyExperimentDesigner,
     ModelConfiguration,
@@ -149,6 +159,7 @@ class ModelConfigurationView(BaseModel):
 
 class ExperimentPlanRequest(StrictRequest):
     question: str = Field(min_length=10, max_length=2_000)
+    project_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ExperimentPlanView(BaseModel):
@@ -156,7 +167,21 @@ class ExperimentPlanView(BaseModel):
 
     provider: Literal["openai", "glm", "deepseek"]
     model: str
+    plan_id: str
+    plan_version: int = Field(ge=1)
     plan: ExperimentPlan
+
+
+class CompilePreviewView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_id: str
+    plan_version: int = Field(ge=1)
+    experiment_type: str
+    archive_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    manifest: CustomCaseManifest
+    preprocessing: tuple[str, ...]
+    required_outputs: tuple[str, ...]
 
 
 class ExperimentCapabilityView(BaseModel):
@@ -217,6 +242,22 @@ class ApprovalRequest(StrictRequest):
     actor: str = Field(min_length=1, max_length=128)
     subject_version: int = Field(ge=1)
     reason: str | None = Field(default=None, max_length=2_000)
+    plan_id: str | None = Field(default=None, min_length=1, max_length=128)
+    plan_version: int | None = Field(default=None, ge=1)
+    archive_sha256: str | None = Field(
+        default=None, pattern=r"^sha256:[0-9a-f]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def require_complete_gate_two_binding(self) -> "ApprovalRequest":
+        binding = (self.plan_id, self.plan_version, self.archive_sha256)
+        if any(value is not None for value in binding) and not all(
+            value is not None for value in binding
+        ):
+            raise ValueError("plan_id, plan_version, and archive_sha256 are required together")
+        if self.plan_id is not None and (self.gate != "GATE_2" or self.decision != "approve"):
+            raise ValueError("artifact binding is only valid for Gate 2 approval")
+        return self
 
 
 class ActionRequest(StrictRequest):
@@ -237,6 +278,13 @@ class BenchmarkSubmissionView(BaseModel):
 
     project: ProjectView
     job: JobRecord
+
+
+class PlannedExperimentSubmissionRequest(StrictRequest):
+    target_id: str = Field(min_length=1, max_length=128)
+    case_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+    actor: str = Field(default="researcher", min_length=1, max_length=128)
+    archive_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class BenchmarkResultsView(BaseModel):
@@ -473,7 +521,7 @@ def create_app(
                 detail="Experiment plan provider is not configured",
             )
         try:
-            plan = designer.design_experiment(
+            designed_plan = designer.design_experiment(
                 request.question,
                 capabilities=tuple(
                     capability.experiment_type
@@ -499,7 +547,72 @@ def create_app(
                 status_code=502,
                 detail="Experiment plan provider request failed",
             ) from error
-        return ExperimentPlanView(provider=provider, model=model, plan=plan)
+        plan = (
+            designed_plan
+            if isinstance(designed_plan, ExperimentPlan)
+            else ExperimentPlan(root=designed_plan)
+        )
+        plan_id = str(uuid4())
+        stored = project_service.store_experiment_plan(
+            StoredExperimentPlan(
+                plan_id=plan_id,
+                project_id=request.project_id,
+                version=1,
+                provider=provider,
+                model=model,
+                plan_json=plan.model_dump_json(),
+            )
+        )
+        return ExperimentPlanView(
+            provider=provider,
+            model=model,
+            plan_id=stored.plan_id,
+            plan_version=stored.version,
+            plan=plan,
+        )
+
+    @application.post(
+        "/api/experiment-plans/{plan_id}/compile",
+        response_model=CompilePreviewView,
+    )
+    def compile_experiment_plan(plan_id: str) -> CompilePreviewView:
+        try:
+            stored_plan = project_service.load_experiment_plan(plan_id)
+            existing = project_service.load_compiled_experiment(
+                plan_id, stored_plan.version
+            )
+            return CompilePreviewView.model_validate_json(existing.preview_json)
+        except KeyError:
+            pass
+        try:
+            stored_plan = project_service.load_experiment_plan(plan_id)
+            plan = ExperimentPlan.model_validate_json(stored_plan.plan_json)
+            compiled = compile_plan(plan)
+            preview = CompilePreviewView(
+                plan_id=plan_id,
+                plan_version=stored_plan.version,
+                experiment_type=compiled.experiment_type,
+                archive_sha256=compiled.archive_sha256,
+                manifest=compiled.manifest,
+                preprocessing=compiled.preprocessing,
+                required_outputs=compiled.required_outputs,
+            )
+            project_service.store_compiled_experiment(
+                StoredCompiledExperiment(
+                    plan_id=plan_id,
+                    plan_version=stored_plan.version,
+                    archive_sha256=compiled.archive_sha256,
+                    archive=compiled.archive,
+                    preview_json=preview.model_dump_json(),
+                )
+            )
+            return preview
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="experiment plan not found") from error
+        except UnsupportedCompilation as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except CompilationError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
 
     @application.post("/api/custom-cases/validate", response_model=CustomCaseManifest)
     def validate_custom_case(
@@ -597,6 +710,8 @@ def create_app(
             raise HTTPException(status_code=404, detail="project not found") from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+        except TransitionError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
 
     @application.post("/api/projects/{project_id}/actions", response_model=ProjectView)
     def apply_action(project_id: str, request: ActionRequest) -> ProjectView:
@@ -640,6 +755,58 @@ def create_app(
             raise HTTPException(status_code=409, detail=str(error)) from error
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
+        except RemoteExecutionError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
+    @application.post(
+        "/api/projects/{project_id}/experiment-plans/{plan_id}/submit",
+        response_model=BenchmarkSubmissionView,
+        status_code=status.HTTP_201_CREATED,
+    )
+    def submit_planned_experiment(
+        project_id: str,
+        plan_id: str,
+        request: PlannedExperimentSubmissionRequest,
+    ) -> BenchmarkSubmissionView:
+        target = target_registry.get(request.target_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="execution target not found")
+        submit_custom = getattr(target, "submit_custom", None)
+        status_method = getattr(target, "status", None)
+        if not callable(submit_custom) or not callable(status_method):
+            raise HTTPException(
+                status_code=422,
+                detail="execution target does not support compiled OpenFOAM cases",
+            )
+        try:
+            existing, stored_plan, compiled = (
+                project_service.prepare_bound_experiment_submission(
+                    project_id,
+                    plan_id=plan_id,
+                    case_id=request.case_id,
+                    archive_sha256=request.archive_sha256,
+                )
+            )
+            plan = ExperimentPlan.model_validate_json(stored_plan.plan_json)
+            experiment_name = plan.root.experiment_name
+            job_id = existing or _experiment_job_id(project_id, experiment_name)
+            job = (
+                status_method(job_id)
+                if existing
+                else submit_custom(job_id, compiled.archive)
+            )
+            project = project_service.record_pilot_submission(
+                project_id,
+                case_id=request.case_id,
+                job_id=job.job_id,
+                target_id=request.target_id,
+                actor=request.actor,
+            )
+            return BenchmarkSubmissionView(project=project, job=job)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except TransitionError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
         except RemoteExecutionError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
 

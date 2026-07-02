@@ -1,6 +1,6 @@
 """SQLAlchemy table definitions for durable workflow state."""
 
-from sqlalchemy import ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import ForeignKey, Integer, LargeBinary, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -63,3 +63,31 @@ class AuditEventRow(Base):
     actor: Mapped[str] = mapped_column(String(128), nullable=False)
     payload_json: Mapped[str] = mapped_column(Text, nullable=False)
 
+
+class ExperimentPlanRow(Base):
+    __tablename__ = "experiment_plans"
+
+    plan_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    plan_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class CompiledExperimentRow(Base):
+    __tablename__ = "compiled_experiments"
+    __table_args__ = (UniqueConstraint("plan_id", "plan_version"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("experiment_plans.plan_id", ondelete="CASCADE"), index=True
+    )
+    plan_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    archive_sha256: Mapped[str] = mapped_column(String(71), nullable=False)
+    archive: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    preview_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(String(64), nullable=False)

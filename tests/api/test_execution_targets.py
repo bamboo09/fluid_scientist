@@ -3,12 +3,16 @@ import re
 import tarfile
 
 from fastapi.testclient import TestClient
+from sqlalchemy import update
 
+from fluid_scientist.adapters.custom_openfoam import validate_custom_case_archive
 from fluid_scientist.adapters.openfoam import LaminarPipeCase
 from fluid_scientist.adapters.sql_repository import SQLWorkflowRepository
 from fluid_scientist.api.app import create_app
+from fluid_scientist.db import CompiledExperimentRow
 from fluid_scientist.execution_targets.base import ExecutionTargetCapability
 from fluid_scientist.execution_targets.workstation import WorkerCollection
+from fluid_scientist.experiment_planning.models import PipeExperimentPlan
 from fluid_scientist.settings import AppSettings
 from fluid_scientist.worker.service import CustomCaseSpec, JobRecord, JobState
 
@@ -332,3 +336,227 @@ def test_custom_case_can_be_submitted_polled_and_collected() -> None:
     assert status.status_code == 200
     assert results.status_code == 200
     assert results.json()["post_processing"]["paraview_file"].endswith(".foam")
+
+
+class StaticPipePlanner:
+    def design_experiment(self, question: str, *, capabilities: tuple[str, ...]):
+        return PipeExperimentPlan.model_validate(
+            {
+                "experiment_name": "Laminar pipe verification",
+                "experiment_type": "laminar_pipe",
+                "objective": "Verify pressure loss for fully developed laminar pipe flow.",
+                "rationale": "The analytical Hagen-Poiseuille result provides a benchmark.",
+                "assumptions": ["Newtonian incompressible fluid"],
+                "limitations": ["Laminar single-phase regime only"],
+                "requested_outputs": ["pressure_drop", "mass_imbalance"],
+                "convergence_targets": {
+                    "residual_tolerance": 1e-6,
+                    "mass_imbalance_percent": 0.5,
+                },
+                "case": {
+                    "diameter_m": 0.02,
+                    "length_m": 1.0,
+                    "mean_velocity_m_s": 0.05,
+                    "kinematic_viscosity_m2_s": 1e-6,
+                    "density_kg_m3": 998.2,
+                    "axial_cells": 80,
+                    "radial_cells": 10,
+                },
+            }
+        )
+
+
+def planning_client(tmp_path, target: CustomCaseTarget):
+    return TestClient(
+        create_app(
+            repository=SQLWorkflowRepository(f"sqlite:///{tmp_path / 'planning.db'}"),
+            execution_targets=(target,),
+            plan_designer=StaticPipePlanner(),
+            plan_provider_name="glm",
+            plan_model_name="glm-5.1",
+        )
+    )
+
+
+def create_and_compile_plan(client: TestClient, project_id: str) -> tuple[dict, dict]:
+    created = client.post(
+        "/api/experiment-plans",
+        json={
+            "question": "Design a laminar pipe pressure-loss verification experiment.",
+            "project_id": project_id,
+        },
+    )
+    assert created.status_code == 200
+    plan = created.json()
+    compiled = client.post(
+        f"/api/experiment-plans/{plan['plan_id']}/compile"
+    )
+    assert compiled.status_code == 200
+    return plan, compiled.json()
+
+
+def test_gate_two_binds_plan_version_and_archive_digest(tmp_path) -> None:
+    target = CustomCaseTarget()
+    client = planning_client(tmp_path, target)
+    project = advance_to_pilot_ready(client)
+    plan, preview = create_and_compile_plan(client, project["project_id"])
+
+    approved = client.post(
+        f"/api/projects/{project['project_id']}/approvals",
+        json={
+            "gate": "GATE_2",
+            "decision": "approve",
+            "actor": "researcher",
+            "subject_version": project["version"],
+            "plan_id": plan["plan_id"],
+            "plan_version": plan["plan_version"],
+            "archive_sha256": preview["archive_sha256"],
+        },
+    )
+
+    assert approved.status_code == 200
+    assert approved.json()["approved_artifacts"][plan["plan_id"]] == {
+        "plan_version": 1,
+        "archive_sha256": preview["archive_sha256"],
+    }
+
+
+def test_gate_two_rejects_digest_that_was_not_compiled(tmp_path) -> None:
+    target = CustomCaseTarget()
+    client = planning_client(tmp_path, target)
+    project = advance_to_pilot_ready(client)
+    plan, _ = create_and_compile_plan(client, project["project_id"])
+
+    response = client.post(
+        f"/api/projects/{project['project_id']}/approvals",
+        json={
+            "gate": "GATE_2",
+            "decision": "approve",
+            "actor": "researcher",
+            "subject_version": project["version"],
+            "plan_id": plan["plan_id"],
+            "plan_version": plan["plan_version"],
+            "archive_sha256": "sha256:" + "0" * 64,
+        },
+    )
+
+    assert response.status_code == 409
+    assert "digest" in response.json()["detail"].lower()
+    assert target.submissions == []
+
+
+def test_bound_experiment_submission_uses_exact_approved_archive(tmp_path) -> None:
+    target = CustomCaseTarget()
+    client = planning_client(tmp_path, target)
+    project = advance_to_pilot_ready(client)
+    plan, preview = create_and_compile_plan(client, project["project_id"])
+    approval = client.post(
+        f"/api/projects/{project['project_id']}/approvals",
+        json={
+            "gate": "GATE_2",
+            "decision": "approve",
+            "actor": "researcher",
+            "subject_version": project["version"],
+            "plan_id": plan["plan_id"],
+            "plan_version": plan["plan_version"],
+            "archive_sha256": preview["archive_sha256"],
+        },
+    ).json()
+
+    submitted = client.post(
+        f"/api/projects/{project['project_id']}/experiment-plans/{plan['plan_id']}/submit",
+        json={
+            "target_id": "workstation-openfoam",
+            "case_id": "planned-pipe",
+            "actor": "researcher",
+            "archive_sha256": preview["archive_sha256"],
+        },
+    )
+
+    assert submitted.status_code == 201
+    assert submitted.json()["project"]["workflow_state"] == "PILOT_RUNNING"
+    assert target.submissions
+    submitted_archive = target.submissions[0][1]
+    assert validate_custom_case_archive(submitted_archive).archive_sha256 == preview[
+        "archive_sha256"
+    ]
+    assert approval["approved_artifacts"][plan["plan_id"]]["archive_sha256"] == preview[
+        "archive_sha256"
+    ]
+
+
+def test_bound_submission_rejects_client_digest_different_from_gate_two(tmp_path) -> None:
+    target = CustomCaseTarget()
+    client = planning_client(tmp_path, target)
+    project = advance_to_pilot_ready(client)
+    plan, preview = create_and_compile_plan(client, project["project_id"])
+    client.post(
+        f"/api/projects/{project['project_id']}/approvals",
+        json={
+            "gate": "GATE_2",
+            "decision": "approve",
+            "actor": "researcher",
+            "subject_version": project["version"],
+            "plan_id": plan["plan_id"],
+            "plan_version": plan["plan_version"],
+            "archive_sha256": preview["archive_sha256"],
+        },
+    )
+
+    response = client.post(
+        f"/api/projects/{project['project_id']}/experiment-plans/{plan['plan_id']}/submit",
+        json={
+            "target_id": "workstation-openfoam",
+            "case_id": "planned-pipe",
+            "actor": "researcher",
+            "archive_sha256": "sha256:" + "f" * 64,
+        },
+    )
+
+    assert response.status_code == 409
+    assert "digest" in response.json()["detail"].lower()
+    assert target.submissions == []
+
+
+def test_bound_submission_rehashes_stored_archive_before_remote_submit(tmp_path) -> None:
+    target = CustomCaseTarget()
+    repository = SQLWorkflowRepository(f"sqlite:///{tmp_path / 'tampered.db'}")
+    client = TestClient(
+        create_app(
+            repository=repository,
+            execution_targets=(target,),
+            plan_designer=StaticPipePlanner(),
+            plan_provider_name="glm",
+            plan_model_name="glm-5.1",
+        )
+    )
+    project = advance_to_pilot_ready(client)
+    plan, preview = create_and_compile_plan(client, project["project_id"])
+    client.post(
+        f"/api/projects/{project['project_id']}/approvals",
+        json={
+            "gate": "GATE_2",
+            "decision": "approve",
+            "actor": "researcher",
+            "subject_version": project["version"],
+            "plan_id": plan["plan_id"],
+            "plan_version": plan["plan_version"],
+            "archive_sha256": preview["archive_sha256"],
+        },
+    )
+    with repository._engine.begin() as connection:
+        connection.execute(update(CompiledExperimentRow).values(archive=b"tampered"))
+
+    response = client.post(
+        f"/api/projects/{project['project_id']}/experiment-plans/{plan['plan_id']}/submit",
+        json={
+            "target_id": "workstation-openfoam",
+            "case_id": "planned-pipe",
+            "actor": "researcher",
+            "archive_sha256": preview["archive_sha256"],
+        },
+    )
+
+    assert response.status_code == 409
+    assert "digest" in response.json()["detail"].lower()
+    assert target.submissions == []

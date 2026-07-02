@@ -34,6 +34,25 @@ class StoredWorkflow:
     version: int
 
 
+@dataclass(frozen=True)
+class StoredExperimentPlan:
+    plan_id: str
+    project_id: str | None
+    version: int
+    provider: str
+    model: str
+    plan_json: str
+
+
+@dataclass(frozen=True)
+class StoredCompiledExperiment:
+    plan_id: str
+    plan_version: int
+    archive_sha256: str
+    archive: bytes
+    preview_json: str
+
+
 class LLMProvider(Protocol):
     def interpret(self, question: str) -> ResearchSpec: ...
 
@@ -81,3 +100,15 @@ class WorkflowRepository(Protocol):
     def latest_project_id(self) -> str | None: ...
 
     def bind_external_job(self, project_id: str, case_id: str, job_id: str) -> str: ...
+
+    def store_experiment_plan(self, plan: StoredExperimentPlan) -> StoredExperimentPlan: ...
+
+    def load_experiment_plan(self, plan_id: str) -> StoredExperimentPlan | None: ...
+
+    def store_compiled_experiment(
+        self, compiled: StoredCompiledExperiment
+    ) -> StoredCompiledExperiment: ...
+
+    def load_compiled_experiment(
+        self, plan_id: str, plan_version: int
+    ) -> StoredCompiledExperiment | None: ...

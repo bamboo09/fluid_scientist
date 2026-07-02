@@ -1,13 +1,18 @@
 """Persistent project and human-approval application service."""
 
+import hashlib
 from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict
 
-from fluid_scientist.domain.models import Approval
+from fluid_scientist.domain.models import Approval, ApprovedArtifact
 from fluid_scientist.orchestration.workflow import ResearchWorkflow, TransitionError
-from fluid_scientist.ports import WorkflowRepository
+from fluid_scientist.ports import (
+    StoredCompiledExperiment,
+    StoredExperimentPlan,
+    WorkflowRepository,
+)
 
 
 class ProjectView(BaseModel):
@@ -17,6 +22,7 @@ class ProjectView(BaseModel):
     workflow_state: str
     version: int
     approvals: tuple[Approval, ...]
+    approved_artifacts: dict[str, ApprovedArtifact]
     external_jobs: dict[str, str]
     audit_event_count: int
 
@@ -53,10 +59,28 @@ class ProjectService:
         actor: str,
         subject_version: int,
         reason: str | None = None,
+        plan_id: str | None = None,
+        plan_version: int | None = None,
+        archive_sha256: str | None = None,
     ) -> ProjectView:
         workflow, version = self._load(project_id)
         event_count = len(workflow.state.audit_events)
         if decision == "approve":
+            if gate == "GATE_2" and plan_id is not None:
+                if plan_version is None or archive_sha256 is None:
+                    raise ValueError("Gate 2 artifact binding is incomplete")
+                self._validate_compiled_binding(
+                    project_id,
+                    plan_id=plan_id,
+                    plan_version=plan_version,
+                    archive_sha256=archive_sha256,
+                )
+                workflow.bind_approved_artifact(
+                    plan_id,
+                    plan_version=plan_version,
+                    archive_sha256=archive_sha256,
+                    actor=actor,
+                )
             approval = workflow.approve(gate, approved_by=actor, subject_version=subject_version)
             self._repository.record_approval(project_id, approval)
         else:
@@ -71,6 +95,78 @@ class ProjectService:
         )
         self._persist_new_events(project_id, workflow, event_count)
         return self._view(workflow, new_version)
+
+    def store_experiment_plan(self, plan: StoredExperimentPlan) -> StoredExperimentPlan:
+        return self._repository.store_experiment_plan(plan)
+
+    def load_experiment_plan(self, plan_id: str) -> StoredExperimentPlan:
+        plan = self._repository.load_experiment_plan(plan_id)
+        if plan is None:
+            raise KeyError(f"experiment plan not found: {plan_id}")
+        return plan
+
+    def store_compiled_experiment(
+        self, compiled: StoredCompiledExperiment
+    ) -> StoredCompiledExperiment:
+        return self._repository.store_compiled_experiment(compiled)
+
+    def load_compiled_experiment(
+        self, plan_id: str, plan_version: int
+    ) -> StoredCompiledExperiment:
+        compiled = self._repository.load_compiled_experiment(plan_id, plan_version)
+        if compiled is None:
+            raise KeyError(f"compiled experiment not found: {plan_id} version {plan_version}")
+        return compiled
+
+    def prepare_bound_experiment_submission(
+        self,
+        project_id: str,
+        *,
+        plan_id: str,
+        case_id: str,
+        archive_sha256: str,
+    ) -> tuple[str | None, StoredExperimentPlan, StoredCompiledExperiment]:
+        workflow, _ = self._load(project_id)
+        existing = workflow.state.external_jobs.get(case_id)
+        if existing is None:
+            if workflow.state.name != "PILOT_READY":
+                raise TransitionError(
+                    f"pilot submission is not allowed from {workflow.state.name}"
+                )
+            if "GATE_2" not in workflow.state.approvals:
+                raise TransitionError("GATE_2 approval is required before pilot submission")
+        binding = workflow.state.approved_artifacts.get(plan_id)
+        if binding is None:
+            raise TransitionError(f"plan {plan_id} has no Gate 2 artifact binding")
+        if binding.archive_sha256 != archive_sha256:
+            raise TransitionError("submitted digest does not match the Gate 2 approved digest")
+        plan = self.load_experiment_plan(plan_id)
+        if plan.project_id != project_id:
+            raise TransitionError("experiment plan belongs to a different project")
+        compiled = self.load_compiled_experiment(plan_id, binding.plan_version)
+        if compiled.archive_sha256 != binding.archive_sha256:
+            raise TransitionError("stored compiled digest does not match the Gate 2 binding")
+        actual_digest = f"sha256:{hashlib.sha256(compiled.archive).hexdigest()}"
+        if actual_digest != binding.archive_sha256:
+            raise TransitionError("stored archive bytes do not match the Gate 2 approved digest")
+        return existing, plan, compiled
+
+    def _validate_compiled_binding(
+        self,
+        project_id: str,
+        *,
+        plan_id: str,
+        plan_version: int,
+        archive_sha256: str,
+    ) -> None:
+        plan = self.load_experiment_plan(plan_id)
+        if plan.project_id != project_id:
+            raise TransitionError("experiment plan belongs to a different project")
+        if plan.version != plan_version:
+            raise TransitionError("plan version does not match the stored experiment plan")
+        compiled = self.load_compiled_experiment(plan_id, plan_version)
+        if compiled.archive_sha256 != archive_sha256:
+            raise TransitionError("archive digest does not match the compiled experiment")
 
     def act(self, project_id: str, action: str, *, actor: str = "system") -> ProjectView:
         workflow, version = self._load(project_id)
@@ -166,6 +262,7 @@ class ProjectService:
             workflow_state=workflow.state.name,
             version=version,
             approvals=tuple(workflow.state.approvals.values()),
+            approved_artifacts=workflow.state.approved_artifacts,
             external_jobs=workflow.state.external_jobs,
             audit_event_count=len(workflow.state.audit_events),
         )
