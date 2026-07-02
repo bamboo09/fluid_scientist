@@ -8,10 +8,13 @@ import httpx
 import pytest
 from openai import (
     APIConnectionError,
+    APIResponseValidationError,
     APITimeoutError,
     AuthenticationError,
     BadRequestError,
+    InternalServerError,
     NotFoundError,
+    RateLimitError,
 )
 from pydantic import SecretStr, ValidationError
 
@@ -104,6 +107,35 @@ class FakeResponsesClient:
     def __init__(self, outcomes: list[object]) -> None:
         self.parsed_responses = FakeParsedResponses(outcomes)
         self.responses = self.parsed_responses
+
+
+class ConcurrentParsedResponses:
+    def __init__(self) -> None:
+        self.barrier = Barrier(2, timeout=1)
+        self.state_lock = Lock()
+        self.active = 0
+        self.max_active = 0
+
+    def parse(self, **kwargs: object) -> object:
+        input_text = kwargs["input"]
+        assert isinstance(input_text, str)
+        request_id = "req-openai-alpha" if "alpha" in input_text else "req-openai-beta"
+        with self.state_lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+        try:
+            self.barrier.wait()
+            return SimpleNamespace(
+                output_parsed=openai_envelope(), _request_id=request_id
+            )
+        finally:
+            with self.state_lock:
+                self.active -= 1
+
+
+class ConcurrentResponsesClient:
+    def __init__(self) -> None:
+        self.responses = ConcurrentParsedResponses()
 
 
 class ConcurrentCompletions:
@@ -271,6 +303,140 @@ def test_openai_plan_provider_status_error_is_sanitized_and_not_retried() -> Non
     assert caught.value.request_id == "req-openai-error"
     assert "never-print-this" not in str(caught.value)
     assert "never-print-this" not in repr(caught.value)
+
+
+def sdk_status_error(status_code: int, request_id: str) -> Exception:
+    response = httpx.Response(
+        status_code,
+        headers={"x-request-id": request_id},
+        request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+    )
+    if status_code == 429:
+        return RateLimitError("raw-rate-limit-secret", response=response, body=None)
+    return InternalServerError("raw-server-secret", response=response, body=None)
+
+
+@pytest.mark.parametrize("status_code", [429, 500])
+def test_openai_plan_provider_retries_transient_status(status_code: int) -> None:
+    client = FakeResponsesClient(
+        [
+            sdk_status_error(status_code, "req-transient-1"),
+            sdk_status_error(status_code, "req-transient-2"),
+            openai_envelope(),
+        ]
+    )
+    adapter = OpenAIPlanProvider(settings("openai", max_retries=2), client=client)
+
+    result = adapter.design_experiment("Validate", capabilities=("laminar_pipe",))
+
+    assert result.root.experiment_type == "laminar_pipe"
+    assert len(client.parsed_responses.calls) == 3
+    assert adapter.last_request_id == "req-openai-123"
+
+
+def test_openai_plan_provider_preserves_final_transient_status_request_id() -> None:
+    client = FakeResponsesClient(
+        [sdk_status_error(500, "req-server-1"), sdk_status_error(500, "req-server-2")]
+    )
+    adapter = OpenAIPlanProvider(settings("openai", max_retries=1), client=client)
+
+    with pytest.raises(ProviderRequestError) as caught:
+        adapter.design_experiment("Validate", capabilities=("laminar_pipe",))
+
+    assert len(client.parsed_responses.calls) == 2
+    assert caught.value.request_id == "req-server-2"
+    assert adapter.last_request_id == "req-server-2"
+    assert "raw-server-secret" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("status_code", "error_type"),
+    [(401, AuthenticationError), (404, NotFoundError)],
+)
+def test_openai_auth_and_not_found_are_not_retried(
+    status_code: int, error_type: type[Exception]
+) -> None:
+    response = httpx.Response(
+        status_code,
+        headers={"x-request-id": "req-non-retry"},
+        request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+    )
+    failure = error_type("raw-key-or-model-secret", response=response, body=None)
+    client = FakeResponsesClient([failure, openai_envelope()])
+    adapter = OpenAIPlanProvider(
+        settings("openai", max_retries=2, api_key="never-print-this"), client=client
+    )
+
+    with pytest.raises((ProviderAuthenticationError, ProviderModelNotFoundError)) as caught:
+        adapter.design_experiment("Validate", capabilities=("laminar_pipe",))
+
+    assert len(client.parsed_responses.calls) == 1
+    assert caught.value.request_id == "req-non-retry"
+    assert "raw-key-or-model-secret" not in str(caught.value)
+    assert "never-print-this" not in str(caught.value)
+
+
+def test_openai_response_validation_error_is_typed_sanitized_and_keeps_id() -> None:
+    response = httpx.Response(
+        200,
+        headers={"x-request-id": "req-validation"},
+        request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+    )
+    failure = APIResponseValidationError(
+        response,
+        {"raw": "never-print-this"},
+        message="schema body has never-print-this",
+    )
+    client = FakeResponsesClient([failure, openai_envelope()])
+    adapter = OpenAIPlanProvider(
+        settings("openai", api_key="never-print-this"), client=client
+    )
+
+    with pytest.raises(ProviderSchemaError, match="schema") as caught:
+        adapter.design_experiment("Validate", capabilities=("laminar_pipe",))
+
+    assert len(client.parsed_responses.calls) == 1
+    assert caught.value.request_id == "req-validation"
+    assert adapter.last_request_id == "req-validation"
+    assert "never-print-this" not in str(caught.value)
+    assert "never-print-this" not in repr(caught.value)
+
+
+def test_openai_connection_exhaustion_is_bounded_and_sanitized() -> None:
+    failures = [
+        APIConnectionError(
+            message="raw connection never-print-this",
+            request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+        )
+        for _ in range(2)
+    ]
+    client = FakeResponsesClient(failures)
+    adapter = OpenAIPlanProvider(
+        settings("openai", max_retries=1, api_key="never-print-this"), client=client
+    )
+
+    with pytest.raises(ProviderRequestError, match="connection") as caught:
+        adapter.design_experiment("Validate", capabilities=("laminar_pipe",))
+
+    assert len(client.parsed_responses.calls) == 2
+    assert caught.value.request_id is None
+    assert "never-print-this" not in str(caught.value)
+
+
+def test_openai_concurrent_callers_have_context_local_request_ids() -> None:
+    client = ConcurrentResponsesClient()
+    adapter = OpenAIPlanProvider(settings("openai", max_retries=0), client=client)
+
+    def design(question: str) -> str | None:
+        adapter.design_experiment(question, capabilities=("laminar_pipe",))
+        return adapter.last_request_id
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        alpha = executor.submit(design, "alpha")
+        beta = executor.submit(design, "beta")
+
+    assert {alpha.result(), beta.result()} == {"req-openai-alpha", "req-openai-beta"}
+    assert client.responses.max_active == 2
 
 
 def test_openai_plan_provider_clears_request_id_between_calls() -> None:

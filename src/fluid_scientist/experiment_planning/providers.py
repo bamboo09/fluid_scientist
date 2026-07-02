@@ -80,24 +80,11 @@ class ProviderSchemaError(ProviderOutputError):
     """The provider JSON did not satisfy the strict plan schema."""
 
 
-class OpenAICompatiblePlanProvider:
-    """GLM/DeepSeek Chat Completions adapter with local strict validation."""
+class _PlanProviderSupport:
+    """Shared safe error, request-context, and capability mechanics."""
 
-    def __init__(self, settings: ProviderSettings, *, client: Any | None = None) -> None:
-        if settings.provider not in PROVIDER_BASE_URLS:
-            raise ValueError("OpenAI-compatible adapter supports only GLM and DeepSeek")
+    def _init_plan_provider_support(self, settings: ProviderSettings) -> None:
         self._settings = settings
-        self.base_url = PROVIDER_BASE_URLS[settings.provider]
-        if client is None:
-            client = OpenAI(
-                api_key=settings.api_key.get_secret_value(),
-                base_url=self.base_url,
-                timeout=settings.timeout_seconds,
-                max_retries=0,
-            )
-        else:
-            client.base_url = self.base_url
-        self._client = client
         self._last_request_id: ContextVar[str | None] = ContextVar(
             f"plan_provider_request_id_{id(self)}", default=None
         )
@@ -112,6 +99,78 @@ class OpenAICompatiblePlanProvider:
 
         return self._last_request_id.get()
 
+    def _begin_request(self) -> None:
+        self._last_request_id.set(None)
+
+    def _publish_request_id(self, value: Any) -> str | None:
+        request_id = self._request_id(value)
+        self._last_request_id.set(request_id)
+        return request_id
+
+    def _validate_capability(
+        self,
+        plan: ExperimentPlan,
+        capabilities: tuple[str, ...],
+        *,
+        request_id: str | None,
+    ) -> None:
+        if plan.root.experiment_type not in capabilities:
+            self._last_request_id.set(request_id)
+            raise self._error(
+                ProviderOutputError,
+                "provider selected an experiment type outside supplied capabilities",
+                request_id=request_id,
+            )
+
+    def _error(
+        self,
+        error_type: type[PlanProviderError],
+        message: str,
+        *,
+        request_id: str | None,
+    ) -> PlanProviderError:
+        return error_type(
+            message,
+            provider=self._settings.provider,
+            model=self._settings.model,
+            request_id=request_id,
+        )
+
+    @staticmethod
+    def _request_id(value: Any) -> str | None:
+        request_id = getattr(value, "_request_id", None) or getattr(
+            value, "request_id", None
+        )
+        if isinstance(request_id, str):
+            return request_id
+        response = getattr(value, "response", None)
+        headers = getattr(response, "headers", None)
+        if headers is not None:
+            header_id = headers.get("x-request-id")
+            if isinstance(header_id, str):
+                return header_id
+        return None
+
+
+class OpenAICompatiblePlanProvider(_PlanProviderSupport):
+    """GLM/DeepSeek Chat Completions adapter with local strict validation."""
+
+    def __init__(self, settings: ProviderSettings, *, client: Any | None = None) -> None:
+        if settings.provider not in PROVIDER_BASE_URLS:
+            raise ValueError("OpenAI-compatible adapter supports only GLM and DeepSeek")
+        self._init_plan_provider_support(settings)
+        self.base_url = PROVIDER_BASE_URLS[settings.provider]
+        if client is None:
+            client = OpenAI(
+                api_key=settings.api_key.get_secret_value(),
+                base_url=self.base_url,
+                timeout=settings.timeout_seconds,
+                max_retries=0,
+            )
+        else:
+            client.base_url = self.base_url
+        self._client = client
+
     def __repr__(self) -> str:
         return (
             "OpenAICompatiblePlanProvider("
@@ -121,7 +180,7 @@ class OpenAICompatiblePlanProvider:
     def design_experiment(
         self, question: str, *, capabilities: tuple[str, ...]
     ) -> ExperimentPlan:
-        self._last_request_id.set(None)
+        self._begin_request()
         return self._design_experiment(question, capabilities=capabilities)
 
     def _design_experiment(
@@ -157,13 +216,9 @@ class OpenAICompatiblePlanProvider:
                     self._last_request_id.set(request_id)
                     raise error
                 plan = self._validate_content(content, request_id=request_id)
-                if plan.root.experiment_type not in capabilities:
-                    self._last_request_id.set(request_id)
-                    raise self._error(
-                        ProviderOutputError,
-                        "provider selected an experiment type outside supplied capabilities",
-                        request_id=request_id,
-                    )
+                self._validate_capability(
+                    plan, capabilities, request_id=request_id
+                )
                 self._last_request_id.set(request_id)
                 return plan
             except AuthenticationError as error:
@@ -229,20 +284,6 @@ class OpenAICompatiblePlanProvider:
                 request_id=request_id,
             ) from None
 
-    def _error(
-        self,
-        error_type: type[PlanProviderError],
-        message: str,
-        *,
-        request_id: str | None,
-    ) -> PlanProviderError:
-        return error_type(
-            message,
-            provider=self._settings.provider,
-            model=self._settings.model,
-            request_id=request_id,
-        )
-
     @staticmethod
     def _content(response: Any) -> object:
         try:
@@ -250,13 +291,6 @@ class OpenAICompatiblePlanProvider:
         except (AttributeError, IndexError, TypeError):
             return None
         return content
-
-    @staticmethod
-    def _request_id(value: Any) -> str | None:
-        request_id = getattr(value, "_request_id", None) or getattr(
-            value, "request_id", None
-        )
-        return request_id if isinstance(request_id, str) else None
 
     @staticmethod
     def _messages(
