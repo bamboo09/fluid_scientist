@@ -1,5 +1,7 @@
 import gzip
 import io
+import json
+import re
 import tarfile
 from dataclasses import FrozenInstanceError, replace
 
@@ -7,6 +9,7 @@ import pytest
 
 from fluid_scientist.adapters.custom_openfoam import validate_custom_case_archive
 from fluid_scientist.experiment_planning.compilers import (
+    CompilationError,
     CompiledCase,
     UnsupportedCompilation,
     compile_plan,
@@ -16,6 +19,7 @@ from fluid_scientist.experiment_planning.models import (
     ConvergenceTargets,
     CustomExperimentPlan,
     CylinderExperimentPlan,
+    ParameterSweep,
     PipeExperimentPlan,
 )
 
@@ -143,6 +147,7 @@ def test_pipe_adapts_renderer_and_preserves_analytical_function_objects() -> Non
         "0/p",
         "constant/momentumTransport",
         "constant/physicalProperties",
+        "fluidScientist/plan.json",
         "system/blockMeshDict",
         "system/controlDict",
         "system/fvSchemes",
@@ -151,17 +156,38 @@ def test_pipe_adapts_renderer_and_preserves_analytical_function_objects() -> Non
     assert "pressureDrop" in files["system/controlDict"]
     assert "inletFlow" in files["system/controlDict"]
     assert "outletFlow" in files["system/controlDict"]
-    assert "flowRateInletVelocity" in files["0/U"]
+    assert "nonuniform List<vector>" in files["0/U"]
     assert "codedFixedValue" not in files["0/U"]
     assert compiled.preprocessing == ("blockMesh", "checkMesh")
 
 
-def test_pipe_archive_has_no_runtime_dictionary_directives() -> None:
-    files = archive_files(compile_plan(pipe_plan()).archive)
+@pytest.mark.parametrize("plan", [pipe_plan(), cylinder_plan(), cavity_plan()])
+def test_builtin_archives_have_no_runtime_dictionary_directives(plan: object) -> None:
+    files = archive_files(compile_plan(plan).archive)
 
     combined = "\n".join(files.values())
     for forbidden in ("#includeEtc", "#include", "#calc", "#neg"):
         assert forbidden not in combined
+
+
+def test_pipe_inlet_is_face_matched_area_averaged_parabolic_profile() -> None:
+    plan = pipe_plan(radial_cells=10, mean_velocity_m_s=0.05)
+    velocity = archive_files(compile_plan(plan).archive)["0/U"]
+    profile = [
+        float(value)
+        for value in re.findall(r"\(([-+0-9.eE]+) 0 0\)", velocity)[1:]
+    ]
+
+    assert "type fixedValue;" in velocity
+    assert "nonuniform List<vector>" in velocity
+    assert len(profile) == 10
+    assert profile[0] == pytest.approx(0.0995)
+    assert profile[-1] == pytest.approx(0.0095)
+    area_weights = [2 * index + 1 for index in range(10)]
+    weighted_mean = sum(v * w for v, w in zip(profile, area_weights, strict=True)) / sum(
+        area_weights
+    )
+    assert weighted_mean == pytest.approx(0.05)
 
 
 def test_pipe_convergence_targets_are_compiled_into_case_and_digest() -> None:
@@ -182,8 +208,36 @@ def test_pipe_convergence_targets_are_compiled_into_case_and_digest() -> None:
     assert before.archive_sha256 != after.archive_sha256
     assert "p               2e-06;" in files["system/fvSolution"]
     assert "U               2e-06;" in files["system/fvSolution"]
-    assert "residualTolerance      2e-06;" in files["system/controlDict"]
-    assert "massImbalancePercent   0.25;" in files["system/controlDict"]
+    metadata = json.loads(files["fluidScientist/plan.json"])
+    assert metadata["convergence_targets"] == {
+        "mass_imbalance_percent": 0.25,
+        "residual_tolerance": 2e-6,
+    }
+    assert "convergenceTargets" not in files["system/controlDict"]
+
+
+def test_parameter_sweeps_are_recorded_but_base_case_is_compiled() -> None:
+    original = pipe_plan()
+    swept = original.model_copy(
+        update={
+            "parameter_sweeps": (
+                ParameterSweep(parameter="length_m", values=(1.5, 2.0)),
+            )
+        }
+    )
+
+    before = compile_plan(original)
+    after = compile_plan(swept)
+    metadata = json.loads(archive_files(after.archive)["fluidScientist/plan.json"])
+
+    assert before.archive_sha256 != after.archive_sha256
+    assert metadata["compilation"] == {
+        "mode": "approved_base_case",
+        "sweep_expansion_owner": "task7",
+    }
+    assert metadata["parameter_sweeps"] == [
+        {"parameter": "length_m", "values": [1.5, 2.0]}
+    ]
 
 
 def test_cylinder_contains_mirrored_laminar_case_and_force_outputs() -> None:
@@ -198,8 +252,19 @@ def test_cylinder_contains_mirrored_laminar_case_and_force_outputs() -> None:
     assert "forceCoeffs" in files["system/controlDict"]
     assert "residuals" in files["system/controlDict"]
     assert "simulationType laminar;" in files["constant/momentumTransport"]
-    assert "mirrorPlane" in files["system/mirrorMeshDict"]
+    assert "planeType       pointAndNormal;" in files["system/mirrorMeshDict"]
     assert not {"0/k", "0/omega", "0/nut"} & files.keys()
+
+
+def test_mirror_mesh_uses_foundation_13_top_level_plane_syntax() -> None:
+    mirror = archive_files(compile_plan(cylinder_plan()).archive)["system/mirrorMeshDict"]
+
+    assert "planeType       pointAndNormal;" in mirror
+    assert "pointAndNormalDict\n{" in mirror
+    assert "point       (0 0 0);" in mirror
+    assert "normal      (0 1 0);" in mirror
+    assert "planeTolerance  0.0001;" in mirror
+    assert "mirrorPlane" not in mirror
 
 
 def test_cylinder_force_reference_area_uses_diameter_times_extrusion_span() -> None:
@@ -208,6 +273,15 @@ def test_cylinder_force_reference_area_uses_diameter_times_extrusion_span() -> N
     assert "lRef 0.1;" in files["system/controlDict"]
     assert "Aref 0.001;" in files["system/controlDict"]
     assert "extrusionSpan 0.01;" in files["system/blockMeshDict"]
+
+
+def test_cylinder_mesh_assigns_requested_wake_and_radial_resolutions() -> None:
+    mesh = archive_files(compile_plan(cylinder_plan()).archive)["system/blockMeshDict"]
+
+    assert "radialCells 32;" in mesh
+    assert "wakeCells 120;" in mesh
+    assert "(40 32 1)" in mesh
+    assert "(80 32 1)" in mesh
 
 
 def test_cavity_contains_moving_lid_probes_without_mirror_mesh() -> None:
@@ -220,6 +294,64 @@ def test_cavity_contains_moving_lid_probes_without_mirror_mesh() -> None:
     assert "uniform (1 0 0)" in files["0/U"]
     assert "probes" in files["system/controlDict"]
     assert "residuals" in files["system/controlDict"]
+    assert "pRefCell 0;" in files["system/fvSolution"]
+    assert "pRefValue 0;" in files["system/fvSolution"]
+    assert "(0.25 0.5 0.0078125)" in files["system/controlDict"]
+
+
+@pytest.mark.parametrize(
+    ("plan", "expected"),
+    [
+        (pipe_plan(), ("pressure_drop", "mass_imbalance")),
+        (
+            cylinder_plan(),
+            ("drag_coefficient", "lift_coefficient", "strouhal_number"),
+        ),
+        (cavity_plan(), ("velocity_probes", "residuals")),
+    ],
+)
+def test_compiled_required_outputs_are_exactly_requested(
+    plan: object, expected: tuple[str, ...]
+) -> None:
+    compiled = compile_plan(plan)
+    files = archive_files(compiled.archive)
+
+    assert compiled.required_outputs == expected
+    assert "residuals" in files["system/controlDict"]
+    if compiled.experiment_type == "cylinder_flow":
+        metadata = json.loads(files["fluidScientist/plan.json"])
+        assert metadata["output_derivations"]["strouhal_number"] == (
+            "derived from forceCoeffs lift history and shedding frequency"
+        )
+
+
+def test_explicit_cylinder_time_step_above_initial_courant_limit_is_rejected() -> None:
+    with pytest.raises(CompilationError, match="Courant"):
+        compile_plan(cylinder_plan(time_step_s=0.004))
+
+
+def test_explicit_cylinder_time_step_at_initial_courant_limit_is_accepted() -> None:
+    compiled = compile_plan(cylinder_plan(time_step_s=0.003125))
+
+    assert "deltaT          0.003125;" in archive_files(compiled.archive)[
+        "system/controlDict"
+    ]
+
+
+def test_adaptive_cylinder_unrepresentable_time_step_is_rejected() -> None:
+    with pytest.raises(CompilationError, match="time step"):
+        compile_plan(cylinder_plan(time_step_s=None, max_courant=1e-12))
+
+
+def test_extreme_cavity_resolution_that_needs_unrepresentable_step_is_rejected() -> None:
+    with pytest.raises(CompilationError, match="time step"):
+        compile_plan(
+            cavity_plan(
+                side_length_m=1e-12,
+                lid_velocity_m_s=1000.0,
+                cells_per_side=4096,
+            )
+        )
 
 
 @pytest.mark.parametrize(
@@ -231,6 +363,7 @@ def test_cavity_contains_moving_lid_probes_without_mirror_mesh() -> None:
             cylinder_plan(
                 reynolds_number=200.0,
                 mean_velocity_m_s=2.0,
+                time_step_s=0.001,
             ),
             "0/U",
             "uniform (2 0 0)",

@@ -105,14 +105,12 @@ class CylinderOutput(str, Enum):
     DRAG_COEFFICIENT = "drag_coefficient"
     LIFT_COEFFICIENT = "lift_coefficient"
     STROUHAL_NUMBER = "strouhal_number"
-    MASS_IMBALANCE = "mass_imbalance"
     RESIDUALS = "residuals"
 
 
 class CavityOutput(str, Enum):
     VELOCITY_PROBES = "velocity_probes"
     PRESSURE_PROBES = "pressure_probes"
-    MASS_IMBALANCE = "mass_imbalance"
     RESIDUALS = "residuals"
 
 

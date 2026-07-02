@@ -39,9 +39,8 @@ def test_registry_declares_fixed_preprocessing_and_outputs() -> None:
         "lift_coefficient",
         "strouhal_number",
         "residuals",
-        "time_directories",
     )
-    assert cavity.required_outputs == ("velocity_probes", "residuals", "time_directories")
+    assert cavity.required_outputs == ("velocity_probes", "pressure_probes", "residuals")
 
 
 def test_custom_openfoam_routes_only_to_explicit_upload_marker() -> None:
@@ -61,3 +60,4 @@ def test_compilation_api_is_exported_from_package() -> None:
     assert planning.compile_plan.__name__ == "compile_plan"
     assert planning.CompiledCase.__name__ == "CompiledCase"
     assert planning.UnsupportedCompilation.__name__ == "UnsupportedCompilation"
+    assert planning.CompilationError.__name__ == "CompilationError"

@@ -1,6 +1,7 @@
 """Provider-neutral experiment-planning contracts."""
 
 from fluid_scientist.experiment_planning.compilers import (
+    CompilationError,
     CompiledCase,
     UnsupportedCompilation,
     compile_cavity_plan,
@@ -52,6 +53,7 @@ __all__ = [
     "CUSTOM_UPLOAD",
     "CavityExperimentPlan",
     "CavityOutput",
+    "CompilationError",
     "CompiledCase",
     "ConvergenceTargets",
     "CustomUploadMarker",

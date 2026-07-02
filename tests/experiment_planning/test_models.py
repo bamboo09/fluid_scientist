@@ -352,6 +352,22 @@ def test_cylinder_cannot_accept_pipe_payload() -> None:
         ExperimentPlan.model_validate(payload)
 
 
+@pytest.mark.parametrize(
+    ("payload", "unsupported"),
+    [
+        (cylinder_plan(), "mass_imbalance"),
+        (cavity_plan(), "mass_imbalance"),
+    ],
+)
+def test_builtin_plans_reject_outputs_without_compiler_objects(
+    payload: dict[str, object], unsupported: str
+) -> None:
+    payload["requested_outputs"] = (unsupported,)
+
+    with pytest.raises(ValidationError):
+        ExperimentPlan.model_validate(payload)
+
+
 def test_custom_plan_cannot_accept_builtin_case_payload() -> None:
     payload = custom_plan()
     payload["case"] = {**payload["case"], "diameter_m": 0.1}  # type: ignore[arg-type]

@@ -3,6 +3,7 @@
 import gzip
 import hashlib
 import io
+import json
 import math
 import tarfile
 from dataclasses import dataclass
@@ -27,6 +28,10 @@ from fluid_scientist.experiment_planning.registry import (
 
 class UnsupportedCompilation(TypeError):
     """Raised when a plan must follow a route other than built-in compilation."""
+
+
+class CompilationError(ValueError):
+    """Raised when a valid plan cannot produce a safe runnable case."""
 
 
 @dataclass(frozen=True)
@@ -76,9 +81,9 @@ def compile_pipe_plan(plan: object) -> CompiledCase:
     case = plan.case
     targets = plan.convergence_targets
     files = {
-        "0/U": _pipe_velocity_field(
+        "0/U": _pipe_velocity_profile_field(
             velocity=case.mean_velocity_m_s,
-            diameter=case.diameter_m,
+            radial_cells=case.radial_cells,
         ),
         "0/p": _pipe_pressure_field(),
         "constant/momentumTransport": _momentum_transport(),
@@ -91,14 +96,11 @@ def compile_pipe_plan(plan: object) -> CompiledCase:
             axial_cells=case.axial_cells,
             radial_cells=case.radial_cells,
         ),
-        "system/controlDict": _pipe_control_dict(
-            residual_tolerance=targets.residual_tolerance,
-            mass_imbalance_percent=targets.mass_imbalance_percent,
-        ),
+        "system/controlDict": _pipe_control_dict(),
         "system/fvSchemes": _steady_fv_schemes(),
         "system/fvSolution": _pipe_fv_solution(targets.residual_tolerance),
     }
-    return _compiled(plan.experiment_type, files)
+    return _compiled(plan, files)
 
 
 def compile_cylinder_plan(plan: object) -> CompiledCase:
@@ -111,9 +113,21 @@ def compile_cylinder_plan(plan: object) -> CompiledCase:
     downstream = case.domain_downstream_diameters * diameter
     transverse = case.domain_transverse_diameters * diameter
     extrusion_span = diameter * 0.1
+    estimated_cell_size = min(
+        diameter / case.cells_radial,
+        downstream / case.cells_wake,
+    )
+    max_courant = case.max_courant or 1.0
+    stable_delta_t = max_courant * estimated_cell_size / case.mean_velocity_m_s
+    if stable_delta_t < 1e-12:
+        raise CompilationError("required cylinder time step is below the safe representable limit")
     delta_t = case.time_step_s
+    if delta_t is not None and delta_t > stable_delta_t:
+        raise CompilationError(
+            "initial cylinder time step exceeds the conservative Courant limit"
+        )
     if delta_t is None:
-        delta_t = 0.25 * diameter / (case.mean_velocity_m_s * case.cells_radial)
+        delta_t = 0.5 * stable_delta_t
     files = {
         "0/U": _cylinder_velocity_field(case.mean_velocity_m_s),
         "0/p": _cylinder_pressure_field(),
@@ -130,12 +144,12 @@ def compile_cylinder_plan(plan: object) -> CompiledCase:
             circumferential_cells=case.cells_radial,
             wake_cells=case.cells_wake,
         ),
-        "system/mirrorMeshDict": _mirror_mesh_dict(),
+        "system/mirrorMeshDict": _mirror_mesh_dict(diameter),
         "system/controlDict": _cylinder_control_dict(
             end_time=case.end_time_s,
             delta_t=delta_t,
             adjust_time_step=case.max_courant is not None,
-            max_courant=case.max_courant or 1.0,
+            max_courant=max_courant,
             density=case.density_kg_m3,
             velocity=case.mean_velocity_m_s,
             diameter=diameter,
@@ -146,13 +160,18 @@ def compile_cylinder_plan(plan: object) -> CompiledCase:
             plan.convergence_targets.residual_tolerance
         ),
     }
-    return _compiled(plan.experiment_type, files)
+    return _compiled(plan, files)
 
 
 def compile_cavity_plan(plan: object) -> CompiledCase:
     if not isinstance(plan, CavityExperimentPlan):
         raise TypeError("cavity compiler requires CavityExperimentPlan")
     case = plan.case
+    thickness = case.side_length_m / case.cells_per_side
+    stable_delta_t = 0.5 * thickness / case.lid_velocity_m_s
+    if stable_delta_t < 1e-12:
+        raise CompilationError("required cavity time step is below the safe representable limit")
+    delta_t = min(case.end_time_s / 1000.0, stable_delta_t)
     files = {
         "0/U": _cavity_velocity_field(case.lid_velocity_m_s),
         "0/p": _cavity_pressure_field(),
@@ -167,28 +186,68 @@ def compile_cavity_plan(plan: object) -> CompiledCase:
         "system/controlDict": _cavity_control_dict(
             end_time=case.end_time_s,
             side=case.side_length_m,
+            thickness=thickness,
+            delta_t=delta_t,
         ),
         "system/fvSchemes": _transient_fv_schemes(),
         "system/fvSolution": _transient_fv_solution(
-            plan.convergence_targets.residual_tolerance
+            plan.convergence_targets.residual_tolerance,
+            pressure_reference=True,
         ),
     }
-    return _compiled(plan.experiment_type, files)
+    return _compiled(plan, files)
 
 
-def _compiled(experiment_type: str, files: dict[str, str]) -> CompiledCase:
+def _compiled(
+    plan: PipeExperimentPlan | CylinderExperimentPlan | CavityExperimentPlan,
+    files: dict[str, str],
+) -> CompiledCase:
+    experiment_type = plan.experiment_type
+    capability = get_experiment_capability(experiment_type)
+    requested_outputs = tuple(
+        output.value if hasattr(output, "value") else str(output)
+        for output in plan.requested_outputs
+    )
+    unsupported = sorted(set(requested_outputs) - set(capability.required_outputs))
+    if unsupported:
+        raise CompilationError("unsupported requested outputs: " + ", ".join(unsupported))
+    files = {**files, "fluidScientist/plan.json": _plan_metadata(plan, requested_outputs)}
     normalized = {name: _normalize(text) for name, text in files.items()}
     archive = _deterministic_tar_gz(normalized)
     manifest = validate_custom_case_archive(archive)
-    capability = get_experiment_capability(experiment_type)
     return CompiledCase(
         archive=archive,
         archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
         manifest=manifest,
         experiment_type=experiment_type,
         preprocessing=capability.preprocessing,
-        required_outputs=capability.required_outputs,
+        required_outputs=requested_outputs,
     )
+
+
+def _plan_metadata(
+    plan: PipeExperimentPlan | CylinderExperimentPlan | CavityExperimentPlan,
+    requested_outputs: tuple[str, ...],
+) -> str:
+    payload = plan.model_dump(mode="json")
+    metadata: dict[str, object] = {
+        "schema_version": 1,
+        "experiment_type": plan.experiment_type,
+        "base_case": payload["case"],
+        "parameter_sweeps": payload.get("parameter_sweeps", []),
+        "convergence_targets": payload["convergence_targets"],
+        "requested_outputs": list(requested_outputs),
+        "compilation": {
+            "mode": "approved_base_case",
+            "sweep_expansion_owner": "task7",
+        },
+        "output_derivations": {},
+    }
+    if isinstance(plan, CylinderExperimentPlan) and "strouhal_number" in requested_outputs:
+        metadata["output_derivations"] = {
+            "strouhal_number": "derived from forceCoeffs lift history and shedding frequency"
+        }
+    return json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
 def _deterministic_tar_gz(files: dict[str, str]) -> bytes:
@@ -232,8 +291,13 @@ def _header(object_name: str, *, field_class: str = "dictionary", location: str 
     )
 
 
-def _pipe_velocity_field(*, velocity: float, diameter: float) -> str:
-    flow_rate = velocity * math.pi * diameter**2 / 4.0
+def _pipe_velocity_profile_field(*, velocity: float, radial_cells: int) -> str:
+    values = []
+    for index in range(radial_cells):
+        average = 2.0 * velocity * (
+            1.0 - (index**2 + (index + 1) ** 2) / (2.0 * radial_cells**2)
+        )
+        values.append(f"        ({_number(average)} 0 0)")
     return _header("U", field_class="volVectorField", location="0") + f"""
 dimensions      [0 1 -1 0 0 0 0];
 internalField   uniform ({_number(velocity)} 0 0);
@@ -241,9 +305,12 @@ boundaryField
 {{
     inlet
     {{
-        type                flowRateInletVelocity;
-        volumetricFlowRate  constant {_number(flow_rate)};
-        value               uniform ({_number(velocity)} 0 0);
+        type fixedValue;
+        value nonuniform List<vector>
+        {radial_cells}
+        (
+{chr(10).join(values)}
+        );
     }}
     outlet
     {{
@@ -322,12 +389,8 @@ boundary
 """
 
 
-def _pipe_control_dict(
-    *, residual_tolerance: float, mass_imbalance_percent: float
-) -> str:
-    residual = _number(residual_tolerance)
-    mass_imbalance = _number(mass_imbalance_percent)
-    return _header("controlDict", location="system") + f"""
+def _pipe_control_dict() -> str:
+    return _header("controlDict", location="system") + """
 solver          incompressibleFluid;
 startFrom       startTime;
 startTime       0;
@@ -343,22 +406,17 @@ writeCompression off;
 timeFormat      general;
 timePrecision   6;
 runTimeModifiable true;
-convergenceTargets
-{{
-    residualTolerance      {residual};
-    massImbalancePercent   {mass_imbalance};
-}}
 functions
-{{
+{
     pressureDrop
-    {{
+    {
         type fieldValueDelta;
         libs ("libfieldFunctionObjects.so");
         writeControl timeStep;
         writeInterval 1;
         operation subtract;
         region1
-        {{
+        {
             type surfaceFieldValue;
             libs ("libfieldFunctionObjects.so");
             writeControl timeStep;
@@ -367,9 +425,9 @@ functions
             operation areaAverage;
             fields (p);
             patch inlet;
-        }}
+        }
         region2
-        {{
+        {
             type surfaceFieldValue;
             libs ("libfieldFunctionObjects.so");
             writeControl timeStep;
@@ -378,10 +436,10 @@ functions
             operation areaAverage;
             fields (p);
             patch outlet;
-        }}
-    }}
+        }
+    }
     inletFlow
-    {{
+    {
         type surfaceFieldValue;
         libs ("libfieldFunctionObjects.so");
         writeControl timeStep;
@@ -390,9 +448,9 @@ functions
         operation sum;
         fields (phi);
         patch inlet;
-    }}
+    }
     outletFlow
-    {{
+    {
         type surfaceFieldValue;
         libs ("libfieldFunctionObjects.so");
         writeControl timeStep;
@@ -401,8 +459,16 @@ functions
         operation sum;
         fields (phi);
         patch outlet;
-    }}
-}}
+    }
+    residuals
+    {
+        type residuals;
+        libs ("libutilityFunctionObjects.so");
+        fields (U p);
+        writeControl timeStep;
+        writeInterval 1;
+    }
+}
 """
 
 
@@ -479,9 +545,7 @@ boundaryField
 {{
     inlet {{ type fixedValue; value uniform ({value} 0 0); }}
     outlet {{ type pressureInletOutletVelocity; value $internalField; }}
-    farfield {{ type freestream; freestreamValue uniform ({value} 0 0); }}
     cylinder {{ type noSlip; }}
-    symmetryPlane {{ type symmetryPlane; }}
     frontAndBack {{ type empty; }}
 }}
 """
@@ -495,9 +559,7 @@ boundaryField
 {
     inlet { type zeroGradient; }
     outlet { type fixedValue; value uniform 0; }
-    farfield { type freestreamPressure; }
     cylinder { type zeroGradient; }
-    symmetryPlane { type symmetryPlane; }
     frontAndBack { type empty; }
 }
 """
@@ -513,89 +575,90 @@ def _cylinder_block_mesh(
     circumferential_cells: int,
     wake_cells: int,
 ) -> str:
-    diagonal = radius / math.sqrt(2.0)
-    arc_x = radius * math.cos(math.pi / 8)
-    arc_y = radius * math.sin(math.pi / 8)
+    diameter = 2.0 * radius
+    layer = 2.0 * diameter
+    x_join = min(0.4 * downstream, downstream - diameter)
+    y_join = (layer + transverse) / 2.0
+    z_min = -thickness / 2.0
+    z_max = thickness / 2.0
     points = (
-        (-radius, 0.0),
-        (-diagonal, diagonal),
-        (0.0, radius),
-        (diagonal, diagonal),
-        (radius, 0.0),
         (-upstream, 0.0),
-        (-upstream, transverse),
-        (0.0, transverse),
-        (downstream, transverse),
+        (-layer, 0.0),
+        (-radius, 0.0),
+        (radius, 0.0),
+        (layer, 0.0),
+        (x_join, 0.0),
         (downstream, 0.0),
+        (0.0, radius),
+        (0.0, layer),
+        (x_join, y_join),
+        (downstream, y_join),
+        (0.0, transverse),
+        (x_join, transverse),
+        (downstream, transverse),
     )
     vertices = []
-    for z in (0.0, thickness):
+    for z in (z_min, z_max):
         vertices.extend(
             f"    ({_number(x)} {_number(y)} {_number(z)})" for x, y in points
         )
-    circum = max(4, circumferential_cells // 4)
-    outward = max(8, wake_cells // 4)
-    blocks = []
-    for index in range(4):
-        blocks.append(
-            "    hex "
-            f"({index} {index + 1} {index + 6} {index + 5} "
-            f"{index + 10} {index + 11} {index + 16} {index + 15}) "
-            f"({circum} {outward} 1) simpleGrading (1 4 1)"
-        )
+    circum = max(4, circumferential_cells // 2)
+    join_cells = max(1, wake_cells // 3)
+    outlet_cells = wake_cells - join_cells
+    diagonal = radius / math.sqrt(2.0)
+    layer_diagonal = layer / math.sqrt(2.0)
     return _header("blockMeshDict") + f"""
 convertToMeters 1;
 extrusionSpan {_number(thickness)};
+radialCells {circumferential_cells};
+wakeCells {wake_cells};
 vertices
 (
 {chr(10).join(vertices)}
 );
 blocks
 (
-{chr(10).join(blocks)}
+    hex (3 4 8 7 17 18 22 21) ({circumferential_cells} {circum} 1) simpleGrading (4 2 1)
+    hex (7 8 1 2 21 22 15 16) ({circumferential_cells} {circum} 1) simpleGrading (4 1 1)
+    hex (4 5 9 8 18 19 23 22) ({join_cells} {circum} 1) simpleGrading (2 2 1)
+    hex (5 6 10 9 19 20 24 23) ({outlet_cells} {circum} 1) simpleGrading (4 2 1)
+    hex (8 11 0 1 22 25 14 15) ({circumferential_cells} {circum} 1) simpleGrading (4 1 1)
+    hex (8 9 12 11 22 23 26 25) ({join_cells} {circumferential_cells} 1) simpleGrading (2 4 1)
+    hex (9 10 13 12 23 24 27 26) ({outlet_cells} {circumferential_cells} 1) simpleGrading (4 4 1)
 );
 edges
 (
-    arc 0 1 ({_number(-arc_x)} {_number(arc_y)} 0)
-    arc 1 2 ({_number(-arc_y)} {_number(arc_x)} 0)
-    arc 2 3 ({_number(arc_y)} {_number(arc_x)} 0)
-    arc 3 4 ({_number(arc_x)} {_number(arc_y)} 0)
-    arc 10 11 ({_number(-arc_x)} {_number(arc_y)} {_number(thickness)})
-    arc 11 12 ({_number(-arc_y)} {_number(arc_x)} {_number(thickness)})
-    arc 12 13 ({_number(arc_y)} {_number(arc_x)} {_number(thickness)})
-    arc 13 14 ({_number(arc_x)} {_number(arc_y)} {_number(thickness)})
+    arc 3 7 ({_number(diagonal)} {_number(diagonal)} {_number(z_min)})
+    arc 7 2 ({_number(-diagonal)} {_number(diagonal)} {_number(z_min)})
+    arc 17 21 ({_number(diagonal)} {_number(diagonal)} {_number(z_max)})
+    arc 21 16 ({_number(-diagonal)} {_number(diagonal)} {_number(z_max)})
+    arc 4 8 ({_number(layer_diagonal)} {_number(layer_diagonal)} {_number(z_min)})
+    arc 8 1 ({_number(-layer_diagonal)} {_number(layer_diagonal)} {_number(z_min)})
+    arc 18 22 ({_number(layer_diagonal)} {_number(layer_diagonal)} {_number(z_max)})
+    arc 22 15 ({_number(-layer_diagonal)} {_number(layer_diagonal)} {_number(z_max)})
 );
+defaultPatch {{ name frontAndBack; type empty; }}
 boundary
 (
-    inlet {{ type patch; faces ((5 6 16 15)); }}
-    outlet {{ type patch; faces ((8 9 19 18)); }}
-    farfield {{ type patch; faces ((6 7 17 16) (7 8 18 17)); }}
-    cylinder {{ type wall; faces ((0 10 11 1) (1 11 12 2) (2 12 13 3) (3 13 14 4)); }}
-    symmetryPlane {{ type symmetryPlane; faces ((0 5 15 10) (4 14 19 9)); }}
-    frontAndBack
-    {{
-        type empty;
-        faces
-        (
-            (0 1 6 5) (1 2 7 6) (2 3 8 7) (3 4 9 8)
-            (10 15 16 11) (11 16 17 12) (12 17 18 13) (13 18 19 14)
-        );
-    }}
+    inlet {{ type patch; faces ((0 11 25 14) (11 12 26 25) (12 13 27 26)); }}
+    outlet {{ type patch; faces ((6 10 24 20) (10 13 27 24)); }}
+    cylinder {{ type wall; faces ((3 7 21 17) (7 2 16 21)); }}
 );
+mergePatchPairs ();
 """
 
 
-def _mirror_mesh_dict() -> str:
-    return _header("mirrorMeshDict") + """
-mirrorPlane
-{
-    planeType pointAndNormal;
-    pointAndNormalDict
-    {
-        point  (0 0 0);
-        normal (0 1 0);
-    }
-}
+def _mirror_mesh_dict(diameter: float) -> str:
+    return _header("mirrorMeshDict") + f"""
+planeType       pointAndNormal;
+
+pointAndNormalDict
+{{
+    point       (0 0 0);
+    normal      (0 1 0);
+}}
+
+planeTolerance  {_number(diameter * 1e-3)};
 """
 
 
@@ -686,8 +749,11 @@ snGradSchemes { default corrected; }
 """
 
 
-def _transient_fv_solution(tolerance: float) -> str:
+def _transient_fv_solution(
+    tolerance: float, *, pressure_reference: bool = False
+) -> str:
     residual = _number(tolerance)
+    reference = "\n    pRefCell 0;\n    pRefValue 0;" if pressure_reference else ""
     return _header("fvSolution", location="system") + f"""
 solvers
 {{
@@ -712,6 +778,11 @@ PIMPLE
     nOuterCorrectors 1;
     nCorrectors 2;
     nNonOrthogonalCorrectors 0;
+    residualControl
+    {{
+        p {residual};
+        U {residual};
+    }}{reference}
 }}
 """
 
@@ -766,18 +837,21 @@ boundary
 """
 
 
-def _cavity_control_dict(*, end_time: float, side: float) -> str:
+def _cavity_control_dict(
+    *, end_time: float, side: float, thickness: float, delta_t: float
+) -> str:
     write_interval = end_time / 50.0
     quarter = side / 4.0
     half = side / 2.0
     three_quarters = side * 3.0 / 4.0
+    probe_z = thickness / 2.0
     return _header("controlDict", location="system") + f"""
 solver          incompressibleFluid;
 startFrom       startTime;
 startTime       0;
 stopAt          endTime;
 endTime         {_number(end_time)};
-deltaT          {_number(end_time / 1000.0)};
+deltaT          {_number(delta_t)};
 adjustTimeStep  yes;
 maxCo           0.5;
 writeControl    adjustableRunTime;
@@ -795,9 +869,9 @@ functions
         fields (U p);
         probeLocations
         (
-            ({_number(quarter)} {_number(half)} 0)
-            ({_number(half)} {_number(half)} 0)
-            ({_number(three_quarters)} {_number(half)} 0)
+            ({_number(quarter)} {_number(half)} {_number(probe_z)})
+            ({_number(half)} {_number(half)} {_number(probe_z)})
+            ({_number(three_quarters)} {_number(half)} {_number(probe_z)})
         );
         writeControl timeStep;
         writeInterval 1;
