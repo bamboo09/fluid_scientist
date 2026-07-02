@@ -113,9 +113,14 @@ def compile_cylinder_plan(plan: object) -> CompiledCase:
     downstream = case.domain_downstream_diameters * diameter
     transverse = case.domain_transverse_diameters * diameter
     extrusion_span = diameter * 0.1
-    estimated_cell_size = min(
-        diameter / case.cells_radial,
-        downstream / case.cells_wake,
+    estimated_cell_size = _cylinder_minimum_cell_size(
+        radius=radius,
+        upstream=upstream,
+        downstream=downstream,
+        transverse=transverse,
+        thickness=extrusion_span,
+        radial_cells=case.cells_radial,
+        wake_cells=case.cells_wake,
     )
     max_courant = case.max_courant or 1.0
     stable_delta_t = max_courant * estimated_cell_size / case.mean_velocity_m_s
@@ -148,7 +153,7 @@ def compile_cylinder_plan(plan: object) -> CompiledCase:
         "system/controlDict": _cylinder_control_dict(
             end_time=case.end_time_s,
             delta_t=delta_t,
-            adjust_time_step=case.max_courant is not None,
+            adjust_time_step=True,
             max_courant=max_courant,
             density=case.density_kg_m3,
             velocity=case.mean_velocity_m_s,
@@ -546,6 +551,7 @@ boundaryField
     inlet {{ type fixedValue; value uniform ({value} 0 0); }}
     outlet {{ type pressureInletOutletVelocity; value $internalField; }}
     cylinder {{ type noSlip; }}
+    mirrorPlane {{ type symmetryPlane; }}
     frontAndBack {{ type empty; }}
 }}
 """
@@ -560,6 +566,7 @@ boundaryField
     inlet { type zeroGradient; }
     outlet { type fixedValue; value uniform 0; }
     cylinder { type zeroGradient; }
+    mirrorPlane { type symmetryPlane; }
     frontAndBack { type empty; }
 }
 """
@@ -637,15 +644,71 @@ edges
     arc 18 22 ({_number(layer_diagonal)} {_number(layer_diagonal)} {_number(z_max)})
     arc 22 15 ({_number(-layer_diagonal)} {_number(layer_diagonal)} {_number(z_max)})
 );
-defaultPatch {{ name frontAndBack; type empty; }}
 boundary
 (
     inlet {{ type patch; faces ((0 11 25 14) (11 12 26 25) (12 13 27 26)); }}
     outlet {{ type patch; faces ((6 10 24 20) (10 13 27 24)); }}
     cylinder {{ type wall; faces ((3 7 21 17) (7 2 16 21)); }}
+    mirrorPlane
+    {{
+        type symmetryPlane;
+        faces ((3 4 18 17) (1 15 16 2) (4 5 19 18) (5 6 20 19) (1 0 14 15));
+    }}
+    frontAndBack
+    {{
+        type empty;
+        faces
+        (
+            (3 4 8 7) (7 8 1 2) (4 5 9 8) (5 6 10 9)
+            (8 11 0 1) (8 9 12 11) (9 10 13 12)
+            (17 21 22 18) (21 16 15 22) (18 22 23 19) (19 23 24 20)
+            (22 15 14 25) (22 25 26 23) (23 26 27 24)
+        );
+    }}
 );
 mergePatchPairs ();
 """
+
+
+def _cylinder_minimum_cell_size(
+    *,
+    radius: float,
+    upstream: float,
+    downstream: float,
+    transverse: float,
+    thickness: float,
+    radial_cells: int,
+    wake_cells: int,
+) -> float:
+    diameter = 2.0 * radius
+    layer = 2.0 * diameter
+    x_join = min(0.4 * downstream, downstream - diameter)
+    y_join = (layer + transverse) / 2.0
+    circum = max(4, radial_cells // 2)
+    join_cells = max(1, wake_cells // 3)
+    outlet_cells = wake_cells - join_cells
+    candidates = (
+        _smallest_graded_cell(layer - radius, radial_cells, 4.0),
+        _smallest_graded_cell(upstream - layer, radial_cells, 4.0),
+        _smallest_graded_cell(transverse - layer, radial_cells, 4.0),
+        _smallest_graded_cell(x_join - layer, join_cells, 2.0),
+        _smallest_graded_cell(downstream - x_join, outlet_cells, 4.0),
+        _smallest_graded_cell(math.pi * radius / 2.0, circum, 2.0),
+        _smallest_graded_cell(math.pi * layer / 2.0, circum, 2.0),
+        _smallest_graded_cell(y_join - layer, circum, 2.0),
+        _smallest_graded_cell(transverse - y_join, radial_cells, 4.0),
+        thickness,
+    )
+    return min(candidates)
+
+
+def _smallest_graded_cell(length: float, cells: int, expansion: float) -> float:
+    if length <= 0.0 or cells <= 0 or expansion < 1.0:
+        raise CompilationError("cylinder mesh grading has invalid dimensions")
+    if cells == 1 or expansion == 1.0:
+        return length / cells
+    ratio = expansion ** (1.0 / (cells - 1))
+    return length * (ratio - 1.0) / (ratio**cells - 1.0)
 
 
 def _mirror_mesh_dict(diameter: float) -> str:

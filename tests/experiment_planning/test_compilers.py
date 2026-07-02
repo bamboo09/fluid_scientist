@@ -284,6 +284,45 @@ def test_cylinder_mesh_assigns_requested_wake_and_radial_resolutions() -> None:
     assert "(80 32 1)" in mesh
 
 
+def test_cylinder_declares_only_y_zero_faces_as_mirror_plane_patch() -> None:
+    files = archive_files(compile_plan(cylinder_plan()).archive)
+    mesh = files["system/blockMeshDict"]
+
+    assert "mirrorPlane\n    {\n        type symmetryPlane;" in mesh
+    for face in (
+        "(3 4 18 17)",
+        "(1 15 16 2)",
+        "(4 5 19 18)",
+        "(5 6 20 19)",
+        "(1 0 14 15)",
+    ):
+        assert face in mesh
+    assert "frontAndBack\n    {\n        type empty;" in mesh
+    assert "mirrorPlane { type symmetryPlane; }" in files["0/U"]
+    assert "mirrorPlane { type symmetryPlane; }" in files["0/p"]
+
+
+def test_explicit_cylinder_step_keeps_adaptive_courant_control_enabled() -> None:
+    control = archive_files(compile_plan(cylinder_plan()).archive)["system/controlDict"]
+
+    assert "adjustTimeStep  yes;" in control
+    assert "maxCo           1;" in control
+
+
+def test_cylinder_courant_guard_accounts_for_graded_near_wall_cell() -> None:
+    with pytest.raises(CompilationError, match="Courant"):
+        compile_plan(
+            cylinder_plan(
+                domain_upstream_diameters=30.0,
+                domain_downstream_diameters=60.0,
+                domain_transverse_diameters=40.0,
+                cells_radial=400,
+                cells_wake=2000,
+                time_step_s=0.0002,
+            )
+        )
+
+
 def test_cavity_contains_moving_lid_probes_without_mirror_mesh() -> None:
     compiled = compile_plan(cavity_plan())
     files = archive_files(compiled.archive)
@@ -330,10 +369,10 @@ def test_explicit_cylinder_time_step_above_initial_courant_limit_is_rejected() -
         compile_plan(cylinder_plan(time_step_s=0.004))
 
 
-def test_explicit_cylinder_time_step_at_initial_courant_limit_is_accepted() -> None:
-    compiled = compile_plan(cylinder_plan(time_step_s=0.003125))
+def test_explicit_cylinder_time_step_below_graded_courant_limit_is_accepted() -> None:
+    compiled = compile_plan(cylinder_plan(time_step_s=0.002))
 
-    assert "deltaT          0.003125;" in archive_files(compiled.archive)[
+    assert "deltaT          0.002;" in archive_files(compiled.archive)[
         "system/controlDict"
     ]
 

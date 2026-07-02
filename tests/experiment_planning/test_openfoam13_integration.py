@@ -1,6 +1,7 @@
 """OpenFOAM 13 smoke tests; skipped when the Foundation toolchain is absent."""
 
 import io
+import os
 import re
 import shutil
 import subprocess
@@ -8,14 +9,33 @@ import tarfile
 
 import pytest
 
+from fluid_scientist.adapters.openfoam_parsers import parse_check_mesh
 from fluid_scientist.experiment_planning.compilers import compile_plan
 from fluid_scientist.experiment_planning.models import ExperimentPlan
 
 REQUIRED_COMMANDS = ("blockMesh", "mirrorMesh", "checkMesh", "foamRun")
-pytestmark = pytest.mark.skipif(
-    any(shutil.which(command) is None for command in REQUIRED_COMMANDS),
-    reason="OpenFOAM Foundation 13 commands are unavailable",
-)
+
+
+def _foundation_13_status() -> tuple[bool, str]:
+    missing = [command for command in REQUIRED_COMMANDS if shutil.which(command) is None]
+    if missing:
+        return False, "OpenFOAM Foundation 13 commands unavailable: " + ", ".join(missing)
+    raw_version = os.environ.get("WM_PROJECT_VERSION", "").strip()
+    if not raw_version:
+        if shutil.which("foamVersion") is None:
+            return False, "OpenFOAM Foundation version unavailable: foamVersion not found"
+        result = subprocess.run(
+            ("foamVersion",), capture_output=True, text=True, check=False
+        )
+        raw_version = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+    version = "OpenFOAM-13" if raw_version == "13" else raw_version
+    if version != "OpenFOAM-13":
+        return False, f"OpenFOAM Foundation 13 required, found {version or 'unknown'}"
+    return True, "OpenFOAM-13 toolchain available"
+
+
+TOOLCHAIN_READY, TOOLCHAIN_REASON = _foundation_13_status()
+openfoam13_only = pytest.mark.skipif(not TOOLCHAIN_READY, reason=TOOLCHAIN_REASON)
 
 
 def _common(experiment_type: str) -> dict[str, object]:
@@ -76,7 +96,8 @@ def _plans() -> tuple[ExperimentPlan, ...]:
 
 
 @pytest.mark.parametrize("plan", _plans(), ids=lambda plan: plan.root.experiment_type)
-def test_generated_case_runs_foundation_13_mesh_and_solver_smoke(plan, tmp_path) -> None:
+@openfoam13_only
+def test_generated_case_runs_foundation_13_smoke_only_not_acceptance(plan, tmp_path) -> None:
     compiled = compile_plan(plan)
     case_root = tmp_path / plan.root.experiment_type
     case_root.mkdir()
@@ -86,9 +107,16 @@ def test_generated_case_runs_foundation_13_mesh_and_solver_smoke(plan, tmp_path)
     commands = [("blockMesh",)]
     if compiled.manifest.needs_mirror_mesh:
         commands.append(("mirrorMesh",))
-    commands.append(("checkMesh", "-allGeometry", "-allTopology"))
     for command in commands:
         subprocess.run(command, cwd=case_root, check=True, capture_output=True, text=True)
+    check_mesh = subprocess.run(
+        ("checkMesh", "-allGeometry", "-allTopology"),
+        cwd=case_root,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert parse_check_mesh(check_mesh.stdout, require_passed=True).passed is True
 
     control_path = case_root / "system" / "controlDict"
     control = control_path.read_text(encoding="utf-8")
