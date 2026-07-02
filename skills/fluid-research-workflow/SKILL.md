@@ -15,12 +15,13 @@ Treat solver completion, numerical convergence, physical credibility, and genera
 2. Obtain Gate 1 human approval before evidence-driven planning.
 3. Build an `EvidencePackage` with source locators. Use reviewed evidence for high-risk choices.
 4. Compute units, dimensionless numbers, parameter bounds, and rules with deterministic code. Never ask an LLM to supply numerical truth.
-5. Design a mandatory `Pilot` before a batch. Choose a verified built-in template only when its geometry and physics match; otherwise route to a custom OpenFOAM case. Include coarse, medium, and fine meshes and relevant model sensitivity.
-6. Obtain Gate 2 human approval for the solver, mesh, budget, and case count.
-7. Select the approved execution target. Use typed Slurm commands on HPC or the fixed `fluid-worker` protocol on a direct workstation; never emit or run arbitrary shell.
-8. Perform deterministic validation: residuals plus monitored quantities, conservation, mesh independence/GCI, benchmark agreement, and model sensitivity.
-9. Run deterministic statistics before Results Analyst interpretation. Require evidence-linked claims and label observation, inference, literature support, extrapolation, or hypothesis.
-10. Have an independent Scientific Reviewer check failures, uncertainty, and scope. Obtain Gate 3 human approval before the final report.
+5. Ask OpenAI, GLM, or DeepSeek for one strict provider-neutral `ExperimentPlan`. Apply local schema validation before accepting any provider output.
+6. Design a mandatory `Pilot` before a batch. Route `laminar_pipe`, `cylinder_flow`, and `lid_driven_cavity` through deterministic compilers; route `custom_openfoam` to reviewed archive upload.
+7. Compile and preview the case before Gate 2. Bind the plan ID, plan version, and archive digest to the approval; submit the exact approved bytes without recompiling.
+8. Select the approved execution target. Use typed Slurm commands on HPC or the fixed `fluid-worker` protocol on a direct workstation; never emit or run arbitrary shell.
+9. Perform deterministic validation: residuals plus monitored quantities, conservation, mesh independence/GCI, benchmark agreement, and model sensitivity.
+10. Run deterministic statistics before Results Analyst interpretation. Require evidence-linked claims and label observation, inference, literature support, extrapolation, or hypothesis.
+11. Have an independent Scientific Reviewer check failures, uncertainty, and scope. Obtain Gate 3 human approval before the final report.
 
 ## Hard stops
 
@@ -30,6 +31,8 @@ Treat solver completion, numerical convergence, physical credibility, and genera
 - Limit controlled numerical repair to two recorded revisions per case.
 - Never hide failed cases, invent missing evidence, repair corrupt formulas, or generalize beyond the tested range.
 - Never execute a custom case before local and worker-side validation, and never let the model or user supply a remote destination or shell command.
+- Never execute model-generated commands or model-generated OpenFOAM dictionaries. Models may propose only a schema-valid plan; trusted code owns compilation and execution.
+- Never approve or submit an archive whose recomputed digest differs from the Gate 2 archive digest.
 - Never call a case “ready for post-processing” without exposing its mesh, residuals, time directories, and result view to the researcher.
 - Never publish a candidate Skill without a failing baseline, passing forward test, redaction, and human approval.
 

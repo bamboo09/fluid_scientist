@@ -1,5 +1,13 @@
 # Fluid Scientist
 
+## 多模型实验计划与确定性编译
+
+工作台第一批支持 OpenAI、GLM 和 DeepSeek。API Key 只保存在当前服务进程内存，不进入浏览器存储、数据库、日志、Skill 或 Git；服务重启后需要重新配置。模型 ID 可编辑，不把某个版本写死为系统能力。
+
+模型只生成严格的 provider-neutral `ExperimentPlan`，可选择 `laminar_pipe`、`cylinder_flow`、`lid_driven_cavity` 或 `custom_openfoam`。内置类型由受控编译器生成 OpenFOAM Foundation 13 算例；自定义类型进入 tar.gz 双重安全校验流程。模型不能生成或执行 Shell、远程路径和 OpenFOAM 命令。
+
+计划编译后会显示求解器、预处理链、输出指标和 `archive_sha256`。Gate 2 同时绑定计划 ID、计划版本和归档摘要；提交时读取并重新计算已存档字节的摘要，不会在审批后重新编译。
+
 面向 OpenFOAM 与 HPC 的可信流体力学科研智能体。系统把自然语言研究问题转为严格的 ResearchSpec，通过文献证据、物理规则、Pilot、Slurm/OpenFOAM、确定性验证、Results Analyst 和 Scientific Reviewer 形成可追溯闭环。
 
 当前版本包含两条路径：单相、不可压缩、稳态 90° 弯管的 Fake 科研闭环，以及可在 OpenFOAM Foundation 13 工作站上执行的真实层流圆管基准。默认使用 Fake 模式，不需要 OpenAI Key、HPC 地址或 OpenFOAM，适合本地演示和 CI。Fake 数值仅用于验证软件流程，不能作为科研结果。

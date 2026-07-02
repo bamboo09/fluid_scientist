@@ -3,6 +3,7 @@
 ## Contracts
 
 - `ResearchSpec`: question, geometry, fluid, independent variables, responses, constraints, and simulation budget.
+- Provider-neutral `ExperimentPlan`: experiment type, bounded case inputs, convergence targets, parameter sweeps, requested outputs, assumptions, and limitations.
 - `EvidencePackage`: query, source-located evidence, conflicts, coverage gaps, review state, and confidence.
 - `CaseManifest`: immutable template commit, software/artifact digest, geometry, physics, numerics, resources, and outputs.
 - `ValidationResult`: iterative convergence, mass imbalance, grid/time-step independence, benchmark agreement, sensitivity, and warnings.
@@ -31,7 +32,18 @@ Use the data node for transfer, download, compilation, checksums, and artifact p
 
 ### Model configuration
 
-Keep an interactively supplied OpenAI API key only in server-process memory. Never echo it, place it in browser storage, write it to project files, or include it in logs and Skills. Require re-entry after service restart.
+Support only the first-batch providers OpenAI, GLM, and DeepSeek. Accept arbitrary model IDs, but keep each interactively supplied API key only in server-process memory. Never echo a key, place it in browser storage, write it to project files, or include it in logs and Skills. Require re-entry after service restart.
+
+Use native structured parsing for OpenAI. Request JSON from GLM and DeepSeek, then perform the same strict local schema validation. Treat authentication, model-not-found, transport, empty-output, JSON, and schema failures as different typed errors. Do not retry authentication, model-not-found, or invalid-plan failures.
+
+### Provider-neutral planning and deterministic compilation
+
+- Allow the model to select only `laminar_pipe`, `cylinder_flow`, `lid_driven_cavity`, or `custom_openfoam` and fill their bounded plan fields. Reject unknown capabilities and extra fields.
+- Keep model planning separate from execution. Reject model-generated commands, shell, remote paths, and OpenFOAM dictionaries.
+- Route built-in plans through a deterministic compiler. Sort archive members, normalize tar metadata, set gzip time to zero, and validate the resulting archive before storing it.
+- Route `custom_openfoam` to the reviewed upload path instead of pretending it can use a built-in compiler.
+- Persist the immutable plan and compiled bytes. Preview the solver, preprocessing chain, required outputs, and archive digest without exposing server paths.
+- At Gate 2, bind the plan ID, plan version, and archive digest. On submission, retrieve the stored bytes, recompute their digest, compare it with the binding, and never recompile after approval.
 
 ## OpenFOAM Foundation 13 benchmark
 
