@@ -3,6 +3,7 @@
 import contextlib
 import hashlib
 import io
+import json
 import os
 import re
 import shutil
@@ -350,12 +351,23 @@ class WorkerJobService:
             (job_root / "checkMesh.log").read_text(encoding="utf-8"),
             require_passed=False,
         )
-        solver = parse_solver_log((job_root / "solver.log").read_text(encoding="utf-8"))
+        solver = asdict(
+            parse_solver_log((job_root / "solver.log").read_text(encoding="utf-8"))
+        )
+        plan_path = case_root / "fluidScientist" / "plan.json"
+        if plan_path.is_file():
+            plan = json.loads(plan_path.read_text(encoding="utf-8"))
+            if plan.get("experiment_type") == "laminar_pipe":
+                density = float(plan["case"]["density_kg_m3"])
+                with contextlib.suppress(RuntimeError, OSError, ValueError, KeyError):
+                    metrics = extract_surface_metrics(case_root, density_kg_m3=density)
+                    solver.update(asdict(metrics))
         return {
             "job_id": job_id,
             "state": record.state.value,
             "mesh": asdict(mesh),
-            "solver": asdict(solver),
+            "solver": solver,
+            "observables": extract_case_observables(case_root),
             "case_manifest": record.case_manifest,
             "post_processing": {
                 "case_path": f"jobs/{job_id}/case",
@@ -414,6 +426,64 @@ def extract_surface_metrics(case_root: Path, *, density_kg_m3: float) -> Surface
         inlet_mass_flow=abs(inlet_volumetric) * density_kg_m3,
         outlet_mass_flow=-abs(outlet_volumetric) * density_kg_m3,
     )
+
+
+def extract_case_observables(case_root: Path) -> dict[str, object]:
+    """Extract the latest typed values from built-in function-object files."""
+
+    observables: dict[str, object] = {}
+    coefficient_file = case_root / "postProcessing" / "forceCoeffs" / "0" / "forceCoeffs.dat"
+    coefficient_values = _latest_numeric_row(coefficient_file)
+    if coefficient_values is not None and len(coefficient_values) >= 4:
+        observables.update(
+            {
+                "moment_coefficient": coefficient_values[1],
+                "drag_coefficient": coefficient_values[2],
+                "lift_coefficient": coefficient_values[3],
+            }
+        )
+
+    probe_root = case_root / "postProcessing" / "velocityProbes" / "0"
+    velocity_line = _latest_data_line(probe_root / "U")
+    if velocity_line is not None:
+        vectors = [
+            [float(component) for component in match.split()]
+            for match in re.findall(r"\(([^()]+)\)", velocity_line)
+        ]
+        if vectors and all(len(vector) == 3 for vector in vectors):
+            observables["velocity_probes"] = vectors
+    pressure_values = _latest_numeric_row(probe_root / "p")
+    if pressure_values is not None and len(pressure_values) >= 2:
+        observables["pressure_probes"] = pressure_values[1:]
+    return observables
+
+
+def _latest_numeric_row(path: Path) -> list[float] | None:
+    line = _latest_data_line(path)
+    if line is None:
+        return None
+    return [
+        float(value)
+        for value in re.findall(r"[-+]?(?:\d*\.?\d+)(?:[eE][-+]?\d+)?", line)
+    ]
+
+
+def _latest_data_line(path: Path) -> str | None:
+    if not path.is_file():
+        return None
+    latest: tuple[float, str] | None = None
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        first = stripped.split(maxsplit=1)[0]
+        try:
+            time_value = float(first)
+        except ValueError:
+            continue
+        if latest is None or time_value > latest[0]:
+            latest = (time_value, stripped)
+    return None if latest is None else latest[1]
 
 
 def _latest_function_value(function_root: Path) -> float:

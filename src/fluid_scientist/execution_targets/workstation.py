@@ -4,7 +4,7 @@ import json
 import tempfile
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from fluid_scientist.adapters.custom_openfoam import validate_custom_case_archive
 from fluid_scientist.adapters.openfoam import LaminarPipeCase
@@ -60,6 +60,16 @@ class WorkerPostProcessing(BaseModel):
     time_directories: tuple[str, ...]
 
 
+class WorkerObservables(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    moment_coefficient: float | None = None
+    drag_coefficient: float | None = None
+    lift_coefficient: float | None = None
+    velocity_probes: tuple[tuple[float, float, float], ...] = ()
+    pressure_probes: tuple[float, ...] = ()
+
+
 class WorkerCollection(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -67,6 +77,7 @@ class WorkerCollection(BaseModel):
     state: str
     mesh: WorkerMeshResult
     solver: WorkerSolverResult
+    observables: WorkerObservables = Field(default_factory=WorkerObservables)
     case_manifest: dict[str, str]
     post_processing: WorkerPostProcessing | None = None
 

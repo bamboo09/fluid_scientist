@@ -10,6 +10,7 @@ from fluid_scientist.worker.service import (
     OpenFOAM13JobRunner,
     WorkerJobService,
     build_doctor_report,
+    extract_case_observables,
     extract_surface_metrics,
     system_doctor,
 )
@@ -283,3 +284,36 @@ def test_surface_metrics_use_latest_time_and_convert_openfoam_units(tmp_path) ->
     assert metrics.pressure_drop_pa == 16.0
     assert metrics.inlet_mass_flow == 0.0314159
     assert metrics.outlet_mass_flow == -0.0314158
+
+
+def test_case_observables_extract_latest_force_coefficients_and_cavity_probes(
+    tmp_path,
+) -> None:
+    coefficients = tmp_path / "postProcessing/forceCoeffs/0"
+    coefficients.mkdir(parents=True)
+    (coefficients / "forceCoeffs.dat").write_text(
+        "# Time Cm Cd Cl Cl(f) Cl(r)\n"
+        "0.01 1e-6 2.4 -0.01 -0.005 -0.005\n"
+        "0.02 2e-6 2.2 -0.02 -0.01 -0.01\n",
+        encoding="utf-8",
+    )
+    probes = tmp_path / "postProcessing/velocityProbes/0"
+    probes.mkdir(parents=True)
+    (probes / "U").write_text(
+        "# Time\n0.01 (0.1 0.2 0) (-0.1 0.3 0) (0.0 -0.2 0)\n",
+        encoding="utf-8",
+    )
+    (probes / "p").write_text(
+        "# Time\n0.01 -0.02 0.01 0.04\n",
+        encoding="utf-8",
+    )
+
+    observables = extract_case_observables(tmp_path)
+
+    assert observables == {
+        "moment_coefficient": 2e-6,
+        "drag_coefficient": 2.2,
+        "lift_coefficient": -0.02,
+        "velocity_probes": [[0.1, 0.2, 0.0], [-0.1, 0.3, 0.0], [0.0, -0.2, 0.0]],
+        "pressure_probes": [-0.02, 0.01, 0.04],
+    }

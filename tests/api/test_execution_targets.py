@@ -15,6 +15,7 @@ from fluid_scientist.db import CompiledExperimentRow
 from fluid_scientist.execution_targets.base import ExecutionTargetCapability
 from fluid_scientist.execution_targets.workstation import WorkerCollection
 from fluid_scientist.experiment_planning.models import PipeExperimentPlan
+from fluid_scientist.experiment_planning.result_analysis import ExperimentAnalysis
 from fluid_scientist.settings import AppSettings
 from fluid_scientist.worker.service import CustomCaseSpec, JobRecord, JobState
 
@@ -368,6 +369,27 @@ class StaticPipePlanner:
         )
 
 
+class StaticResultAnalyst:
+    def analyze(self, summary, *, evidence_keys):
+        assert "mesh.cells" in evidence_keys
+        return ExperimentAnalysis.model_validate(
+            {
+                "title": "Laminar pipe smoke analysis",
+                "executive_summary": "The mesh and solver completed successfully.",
+                "claims": [
+                    {
+                        "text": "The mesh contains 8000 cells.",
+                        "level": "direct_observation",
+                        "evidence_keys": ["mesh.cells"],
+                    }
+                ],
+                "credibility_assessment": ["This is a smoke-level run."],
+                "limitations": ["No grid-independence study was performed."],
+                "recommended_next_steps": ["Run coarse, medium, and fine meshes."],
+            }
+        )
+
+
 def planning_client(tmp_path, target: CustomCaseTarget):
     return TestClient(
         create_app(
@@ -376,6 +398,7 @@ def planning_client(tmp_path, target: CustomCaseTarget):
             plan_designer=StaticPipePlanner(),
             plan_provider_name="glm",
             plan_model_name="glm-5.1",
+            result_analyst=StaticResultAnalyst(),
         )
     )
 
@@ -491,6 +514,31 @@ def test_bound_experiment_submission_uses_exact_approved_archive(tmp_path) -> No
     assert approval["approved_artifacts"][plan["plan_id"]]["archive_sha256"] == preview[
         "archive_sha256"
     ]
+
+    results = client.get(
+        f"/api/projects/{project['project_id']}/experiment-plans/{plan['plan_id']}/results",
+        params={"target_id": "workstation-openfoam", "case_id": "planned-pipe"},
+    )
+    assert results.status_code == 200
+    assert results.json()["project"]["workflow_state"] == "PILOT_VERIFIED"
+    assert results.json()["summary"] == {
+        "experiment_type": "laminar_pipe",
+        "requested_outputs": ["pressure_drop", "mass_imbalance"],
+        "mesh_passed": True,
+        "solver_completed": True,
+        "cells": 8000,
+        "final_residuals": {"Ux": 1e-8},
+        "observables": {},
+    }
+
+    analysis = client.post(
+        f"/api/projects/{project['project_id']}/experiment-plans/{plan['plan_id']}/analysis",
+        params={"target_id": "workstation-openfoam", "case_id": "planned-pipe"},
+    )
+    assert analysis.status_code == 200
+    assert analysis.json()["provider"] == "glm"
+    assert analysis.json()["model"] == "glm-5.1"
+    assert analysis.json()["analysis"]["claims"][0]["evidence_keys"] == ["mesh.cells"]
 
 
 def test_bound_submission_rejects_client_digest_different_from_gate_two(tmp_path) -> None:

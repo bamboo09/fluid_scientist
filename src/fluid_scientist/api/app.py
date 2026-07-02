@@ -65,6 +65,13 @@ from fluid_scientist.experiment_planning.compilers import (
     UnsupportedCompilation,
     compile_plan,
 )
+from fluid_scientist.experiment_planning.result_analysis import (
+    AnalysisEvidenceError,
+    AnalysisProviderError,
+    ExperimentAnalysis,
+    ResultAnalyst,
+    create_result_analyst,
+)
 from fluid_scientist.orchestration.workflow import TransitionError
 from fluid_scientist.ports import (
     StoredCompiledExperiment,
@@ -233,6 +240,7 @@ EXPERIMENT_CAPABILITIES = (
 
 PLAN_CAPABILITY_MARKERS = ("OpenFOAM-13", "workstation_openfoam")
 PlanProviderFactory = Callable[[ProviderSettings], PlanExperimentDesigner]
+ResultAnalystFactory = Callable[[ProviderSettings], ResultAnalyst]
 LegacyProviderFactory = Callable[[OpenAISettings], LegacyExperimentDesigner]
 
 
@@ -295,6 +303,35 @@ class BenchmarkResultsView(BaseModel):
     validation: PipeBenchmarkValidation
 
 
+class ExperimentResultSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    experiment_type: str
+    requested_outputs: tuple[str, ...]
+    mesh_passed: bool
+    solver_completed: bool
+    cells: int
+    final_residuals: dict[str, float]
+    observables: dict[str, object]
+
+
+class PlannedExperimentResultsView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    project: ProjectView
+    collection: WorkerCollection
+    summary: ExperimentResultSummary
+
+
+class ExperimentAnalysisView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["openai", "glm", "deepseek"]
+    model: str
+    summary: ExperimentResultSummary
+    analysis: ExperimentAnalysis
+
+
 def _openai_model_configuration(
     settings: OpenAISettings,
     *,
@@ -321,6 +358,7 @@ def _openai_model_configuration(
         provider="openai",
         model=settings.planner_model,
         plan_designer=plan_designer,
+        result_analyst=create_result_analyst(plan_settings),
         legacy_designer=legacy_designer,
     )
 
@@ -333,9 +371,11 @@ def create_app(
     transport_factory: Callable[[NodeSettings], SSHTransport] = SSHTransport,
     experiment_designer: LegacyExperimentDesigner | None = None,
     plan_designer: PlanExperimentDesigner | None = None,
+    result_analyst: ResultAnalyst | None = None,
     plan_provider_name: ProviderName | None = None,
     plan_model_name: str | None = None,
     plan_provider_factory: PlanProviderFactory = create_plan_provider,
+    result_analyst_factory: ResultAnalystFactory = create_result_analyst,
     legacy_provider_factory: LegacyProviderFactory = OpenAIResponsesProvider,
     model_configuration: ModelConfiguration | None = None,
 ) -> FastAPI:
@@ -345,7 +385,9 @@ def create_app(
         configured_targets = build_execution_targets(runtime_settings, transport_factory)
     coupled_plan_args = (plan_designer, plan_provider_name, plan_model_name)
     if model_configuration is not None and (
-        experiment_designer is not None or any(value is not None for value in coupled_plan_args)
+        experiment_designer is not None
+        or result_analyst is not None
+        or any(value is not None for value in coupled_plan_args)
     ):
         raise ValueError(
             "model_configuration cannot be combined with designer injection arguments"
@@ -365,6 +407,7 @@ def create_app(
             provider=plan_provider_name,
             model=plan_model_name,
             plan_designer=plan_designer,
+            result_analyst=result_analyst,
             legacy_designer=experiment_designer,
         )
     elif runtime_settings.openai.api_key is not None:
@@ -470,6 +513,7 @@ def create_app(
             api_key=request.api_key,
         )
         designer = plan_provider_factory(provider_settings)
+        analyst = result_analyst_factory(provider_settings)
         legacy_designer = None
         if provider_settings.provider == "openai":
             legacy_settings = OpenAISettings(
@@ -482,6 +526,7 @@ def create_app(
             provider=provider_settings.provider,
             model=provider_settings.model,
             plan_designer=designer,
+            result_analyst=analyst,
             legacy_designer=legacy_designer,
         )
         application.state.model_configuration = configured_models
@@ -819,6 +864,128 @@ def create_app(
         except RemoteExecutionError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
 
+    @application.get(
+        "/api/projects/{project_id}/experiment-plans/{plan_id}/results",
+        response_model=PlannedExperimentResultsView,
+    )
+    def planned_experiment_results(
+        project_id: str,
+        plan_id: str,
+        target_id: str,
+        case_id: str,
+    ) -> PlannedExperimentResultsView:
+        target, job_id = _bound_benchmark(
+            project_service, target_registry, project_id, case_id, target_id
+        )
+        collect = getattr(target, "collect", None)
+        if not callable(collect):
+            raise HTTPException(status_code=422, detail="execution target cannot collect results")
+        try:
+            stored_plan = project_service.load_experiment_plan(plan_id)
+            if stored_plan.project_id != project_id:
+                raise TransitionError("experiment plan belongs to a different project")
+            collection = collect(job_id)
+            if collection.state != "succeeded":
+                raise TransitionError("experiment results are not ready")
+            plan = ExperimentPlan.model_validate_json(stored_plan.plan_json)
+            summary = ExperimentResultSummary(
+                experiment_type=plan.root.experiment_type,
+                requested_outputs=plan.root.requested_outputs,
+                mesh_passed=collection.mesh.passed,
+                solver_completed=collection.solver.completed,
+                cells=collection.mesh.cells,
+                final_residuals=collection.solver.final_residuals,
+                observables=collection.observables.model_dump(
+                    exclude_none=True,
+                    exclude_defaults=True,
+                ),
+            )
+            project = project_service.verify_pilot(
+                project_id,
+                case_id=case_id,
+                validation=summary.model_dump(mode="json"),
+                actor="validator",
+            )
+            return PlannedExperimentResultsView(
+                project=project,
+                collection=collection,
+                summary=summary,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except TransitionError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except RemoteExecutionError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
+    @application.post(
+        "/api/projects/{project_id}/experiment-plans/{plan_id}/analysis",
+        response_model=ExperimentAnalysisView,
+    )
+    def analyze_planned_experiment(
+        project_id: str,
+        plan_id: str,
+        target_id: str,
+        case_id: str,
+    ) -> ExperimentAnalysisView:
+        model_snapshot = application.state.model_configuration
+        analyst = model_snapshot.result_analyst
+        if analyst is None or model_snapshot.provider is None or model_snapshot.model is None:
+            raise HTTPException(status_code=503, detail="Result analyst is not configured")
+        target, job_id = _bound_benchmark(
+            project_service, target_registry, project_id, case_id, target_id
+        )
+        collect = getattr(target, "collect", None)
+        if not callable(collect):
+            raise HTTPException(status_code=422, detail="execution target cannot collect results")
+        try:
+            stored_plan = project_service.load_experiment_plan(plan_id)
+            if stored_plan.project_id != project_id:
+                raise TransitionError("experiment plan belongs to a different project")
+            plan = ExperimentPlan.model_validate_json(stored_plan.plan_json)
+            collection = collect(job_id)
+            summary = ExperimentResultSummary(
+                experiment_type=plan.root.experiment_type,
+                requested_outputs=plan.root.requested_outputs,
+                mesh_passed=collection.mesh.passed,
+                solver_completed=collection.solver.completed,
+                cells=collection.mesh.cells,
+                final_residuals=collection.solver.final_residuals,
+                observables=collection.observables.model_dump(
+                    exclude_none=True,
+                    exclude_defaults=True,
+                ),
+            )
+            evidence = {
+                "mesh": collection.mesh.model_dump(mode="json"),
+                "solver": collection.solver.model_dump(mode="json"),
+                "observables": summary.observables,
+                "plan": {
+                    "experiment_type": summary.experiment_type,
+                    "requested_outputs": list(summary.requested_outputs),
+                },
+            }
+            analysis = analyst.analyze(
+                evidence,
+                evidence_keys=tuple(sorted(_leaf_evidence_keys(evidence))),
+            )
+            return ExperimentAnalysisView(
+                provider=model_snapshot.provider,
+                model=model_snapshot.model,
+                summary=summary,
+                analysis=analysis,
+            )
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail=str(error)) from error
+        except TransitionError as error:
+            raise HTTPException(status_code=409, detail=str(error)) from error
+        except AnalysisEvidenceError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        except AnalysisProviderError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+        except RemoteExecutionError as error:
+            raise HTTPException(status_code=502, detail=str(error)) from error
+
     @application.get("/api/projects/{project_id}/benchmarks/{case_id}", response_model=JobRecord)
     def benchmark_status(project_id: str, case_id: str, target_id: str) -> JobRecord:
         target, job_id = _bound_benchmark(
@@ -938,6 +1105,18 @@ def _experiment_job_id(
     )
     project_suffix = project_id.replace("-", "")[:8].lower()
     return f"{timestamp_text}-{slug}-{project_suffix}"
+
+
+def _leaf_evidence_keys(value: object, prefix: str = "") -> set[str]:
+    if isinstance(value, dict):
+        keys: set[str] = set()
+        for key, item in value.items():
+            child = f"{prefix}.{key}" if prefix else str(key)
+            keys.update(_leaf_evidence_keys(item, child))
+        return keys
+    if isinstance(value, (list, tuple)):
+        return {prefix} if prefix else set()
+    return {prefix} if prefix else set()
 
 
 app = create_app()

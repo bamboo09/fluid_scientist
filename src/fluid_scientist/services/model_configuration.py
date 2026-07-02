@@ -5,6 +5,7 @@ from typing import Literal, Protocol
 
 from fluid_scientist.adapters.openai_provider import ExperimentDesign
 from fluid_scientist.experiment_planning import ExperimentDesigner
+from fluid_scientist.experiment_planning.result_analysis import ResultAnalyst
 
 ProviderName = Literal["openai", "glm", "deepseek"]
 
@@ -22,6 +23,7 @@ class ModelConfiguration:
     provider: ProviderName | None = None
     model: str | None = None
     plan_designer: ExperimentDesigner | None = None
+    result_analyst: ResultAnalyst | None = None
     legacy_designer: LegacyExperimentDesigner | None = None
 
     def __post_init__(self) -> None:

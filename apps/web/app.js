@@ -19,9 +19,11 @@ const modelApiKey = document.querySelector("#model-api-key");
 const modelId = document.querySelector("#model-id");
 const compileExperimentButton = document.querySelector("#compile-experiment");
 const submitPlannedExperimentButton = document.querySelector("#submit-planned-experiment");
+const analyzeExperimentResultsButton = document.querySelector("#analyze-experiment-results");
 let currentProject = null;
 let currentPlan = null;
 let currentCompilation = null;
+let latestPlannedContext = null;
 let selectedTarget = "";
 let pollTimer = null;
 let latestBenchmarkResults = null;
@@ -215,6 +217,8 @@ function renderTextList(targetId, values) {
 function renderPlanReview(response) {
   currentPlan = response;
   currentCompilation = null;
+  latestPlannedContext = null;
+  analyzeExperimentResultsButton.disabled = true;
   const plan = response.plan;
   const caseEntries = Object.entries(plan.case || {});
   const geometry = caseEntries.filter(([key]) => (
@@ -541,6 +545,64 @@ async function pollCustomCase(jobId, targetId) {
   }
 }
 
+async function pollPlannedExperiment(jobId, targetId, projectId, planId, caseId) {
+  const targetQuery = `target_id=${encodeURIComponent(targetId)}`;
+  try {
+    const job = await requestJson(`/api/custom-cases/${jobId}?${targetQuery}`);
+    document.querySelector("#job-state").textContent = job.state.toUpperCase();
+    document.querySelector("#job-progress").style.width =
+      job.state === "running" ? "58%" : "18%";
+    if (job.state === "succeeded") {
+      const resultQuery = new URLSearchParams({ target_id: targetId, case_id: caseId });
+      const results = await requestJson(
+        `/api/projects/${projectId}/experiment-plans/${planId}/results?${resultQuery}`,
+      );
+      renderProject(results.project);
+      renderCustomCaseResults(results.collection);
+      latestPlannedContext = { targetId, projectId, planId, caseId };
+      analyzeExperimentResultsButton.disabled = false;
+      message.textContent = "工作站仿真、结构化结果收集和 Pilot 验证均已完成。";
+      return;
+    }
+    if (["failed", "cancelled"].includes(job.state)) {
+      message.textContent = `计划实验终止：${job.error || job.state}`;
+      refreshBenchmarkControls();
+      return;
+    }
+    pollTimer = window.setTimeout(
+      () => pollPlannedExperiment(jobId, targetId, projectId, planId, caseId),
+      1500,
+    );
+  } catch (error) {
+    message.textContent = `计划实验状态查询失败：${error.message}，稍后重试。`;
+    pollTimer = window.setTimeout(
+      () => pollPlannedExperiment(jobId, targetId, projectId, planId, caseId),
+      3000,
+    );
+  }
+}
+
+function renderExperimentAnalysis(result) {
+  const analysis = result.analysis;
+  const list = document.querySelector("#claim-list");
+  list.replaceChildren(...analysis.claims.map((claim) => {
+    const item = document.createElement("li");
+    item.append(document.createTextNode(claim.text));
+    const evidence = document.createElement("small");
+    evidence.textContent = `${claim.level} · ${claim.evidence_keys.join(" · ")}`;
+    item.append(evidence);
+    return item;
+  }));
+  document.querySelector("#scope-note").textContent = [
+    analysis.executive_summary,
+    `可信度：${analysis.credibility_assessment.join("；")}`,
+    `局限：${analysis.limitations.join("；")}`,
+    `下一步：${analysis.recommended_next_steps.join("；")}`,
+  ].join(" ");
+  document.querySelector("#report").hidden = false;
+  document.querySelector("#report").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
 async function resumeProject() {
   const savedProjectId = localStorage.getItem(projectStorageKey);
   try {
@@ -783,10 +845,36 @@ submitPlannedExperimentButton.addEventListener("click", async () => {
     document.querySelector("#job-state").textContent = submission.job.state.toUpperCase();
     document.querySelector("#job-progress").style.width = "18%";
     message.textContent = `作业 ${submission.job.job_id} 已在工作站启动。`;
-    pollCustomCase(submission.job.job_id, selectedTarget);
+    pollPlannedExperiment(
+      submission.job.job_id,
+      selectedTarget,
+      currentProject.project_id,
+      currentPlan.plan_id,
+      caseId,
+    );
   } catch (error) {
     message.textContent = `提交失败：${error.message}`;
     refreshBenchmarkControls();
+  }
+});
+
+analyzeExperimentResultsButton.addEventListener("click", async () => {
+  if (!latestPlannedContext) return;
+  analyzeExperimentResultsButton.disabled = true;
+  const { targetId, projectId, planId, caseId } = latestPlannedContext;
+  const query = new URLSearchParams({ target_id: targetId, case_id: caseId });
+  message.textContent = "结果分析模型正在读取确定性摘要并生成证据绑定结论…";
+  try {
+    const analysis = await requestJson(
+      `/api/projects/${projectId}/experiment-plans/${planId}/analysis?${query}`,
+      { method: "POST" },
+    );
+    renderExperimentAnalysis(analysis);
+    message.textContent = `已由 ${analysis.provider} / ${analysis.model} 完成实验结果分析。`;
+  } catch (error) {
+    message.textContent = `实验结果分析失败：${error.message}`;
+  } finally {
+    analyzeExperimentResultsButton.disabled = false;
   }
 });
 

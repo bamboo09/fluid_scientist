@@ -159,6 +159,7 @@ def test_workbench_exposes_provider_neutral_compiled_plan_flow() -> None:
         'id="compile-experiment"',
         'id="compile-preview"',
         'id="submit-planned-experiment"',
+        'id="analyze-experiment-results"',
     ):
         assert marker in html
 
@@ -166,6 +167,10 @@ def test_workbench_exposes_provider_neutral_compiled_plan_flow() -> None:
     assert '"/api/experiment-plans"' in script
     assert "/compile`" in script
     assert "/experiment-plans/${currentPlan.plan_id}/submit`" in script
+    assert "pollPlannedExperiment" in script
+    assert "/experiment-plans/${planId}/results?" in script
+    assert "/experiment-plans/${planId}/analysis?" in script
+    assert "renderExperimentAnalysis" in script
     assert "archive_sha256" in script
     assert "plan_version" in script
     assert 'localStorage.setItem("api' not in script
