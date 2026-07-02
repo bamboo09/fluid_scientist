@@ -44,3 +44,7 @@ def test_workflow_skill_governs_provider_neutral_planning_and_compilation() -> N
             "custom_openfoam",
         )
     )
+    assert "evidence keys" in combined
+    assert "force coefficients" in combined
+    assert "velocity and pressure probes" in combined
+    assert "never alter deterministic values" in combined

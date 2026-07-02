@@ -45,6 +45,14 @@ Use native structured parsing for OpenAI. Request JSON from GLM and DeepSeek, th
 - Persist the immutable plan and compiled bytes. Preview the solver, preprocessing chain, required outputs, and archive digest without exposing server paths.
 - At Gate 2, bind the plan ID, plan version, and archive digest. On submission, retrieve the stored bytes, recompute their digest, compare it with the binding, and never recompile after approval.
 
+### Evidence-bound result analysis
+
+- Collect mesh quality, solver completion, final residuals, numeric time directories, and the `.foam` marker before asking a model to interpret results.
+- Extract pipe pressure/flow metrics, cylinder force coefficients, and cavity velocity and pressure probes from their OpenFOAM function-object files with deterministic parsers.
+- Give the Results Analyst only the structured deterministic payload and an allow-list of exact evidence keys. Reject any claim that cites an unavailable key.
+- Require the analyst to distinguish direct observation, statistical inference, model extrapolation, and unverified hypothesis. The analyst must never alter deterministic values or convert a smoke run into a credibility claim.
+- Keep conclusions, credibility assessment, limitations, and recommended next steps separate. Do not report Strouhal number, grid independence, or convergence unless the required time series or multi-grid evidence exists.
+
 ## OpenFOAM Foundation 13 benchmark
 
 Use the Foundation distribution semantics, not similarly named OpenCFD releases. OpenFOAM Foundation 13 uses `foamRun -solver incompressibleFluid`, with `solver incompressibleFluid` in `controlDict`, viscosity in `constant/physicalProperties`, and laminar selection in `constant/momentumTransport`.

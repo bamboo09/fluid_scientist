@@ -8,6 +8,8 @@
 
 计划编译后会显示求解器、预处理链、输出指标和 `archive_sha256`。Gate 2 同时绑定计划 ID、计划版本和归档摘要；提交时读取并重新计算已存档字节的摘要，不会在审批后重新编译。
 
+作业完成后，worker 会结构化收集网格、残差、时间目录与 ParaView 标记，并按实验类型提取圆管压降/流量、圆柱力系数和方腔速度/压力探针。结果分析模型只能引用系统提供的 evidence key；引用不存在的指标会被拒绝，模型也不能修改确定性数值。
+
 面向 OpenFOAM 与 HPC 的可信流体力学科研智能体。系统把自然语言研究问题转为严格的 ResearchSpec，通过文献证据、物理规则、Pilot、Slurm/OpenFOAM、确定性验证、Results Analyst 和 Scientific Reviewer 形成可追溯闭环。
 
 当前版本包含两条路径：单相、不可压缩、稳态 90° 弯管的 Fake 科研闭环，以及可在 OpenFOAM Foundation 13 工作站上执行的真实层流圆管基准。默认使用 Fake 模式，不需要 OpenAI Key、HPC 地址或 OpenFOAM，适合本地演示和 CI。Fake 数值仅用于验证软件流程，不能作为科研结果。
