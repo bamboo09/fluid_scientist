@@ -1,5 +1,13 @@
 """Provider-neutral experiment-planning contracts."""
 
+from fluid_scientist.experiment_planning.compilers import (
+    CompiledCase,
+    UnsupportedCompilation,
+    compile_cavity_plan,
+    compile_cylinder_plan,
+    compile_pipe_plan,
+    compile_plan,
+)
 from fluid_scientist.experiment_planning.models import (
     CavityExperimentPlan,
     CavityOutput,
@@ -30,17 +38,30 @@ from fluid_scientist.experiment_planning.providers import (
     ProviderSchemaError,
     create_plan_provider,
 )
+from fluid_scientist.experiment_planning.registry import (
+    CAPABILITIES,
+    CUSTOM_UPLOAD,
+    CustomUploadMarker,
+    ExperimentCapability,
+    UnknownExperimentType,
+    get_experiment_capability,
+)
 
 __all__ = [
+    "CAPABILITIES",
+    "CUSTOM_UPLOAD",
     "CavityExperimentPlan",
     "CavityOutput",
+    "CompiledCase",
     "ConvergenceTargets",
+    "CustomUploadMarker",
     "CustomExperimentPlan",
     "CustomOpenFOAMCase",
     "CylinderExperimentPlan",
     "CylinderFlowCase",
     "CylinderOutput",
     "ExperimentPlan",
+    "ExperimentCapability",
     "ExperimentDesigner",
     "LaminarPipeCase",
     "LidDrivenCavityCase",
@@ -57,5 +78,12 @@ __all__ = [
     "ProviderOutputError",
     "ProviderRequestError",
     "ProviderSchemaError",
+    "UnknownExperimentType",
+    "UnsupportedCompilation",
+    "compile_cavity_plan",
+    "compile_cylinder_plan",
+    "compile_pipe_plan",
+    "compile_plan",
     "create_plan_provider",
+    "get_experiment_capability",
 ]
