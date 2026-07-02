@@ -15,6 +15,8 @@ from openai import (
 )
 from pydantic import SecretStr, ValidationError
 
+from fluid_scientist.adapters.openai_provider import OpenAIPlanProvider
+from fluid_scientist.experiment_planning.models import ExperimentPlan
 from fluid_scientist.experiment_planning.providers import (
     ExperimentDesigner,
     OpenAICompatiblePlanProvider,
@@ -25,6 +27,7 @@ from fluid_scientist.experiment_planning.providers import (
     ProviderOutputError,
     ProviderRequestError,
     ProviderSchemaError,
+    create_plan_provider,
 )
 from fluid_scientist.settings import ProviderSettings
 
@@ -84,6 +87,25 @@ class FakeClient:
         self.chat = SimpleNamespace(completions=self.completions)
 
 
+class FakeParsedResponses:
+    def __init__(self, outcomes: list[object]) -> None:
+        self.outcomes = list(outcomes)
+        self.calls: list[dict[str, object]] = []
+
+    def parse(self, **kwargs: object) -> object:
+        self.calls.append(kwargs)
+        outcome = self.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return SimpleNamespace(output_parsed=outcome, _request_id="req-openai-123")
+
+
+class FakeResponsesClient:
+    def __init__(self, outcomes: list[object]) -> None:
+        self.parsed_responses = FakeParsedResponses(outcomes)
+        self.responses = self.parsed_responses
+
+
 class ConcurrentCompletions:
     def __init__(self) -> None:
         self.barrier = Barrier(2, timeout=1)
@@ -136,6 +158,132 @@ def settings(
         max_retries=max_retries,
         timeout_seconds=17.5,
     )
+
+
+def openai_envelope() -> object:
+    from fluid_scientist.adapters.openai_provider import OpenAIPlanResponse
+
+    return OpenAIPlanResponse(plan=ExperimentPlan.model_validate(valid_pipe_plan()))
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected_type"),
+    [
+        ("openai", OpenAIPlanProvider),
+        ("glm", OpenAICompatiblePlanProvider),
+        ("deepseek", OpenAICompatiblePlanProvider),
+    ],
+)
+def test_plan_provider_factory_selects_configured_adapter(
+    provider: str, expected_type: type[object]
+) -> None:
+    client: object
+    if provider == "openai":
+        client = FakeResponsesClient([openai_envelope()])
+    else:
+        client = FakeClient([json.dumps(valid_pipe_plan())])
+
+    adapter = create_plan_provider(settings(provider), client=client)
+
+    assert isinstance(adapter, expected_type)
+
+
+def test_openai_plan_provider_uses_native_structured_parse() -> None:
+    from pydantic import BaseModel
+
+    client = FakeResponsesClient([openai_envelope()])
+    adapter = OpenAIPlanProvider(settings("openai"), client=client)
+
+    result = adapter.design_experiment(
+        "Validate pressure loss", capabilities=("laminar_pipe", "custom_openfoam")
+    )
+
+    assert result.root.experiment_type == "laminar_pipe"
+    assert adapter.last_request_id == "req-openai-123"
+    call = client.parsed_responses.calls[0]
+    assert call["model"] == "user/chosen-model:latest"
+    assert isinstance(call["text_format"], type)
+    assert issubclass(call["text_format"], BaseModel)
+    assert "plan" in call["text_format"].model_fields
+    assert call["timeout"] == 17.5
+    assert call["store"] is False
+    assert "laminar_pipe" in str(call["input"])
+    assert "custom_openfoam" in str(call["input"])
+    assert "remote paths" in str(call["instructions"])
+    assert "shell" in str(call["instructions"])
+
+
+def test_openai_plan_provider_rejects_capability_mismatch_locally() -> None:
+    client = FakeResponsesClient([openai_envelope()])
+    adapter = OpenAIPlanProvider(settings("openai"), client=client)
+
+    with pytest.raises(ProviderOutputError, match="capabilities") as caught:
+        adapter.design_experiment(
+            "Validate pressure loss", capabilities=("cylinder_flow",)
+        )
+
+    assert len(client.parsed_responses.calls) == 1
+    assert caught.value.request_id == "req-openai-123"
+
+
+def test_openai_plan_provider_retries_timeout_with_exact_bound() -> None:
+    client = FakeResponsesClient([TimeoutError("secret timeout"), openai_envelope()])
+    adapter = OpenAIPlanProvider(
+        settings("openai", max_retries=1, api_key="never-print-this"), client=client
+    )
+
+    result = adapter.design_experiment("Validate", capabilities=("laminar_pipe",))
+
+    assert result.root.experiment_type == "laminar_pipe"
+    assert len(client.parsed_responses.calls) == 2
+    assert "never-print-this" not in repr(adapter)
+
+
+def test_openai_plan_provider_missing_output_is_non_retryable() -> None:
+    client = FakeResponsesClient([None, openai_envelope()])
+    adapter = OpenAIPlanProvider(settings("openai"), client=client)
+
+    with pytest.raises(ProviderEmptyOutputError, match="structured output"):
+        adapter.design_experiment("Validate", capabilities=("laminar_pipe",))
+
+    assert len(client.parsed_responses.calls) == 1
+
+
+def test_openai_plan_provider_status_error_is_sanitized_and_not_retried() -> None:
+    failure = BadRequestError(
+        "raw body includes never-print-this",
+        response=httpx.Response(
+            400,
+            headers={"x-request-id": "req-openai-error"},
+            request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+        ),
+        body={"error": {"message": "never-print-this"}},
+    )
+    client = FakeResponsesClient([failure, openai_envelope()])
+    adapter = OpenAIPlanProvider(
+        settings("openai", api_key="never-print-this"), client=client
+    )
+
+    with pytest.raises(ProviderRequestError, match="status") as caught:
+        adapter.design_experiment("Validate", capabilities=("laminar_pipe",))
+
+    assert len(client.parsed_responses.calls) == 1
+    assert caught.value.request_id == "req-openai-error"
+    assert "never-print-this" not in str(caught.value)
+    assert "never-print-this" not in repr(caught.value)
+
+
+def test_openai_plan_provider_clears_request_id_between_calls() -> None:
+    client = FakeResponsesClient([openai_envelope(), TimeoutError("no id")])
+    adapter = OpenAIPlanProvider(settings("openai", max_retries=0), client=client)
+
+    adapter.design_experiment("First", capabilities=("laminar_pipe",))
+    assert adapter.last_request_id == "req-openai-123"
+
+    with pytest.raises(ProviderRequestError):
+        adapter.design_experiment("Second", capabilities=("laminar_pipe",))
+
+    assert adapter.last_request_id is None
 
 
 @pytest.mark.parametrize(

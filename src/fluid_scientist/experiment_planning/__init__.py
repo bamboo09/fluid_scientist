@@ -28,6 +28,7 @@ from fluid_scientist.experiment_planning.providers import (
     ProviderOutputError,
     ProviderRequestError,
     ProviderSchemaError,
+    create_plan_provider,
 )
 
 __all__ = [
@@ -56,4 +57,5 @@ __all__ = [
     "ProviderOutputError",
     "ProviderRequestError",
     "ProviderSchemaError",
+    "create_plan_provider",
 ]

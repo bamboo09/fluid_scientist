@@ -1,10 +1,18 @@
 """OpenAI Responses API provider using strict Pydantic structured outputs."""
 
+from contextvars import ContextVar
 from dataclasses import asdict
 from typing import Any, Literal, TypeVar
 
-from openai import APIConnectionError, APITimeoutError, OpenAI
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from openai import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AuthenticationError,
+    NotFoundError,
+    OpenAI,
+)
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from fluid_scientist.adapters.openfoam import LaminarPipeCase
 from fluid_scientist.domain.models import (
@@ -15,8 +23,10 @@ from fluid_scientist.domain.models import (
     ResearchSpec,
     ValidationResult,
 )
+from fluid_scientist.experiment_planning import providers as plan_providers
+from fluid_scientist.experiment_planning.models import ExperimentPlan
 from fluid_scientist.ports import SimulationResult
-from fluid_scientist.settings import OpenAISettings
+from fluid_scientist.settings import OpenAISettings, ProviderSettings
 
 OutputT = TypeVar("OutputT", bound=BaseModel)
 
@@ -70,6 +80,166 @@ class ExperimentDesign(StrictOutput):
         if self.experiment_type == "custom_openfoam" and self.case is not None:
             raise ValueError("custom_openfoam design cannot include pipe case")
         return self
+
+
+class OpenAIPlanResponse(StrictOutput):
+    """Responses API envelope for the provider-neutral root model."""
+
+    plan: ExperimentPlan
+
+
+class OpenAIPlanProvider:
+    """OpenAI Responses adapter that returns provider-neutral plans."""
+
+    def __init__(self, settings: ProviderSettings, *, client: Any | None = None) -> None:
+        if settings.provider != "openai":
+            raise ValueError("OpenAI plan adapter requires the openai provider")
+        if client is None:
+            client = OpenAI(
+                api_key=settings.api_key.get_secret_value(),
+                timeout=settings.timeout_seconds,
+                max_retries=0,
+            )
+        self._settings = settings
+        self._client = client
+        self._last_request_id: ContextVar[str | None] = ContextVar(
+            f"openai_plan_request_id_{id(self)}", default=None
+        )
+
+    @property
+    def provider_name(self) -> str:
+        return self._settings.provider
+
+    @property
+    def last_request_id(self) -> str | None:
+        return self._last_request_id.get()
+
+    def __repr__(self) -> str:
+        return f"OpenAIPlanProvider(model={self._settings.model!r})"
+
+    def design_experiment(
+        self, question: str, *, capabilities: tuple[str, ...]
+    ) -> ExperimentPlan:
+        self._last_request_id.set(None)
+        for attempt in range(self._settings.max_retries + 1):
+            try:
+                response = self._client.responses.parse(
+                    model=self._settings.model,
+                    instructions=(
+                        "Act as a fluid-mechanics experiment designer. Return a strict typed "
+                        "experiment plan using SI units. Select only an experiment_type listed "
+                        "in capabilities. Do not generate shell commands or remote paths, and "
+                        "do not invent unsupported solver capabilities."
+                    ),
+                    input=self._json(
+                        {"question": question, "capabilities": list(capabilities)}
+                    ),
+                    text_format=OpenAIPlanResponse,
+                    store=False,
+                    timeout=self._settings.timeout_seconds,
+                )
+                request_id = self._request_id(response)
+                parsed = getattr(response, "output_parsed", None)
+                if parsed is None:
+                    self._last_request_id.set(request_id)
+                    raise self._error(
+                        plan_providers.ProviderEmptyOutputError,
+                        "provider returned no structured output",
+                        request_id=request_id,
+                    )
+                if not isinstance(parsed, OpenAIPlanResponse):
+                    self._last_request_id.set(request_id)
+                    raise self._error(
+                        plan_providers.ProviderSchemaError,
+                        "provider structured output failed strict plan schema validation",
+                        request_id=request_id,
+                    )
+                plan = parsed.plan
+                if plan.root.experiment_type not in capabilities:
+                    self._last_request_id.set(request_id)
+                    raise self._error(
+                        plan_providers.ProviderOutputError,
+                        "provider selected an experiment type outside supplied capabilities",
+                        request_id=request_id,
+                    )
+                self._last_request_id.set(request_id)
+                return plan
+            except plan_providers.PlanProviderError:
+                raise
+            except AuthenticationError as error:
+                self._publish_error_id(error)
+                raise self._error(
+                    plan_providers.ProviderAuthenticationError,
+                    "provider authentication failed",
+                    request_id=self.last_request_id,
+                ) from None
+            except NotFoundError as error:
+                self._publish_error_id(error)
+                raise self._error(
+                    plan_providers.ProviderModelNotFoundError,
+                    "provider model was not found",
+                    request_id=self.last_request_id,
+                ) from None
+            except APIStatusError as error:
+                self._publish_error_id(error)
+                raise self._error(
+                    plan_providers.ProviderRequestError,
+                    "provider rejected the request with an API status error",
+                    request_id=self.last_request_id,
+                ) from None
+            except ValidationError:
+                raise self._error(
+                    plan_providers.ProviderSchemaError,
+                    "provider structured output failed strict plan schema validation",
+                    request_id=None,
+                ) from None
+            except (TimeoutError, APITimeoutError) as error:
+                if attempt == self._settings.max_retries:
+                    self._publish_error_id(error)
+                    raise self._error(
+                        plan_providers.ProviderRequestError,
+                        "provider request failed after timeout retries",
+                        request_id=self.last_request_id,
+                    ) from None
+            except (ConnectionError, APIConnectionError) as error:
+                if attempt == self._settings.max_retries:
+                    self._publish_error_id(error)
+                    raise self._error(
+                        plan_providers.ProviderRequestError,
+                        "provider request failed after connection retries",
+                        request_id=self.last_request_id,
+                    ) from None
+        raise AssertionError("provider retry loop terminated unexpectedly")
+
+    def _publish_error_id(self, error: Exception) -> None:
+        self._last_request_id.set(self._request_id(error))
+
+    def _error(
+        self,
+        error_type: type[plan_providers.PlanProviderError],
+        message: str,
+        *,
+        request_id: str | None,
+    ) -> plan_providers.PlanProviderError:
+        return error_type(
+            message,
+            provider=self._settings.provider,
+            model=self._settings.model,
+            request_id=request_id,
+        )
+
+    @staticmethod
+    def _request_id(value: Any) -> str | None:
+        request_id = getattr(value, "_request_id", None) or getattr(
+            value, "request_id", None
+        )
+        return request_id if isinstance(request_id, str) else None
+
+    @staticmethod
+    def _json(payload: Any) -> str:
+        import json
+
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
 
 class OpenAIResponsesProvider:

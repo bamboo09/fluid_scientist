@@ -284,3 +284,15 @@ class OpenAICompatiblePlanProvider:
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
+
+
+def create_plan_provider(
+    settings: ProviderSettings, *, client: Any | None = None
+) -> ExperimentDesigner:
+    """Create the plan adapter selected by ephemeral provider settings."""
+
+    if settings.provider == "openai":
+        from fluid_scientist.adapters.openai_provider import OpenAIPlanProvider
+
+        return OpenAIPlanProvider(settings, client=client)
+    return OpenAICompatiblePlanProvider(settings, client=client)
