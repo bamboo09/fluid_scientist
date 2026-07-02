@@ -13,6 +13,7 @@ from fluid_scientist.experiment_planning.compilers import (
 )
 from fluid_scientist.experiment_planning.models import (
     CavityExperimentPlan,
+    ConvergenceTargets,
     CustomExperimentPlan,
     CylinderExperimentPlan,
     PipeExperimentPlan,
@@ -155,6 +156,36 @@ def test_pipe_adapts_renderer_and_preserves_analytical_function_objects() -> Non
     assert compiled.preprocessing == ("blockMesh", "checkMesh")
 
 
+def test_pipe_archive_has_no_runtime_dictionary_directives() -> None:
+    files = archive_files(compile_plan(pipe_plan()).archive)
+
+    combined = "\n".join(files.values())
+    for forbidden in ("#includeEtc", "#include", "#calc", "#neg"):
+        assert forbidden not in combined
+
+
+def test_pipe_convergence_targets_are_compiled_into_case_and_digest() -> None:
+    original = pipe_plan()
+    changed = original.model_copy(
+        update={
+            "convergence_targets": ConvergenceTargets(
+                residual_tolerance=2e-6,
+                mass_imbalance_percent=0.25,
+            )
+        }
+    )
+
+    before = compile_plan(original)
+    after = compile_plan(changed)
+    files = archive_files(after.archive)
+
+    assert before.archive_sha256 != after.archive_sha256
+    assert "p               2e-06;" in files["system/fvSolution"]
+    assert "U               2e-06;" in files["system/fvSolution"]
+    assert "residualTolerance      2e-06;" in files["system/controlDict"]
+    assert "massImbalancePercent   0.25;" in files["system/controlDict"]
+
+
 def test_cylinder_contains_mirrored_laminar_case_and_force_outputs() -> None:
     compiled = compile_plan(cylinder_plan())
     files = archive_files(compiled.archive)
@@ -169,6 +200,14 @@ def test_cylinder_contains_mirrored_laminar_case_and_force_outputs() -> None:
     assert "simulationType laminar;" in files["constant/momentumTransport"]
     assert "mirrorPlane" in files["system/mirrorMeshDict"]
     assert not {"0/k", "0/omega", "0/nut"} & files.keys()
+
+
+def test_cylinder_force_reference_area_uses_diameter_times_extrusion_span() -> None:
+    files = archive_files(compile_plan(cylinder_plan()).archive)
+
+    assert "lRef 0.1;" in files["system/controlDict"]
+    assert "Aref 0.001;" in files["system/controlDict"]
+    assert "extrusionSpan 0.01;" in files["system/blockMeshDict"]
 
 
 def test_cavity_contains_moving_lid_probes_without_mirror_mesh() -> None:

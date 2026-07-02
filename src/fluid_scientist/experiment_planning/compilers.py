@@ -5,18 +5,12 @@ import hashlib
 import io
 import math
 import tarfile
-import tempfile
 from dataclasses import dataclass
-from pathlib import Path
 
 from fluid_scientist.adapters.custom_openfoam import (
     CustomCaseManifest,
     validate_custom_case_archive,
 )
-from fluid_scientist.adapters.openfoam import (
-    LaminarPipeCase as RendererPipeCase,
-)
-from fluid_scientist.adapters.openfoam import OpenFOAM13CaseRenderer
 from fluid_scientist.experiment_planning.models import (
     CavityExperimentPlan,
     CustomExperimentPlan,
@@ -79,19 +73,31 @@ def compile_plan(
 def compile_pipe_plan(plan: object) -> CompiledCase:
     if not isinstance(plan, PipeExperimentPlan):
         raise TypeError("pipe compiler requires PipeExperimentPlan")
-    spec = RendererPipeCase(**plan.case.model_dump())
-    with tempfile.TemporaryDirectory(prefix="fluid-case-") as temporary:
-        case_root = Path(temporary) / "rendered"
-        OpenFOAM13CaseRenderer(Path(temporary)).render("rendered", spec)
-        files = {
-            path.relative_to(case_root).as_posix(): path.read_text(encoding="utf-8")
-            for path in case_root.rglob("*")
-            if path.is_file()
-        }
-    files["0/U"] = _pipe_velocity_field(
-        velocity=plan.case.mean_velocity_m_s,
-        diameter=plan.case.diameter_m,
-    )
+    case = plan.case
+    targets = plan.convergence_targets
+    files = {
+        "0/U": _pipe_velocity_field(
+            velocity=case.mean_velocity_m_s,
+            diameter=case.diameter_m,
+        ),
+        "0/p": _pipe_pressure_field(),
+        "constant/momentumTransport": _momentum_transport(),
+        "constant/physicalProperties": _physical_properties(
+            case.kinematic_viscosity_m2_s
+        ),
+        "system/blockMeshDict": _pipe_block_mesh(
+            diameter=case.diameter_m,
+            length=case.length_m,
+            axial_cells=case.axial_cells,
+            radial_cells=case.radial_cells,
+        ),
+        "system/controlDict": _pipe_control_dict(
+            residual_tolerance=targets.residual_tolerance,
+            mass_imbalance_percent=targets.mass_imbalance_percent,
+        ),
+        "system/fvSchemes": _steady_fv_schemes(),
+        "system/fvSolution": _pipe_fv_solution(targets.residual_tolerance),
+    }
     return _compiled(plan.experiment_type, files)
 
 
@@ -104,7 +110,7 @@ def compile_cylinder_plan(plan: object) -> CompiledCase:
     upstream = case.domain_upstream_diameters * diameter
     downstream = case.domain_downstream_diameters * diameter
     transverse = case.domain_transverse_diameters * diameter
-    thickness = diameter * 0.1
+    extrusion_span = diameter * 0.1
     delta_t = case.time_step_s
     if delta_t is None:
         delta_t = 0.25 * diameter / (case.mean_velocity_m_s * case.cells_radial)
@@ -120,7 +126,7 @@ def compile_cylinder_plan(plan: object) -> CompiledCase:
             upstream=upstream,
             downstream=downstream,
             transverse=transverse,
-            thickness=thickness,
+            thickness=extrusion_span,
             circumferential_cells=case.cells_radial,
             wake_cells=case.cells_wake,
         ),
@@ -133,6 +139,7 @@ def compile_cylinder_plan(plan: object) -> CompiledCase:
             density=case.density_kg_m3,
             velocity=case.mean_velocity_m_s,
             diameter=diameter,
+            extrusion_span=extrusion_span,
         ),
         "system/fvSchemes": _transient_fv_schemes(),
         "system/fvSolution": _transient_fv_solution(
@@ -232,7 +239,6 @@ dimensions      [0 1 -1 0 0 0 0];
 internalField   uniform ({_number(velocity)} 0 0);
 boundaryField
 {{
-    #includeEtc "caseDicts/setConstraintTypes"
     inlet
     {{
         type                flowRateInletVelocity;
@@ -248,6 +254,207 @@ boundaryField
     {{
         type                noSlip;
     }}
+    side1 {{ type wedge; }}
+    side2 {{ type wedge; }}
+}}
+"""
+
+
+def _pipe_pressure_field() -> str:
+    return _header("p", field_class="volScalarField", location="0") + """
+dimensions      [0 2 -2 0 0 0 0];
+internalField   uniform 0;
+boundaryField
+{
+    inlet { type zeroGradient; }
+    outlet { type fixedValue; value uniform 0; }
+    walls { type zeroGradient; }
+    side1 { type wedge; }
+    side2 { type wedge; }
+}
+"""
+
+
+def _pipe_block_mesh(
+    *, diameter: float, length: float, axial_cells: int, radial_cells: int
+) -> str:
+    radius = diameter / 2.0
+    half_angle = math.radians(5.0)
+    y = radius * math.sin(half_angle)
+    z = radius * math.cos(half_angle)
+    length_value = _number(length)
+    radius_value = _number(radius)
+    y_value = _number(y)
+    z_value = _number(z)
+    return _header("blockMeshDict") + f"""
+convertToMeters 1;
+radius {radius_value};
+length {length_value};
+vertices
+(
+    (0 0 0)
+    ({length_value} 0 0)
+    ({length_value} 0 0)
+    (0 0 0)
+    (0 -{y_value} {z_value})
+    ({length_value} -{y_value} {z_value})
+    ({length_value} {y_value} {z_value})
+    (0 {y_value} {z_value})
+);
+blocks
+(
+    hex (0 1 2 3 4 5 6 7) ({axial_cells} 1 {radial_cells})
+        simpleGrading (1 1 1)
+);
+edges
+(
+    arc 4 7 (0 0 {radius_value})
+    arc 5 6 ({length_value} 0 {radius_value})
+);
+boundary
+(
+    inlet {{ type patch; faces ((0 4 7 3)); }}
+    outlet {{ type patch; faces ((1 2 6 5)); }}
+    side1 {{ type wedge; faces ((0 1 5 4)); }}
+    side2 {{ type wedge; faces ((7 6 2 3)); }}
+    walls {{ type wall; faces ((4 5 6 7) (3 2 1 0)); }}
+);
+"""
+
+
+def _pipe_control_dict(
+    *, residual_tolerance: float, mass_imbalance_percent: float
+) -> str:
+    residual = _number(residual_tolerance)
+    mass_imbalance = _number(mass_imbalance_percent)
+    return _header("controlDict", location="system") + f"""
+solver          incompressibleFluid;
+startFrom       startTime;
+startTime       0;
+stopAt          endTime;
+endTime         2000;
+deltaT          1;
+writeControl    timeStep;
+writeInterval   2000;
+purgeWrite      1;
+writeFormat     ascii;
+writePrecision  10;
+writeCompression off;
+timeFormat      general;
+timePrecision   6;
+runTimeModifiable true;
+convergenceTargets
+{{
+    residualTolerance      {residual};
+    massImbalancePercent   {mass_imbalance};
+}}
+functions
+{{
+    pressureDrop
+    {{
+        type fieldValueDelta;
+        libs ("libfieldFunctionObjects.so");
+        writeControl timeStep;
+        writeInterval 1;
+        operation subtract;
+        region1
+        {{
+            type surfaceFieldValue;
+            libs ("libfieldFunctionObjects.so");
+            writeControl timeStep;
+            writeInterval 1;
+            writeFields false;
+            operation areaAverage;
+            fields (p);
+            patch inlet;
+        }}
+        region2
+        {{
+            type surfaceFieldValue;
+            libs ("libfieldFunctionObjects.so");
+            writeControl timeStep;
+            writeInterval 1;
+            writeFields false;
+            operation areaAverage;
+            fields (p);
+            patch outlet;
+        }}
+    }}
+    inletFlow
+    {{
+        type surfaceFieldValue;
+        libs ("libfieldFunctionObjects.so");
+        writeControl timeStep;
+        writeInterval 1;
+        writeFields false;
+        operation sum;
+        fields (phi);
+        patch inlet;
+    }}
+    outletFlow
+    {{
+        type surfaceFieldValue;
+        libs ("libfieldFunctionObjects.so");
+        writeControl timeStep;
+        writeInterval 1;
+        writeFields false;
+        operation sum;
+        fields (phi);
+        patch outlet;
+    }}
+}}
+"""
+
+
+def _steady_fv_schemes() -> str:
+    return _header("fvSchemes", location="system") + """
+ddtSchemes { default steadyState; }
+gradSchemes { default Gauss linear; }
+divSchemes
+{
+    default none;
+    div(phi,U) bounded Gauss limitedLinearV 1;
+    div((nuEff*dev2(T(grad(U))))) Gauss linear;
+}
+laplacianSchemes { default Gauss linear corrected; }
+interpolationSchemes { default linear; }
+snGradSchemes { default corrected; }
+"""
+
+
+def _pipe_fv_solution(tolerance: float) -> str:
+    residual = _number(tolerance)
+    return _header("fvSolution", location="system") + f"""
+solvers
+{{
+    p
+    {{
+        solver GAMG;
+        smoother GaussSeidel;
+        tolerance {residual};
+        relTol 0.01;
+    }}
+    U
+    {{
+        solver smoothSolver;
+        smoother symGaussSeidel;
+        tolerance {residual};
+        relTol 0;
+    }}
+}}
+SIMPLE
+{{
+    nNonOrthogonalCorrectors 0;
+    residualControl
+    {{
+        p               {residual};
+        U               {residual};
+    }}
+}}
+relaxationFactors
+{{
+    fields {{ p 0.3; }}
+    equations {{ U 0.7; }}
 }}
 """
 
@@ -338,6 +545,7 @@ def _cylinder_block_mesh(
         )
     return _header("blockMeshDict") + f"""
 convertToMeters 1;
+extrusionSpan {_number(thickness)};
 vertices
 (
 {chr(10).join(vertices)}
@@ -400,9 +608,11 @@ def _cylinder_control_dict(
     density: float,
     velocity: float,
     diameter: float,
+    extrusion_span: float,
 ) -> str:
     write_interval = max(delta_t, end_time / 100.0)
     adjust = "yes" if adjust_time_step else "no"
+    reference_area = diameter * extrusion_span
     return _header("controlDict", location="system") + f"""
 solver          incompressibleFluid;
 startFrom       startTime;
@@ -440,7 +650,7 @@ functions
         rhoInf {_number(density)};
         magUInf {_number(velocity)};
         lRef {_number(diameter)};
-        Aref {_number(diameter)};
+        Aref {_number(reference_area)};
         dragDir (1 0 0);
         liftDir (0 1 0);
         pitchAxis (0 0 1);
