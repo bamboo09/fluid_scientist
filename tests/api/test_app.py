@@ -1,11 +1,17 @@
 import io
 import tarfile
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
-from fluid_scientist.adapters.openai_provider import ExperimentDesign
+from fluid_scientist.adapters.openai_provider import (
+    ExperimentDesign,
+    OpenAIPlanProvider,
+    OpenAIResponsesProvider,
+)
 from fluid_scientist.adapters.openfoam import LaminarPipeCase
 from fluid_scientist.api.app import app, create_app
 from fluid_scientist.experiment_planning import (
@@ -15,7 +21,7 @@ from fluid_scientist.experiment_planning import (
     ProviderOutputError,
     ProviderRequestError,
 )
-from fluid_scientist.settings import ProviderSettings
+from fluid_scientist.settings import AppSettings, OpenAISettings, ProviderSettings
 
 
 def client() -> TestClient:
@@ -123,14 +129,14 @@ def test_model_can_be_configured_in_memory_without_echoing_api_key() -> None:
         "extractor_model": "gpt-5.4-mini",
     }
     assert secret not in response.text
-    assert secret not in repr(api.app.state.experiment_designer)
+    assert secret not in repr(api.app.state.model_configuration)
 
 
-def neutral_pipe_plan() -> ExperimentPlan:
+def neutral_pipe_plan(experiment_name: str = "Neutral Pipe Study") -> ExperimentPlan:
     return ExperimentPlan.model_validate(
         {
             "experiment_type": "laminar_pipe",
-            "experiment_name": "Neutral Pipe Study",
+            "experiment_name": experiment_name,
             "objective": "Validate pressure loss against the analytical solution.",
             "rationale": "A laminar benchmark provides a deterministic first experiment.",
             "assumptions": ["Steady incompressible Newtonian flow"],
@@ -206,19 +212,200 @@ def test_model_configuration_reports_unconfigured_state() -> None:
     assert response.json() == {"configured": False, "provider": None, "model": None}
 
 
-def test_model_configuration_hides_metadata_for_inconsistent_injection() -> None:
-    api = TestClient(
+def test_model_configuration_rejects_inconsistent_injection() -> None:
+    with pytest.raises(ValueError, match="plan_designer"):
         create_app(
             plan_designer=None,
             plan_provider_name="glm",
             plan_model_name="glm-4.5",
         )
+
+
+def test_openai_legacy_configuration_updates_neutral_provider_coherently() -> None:
+    neutral_settings: list[ProviderSettings] = []
+    legacy_settings: list[OpenAISettings] = []
+    neutral = FakePlanDesigner()
+    legacy = FakeExperimentDesigner()
+
+    def plan_factory(settings: ProviderSettings) -> FakePlanDesigner:
+        neutral_settings.append(settings)
+        return neutral
+
+    def legacy_factory(settings: OpenAISettings) -> FakeExperimentDesigner:
+        legacy_settings.append(settings)
+        return legacy
+
+    api = TestClient(
+        create_app(
+            plan_provider_factory=plan_factory,
+            legacy_provider_factory=legacy_factory,
+        )
     )
 
-    response = api.get("/api/model-configurations")
+    response = api.post(
+        "/api/settings/openai",
+        json={
+            "api_key": "coherent-secret",
+            "planner_model": "gpt-coherent",
+            "extractor_model": "gpt-extractor",
+        },
+    )
 
     assert response.status_code == 200
-    assert response.json() == {"configured": False, "provider": None, "model": None}
+    assert neutral_settings[0].model == "gpt-coherent"
+    assert legacy_settings[0].planner_model == "gpt-coherent"
+    assert api.get("/api/model-configurations").json() == {
+        "configured": True,
+        "provider": "openai",
+        "model": "gpt-coherent",
+    }
+    assert api.app.state.model_configuration.plan_designer is neutral
+    assert api.app.state.model_configuration.legacy_designer is legacy
+    assert "coherent-secret" not in repr(api.app.state.model_configuration)
+
+
+def test_openai_neutral_configuration_prepares_matching_legacy_provider() -> None:
+    legacy_settings: list[OpenAISettings] = []
+
+    def legacy_factory(settings: OpenAISettings) -> FakeExperimentDesigner:
+        legacy_settings.append(settings)
+        return FakeExperimentDesigner()
+
+    api = TestClient(
+        create_app(
+            plan_provider_factory=lambda settings: FakePlanDesigner(),
+            legacy_provider_factory=legacy_factory,
+        )
+    )
+
+    response = api.post(
+        "/api/model-configurations",
+        json={"provider": "openai", "model": "gpt-neutral", "api_key": "secret"},
+    )
+
+    assert response.status_code == 200
+    assert legacy_settings[0].planner_model == "gpt-neutral"
+    assert legacy_settings[0].extractor_model == "gpt-neutral"
+    legacy_response = api.post(
+        "/api/experiment-designs",
+        json={"question": "Design a laminar pipe pressure-loss experiment."},
+    )
+    assert legacy_response.status_code == 200
+
+
+@pytest.mark.parametrize("provider", ["glm", "deepseek"])
+def test_non_openai_configuration_disables_stale_legacy_designer(provider: str) -> None:
+    api = TestClient(
+        create_app(
+            experiment_designer=FakeExperimentDesigner(),
+            plan_provider_factory=lambda settings: FakePlanDesigner(),
+        )
+    )
+    configured = api.post(
+        "/api/model-configurations",
+        json={"provider": provider, "model": "chosen-model", "api_key": "secret"},
+    )
+
+    response = api.post(
+        "/api/experiment-designs",
+        json={"question": "Design a laminar pipe pressure-loss experiment."},
+    )
+
+    assert configured.status_code == 200
+    assert response.status_code == 409
+    assert response.json() == {
+        "detail": "Selected provider supports /api/experiment-plans only"
+    }
+
+
+def test_real_openai_factories_construct_coherent_snapshot_without_network() -> None:
+    api = TestClient(create_app())
+
+    response = api.post(
+        "/api/model-configurations",
+        json={"provider": "openai", "model": "gpt-real", "api_key": "secret"},
+    )
+
+    snapshot = api.app.state.model_configuration
+    assert response.status_code == 200
+    assert isinstance(snapshot.plan_designer, OpenAIPlanProvider)
+    assert isinstance(snapshot.legacy_designer, OpenAIResponsesProvider)
+    assert snapshot.provider == "openai"
+    assert snapshot.model == "gpt-real"
+
+
+def test_startup_openai_settings_initialize_coherent_snapshot() -> None:
+    settings = AppSettings(
+        openai=OpenAISettings(
+            api_key=SecretStr("startup-secret"),
+            planner_model="gpt-startup",
+            extractor_model="gpt-extractor",
+        )
+    )
+
+    api = create_app(settings=settings)
+
+    snapshot = api.state.model_configuration
+    assert snapshot.provider == "openai"
+    assert snapshot.model == "gpt-startup"
+    assert isinstance(snapshot.plan_designer, OpenAIPlanProvider)
+    assert isinstance(snapshot.legacy_designer, OpenAIResponsesProvider)
+    assert "startup-secret" not in repr(snapshot)
+
+
+def test_openai_reconfiguration_is_atomically_visible_to_readers() -> None:
+    block_new_legacy = Event()
+    legacy_factory_entered = Event()
+
+    def plan_factory(settings: ProviderSettings) -> FakePlanDesigner:
+        return FakePlanDesigner(neutral_pipe_plan(f"{settings.provider}-{settings.model}"))
+
+    def legacy_factory(settings: OpenAISettings) -> FakeExperimentDesigner:
+        if settings.planner_model == "model-b":
+            legacy_factory_entered.set()
+            assert block_new_legacy.wait(timeout=5)
+        return FakeExperimentDesigner()
+
+    api = TestClient(
+        create_app(
+            plan_provider_factory=plan_factory,
+            legacy_provider_factory=legacy_factory,
+        )
+    )
+    initial = api.post(
+        "/api/model-configurations",
+        json={"provider": "openai", "model": "model-a", "api_key": "secret-a"},
+    )
+    assert initial.status_code == 200
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        updating = executor.submit(
+            api.post,
+            "/api/model-configurations",
+            json={"provider": "openai", "model": "model-b", "api_key": "secret-b"},
+        )
+        assert legacy_factory_entered.wait(timeout=5)
+        during_metadata = api.get("/api/model-configurations").json()
+        during_plan = api.post(
+            "/api/experiment-plans",
+            json={"question": "Design a laminar pressure-loss benchmark."},
+        ).json()
+        block_new_legacy.set()
+        assert updating.result(timeout=5).status_code == 200
+
+    assert during_metadata == {
+        "configured": True,
+        "provider": "openai",
+        "model": "model-a",
+    }
+    assert during_plan["model"] == "model-a"
+    assert during_plan["plan"]["experiment_name"] == "openai-model-a"
+    after_plan = api.post(
+        "/api/experiment-plans",
+        json={"question": "Design a laminar pressure-loss benchmark."},
+    ).json()
+    assert after_plan["model"] == "model-b"
+    assert after_plan["plan"]["experiment_name"] == "openai-model-b"
 
 
 @pytest.mark.parametrize(

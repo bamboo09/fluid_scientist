@@ -4,7 +4,7 @@ import re
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Literal, Protocol
+from typing import Annotated, Literal
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException, status
@@ -25,10 +25,7 @@ from fluid_scientist.adapters.custom_openfoam import (
     validate_custom_case_archive,
 )
 from fluid_scientist.adapters.fakes import build_demo_service
-from fluid_scientist.adapters.openai_provider import (
-    ExperimentDesign,
-    OpenAIResponsesProvider,
-)
+from fluid_scientist.adapters.openai_provider import ExperimentDesign, OpenAIResponsesProvider
 from fluid_scientist.adapters.openai_provider import (
     ProviderOutputError as LegacyProviderOutputError,
 )
@@ -64,6 +61,11 @@ from fluid_scientist.experiment_planning import (
 )
 from fluid_scientist.orchestration.workflow import TransitionError
 from fluid_scientist.ports import WorkflowRepository
+from fluid_scientist.services.model_configuration import (
+    LegacyExperimentDesigner,
+    ModelConfiguration,
+    ProviderName,
+)
 from fluid_scientist.services.projects import ProjectService, ProjectView
 from fluid_scientist.services.research import DemoResearchResult
 from fluid_scientist.settings import (
@@ -106,12 +108,6 @@ class OpenAIConfigurationView(BaseModel):
     configured: bool
     planner_model: str
     extractor_model: str
-
-
-class LegacyExperimentDesigner(Protocol):
-    def design_experiment(
-        self, question: str, *, capabilities: tuple[str, ...]
-    ) -> ExperimentDesign: ...
 
 
 class ModelConfigurationRequest(StrictRequest):
@@ -199,6 +195,7 @@ EXPERIMENT_CAPABILITIES = (
 
 PLAN_CAPABILITY_MARKERS = ("OpenFOAM-13", "workstation_openfoam")
 PlanProviderFactory = Callable[[ProviderSettings], PlanExperimentDesigner]
+LegacyProviderFactory = Callable[[OpenAISettings], LegacyExperimentDesigner]
 
 
 class ApprovalRequest(StrictRequest):
@@ -237,6 +234,31 @@ class BenchmarkResultsView(BaseModel):
     validation: PipeBenchmarkValidation
 
 
+def _openai_model_configuration(
+    settings: OpenAISettings,
+    *,
+    plan_provider_factory: PlanProviderFactory,
+    legacy_provider_factory: LegacyProviderFactory,
+) -> ModelConfiguration:
+    if settings.api_key is None:
+        raise ValueError("OpenAI api_key is required")
+    plan_settings = ProviderSettings(
+        provider="openai",
+        api_key=settings.api_key,
+        model=settings.planner_model,
+        max_retries=settings.max_retries,
+        timeout_seconds=settings.timeout_seconds,
+    )
+    plan_designer = plan_provider_factory(plan_settings)
+    legacy_designer = legacy_provider_factory(settings)
+    return ModelConfiguration(
+        provider="openai",
+        model=settings.planner_model,
+        plan_designer=plan_designer,
+        legacy_designer=legacy_designer,
+    )
+
+
 def create_app(
     repository: WorkflowRepository | None = None,
     execution_targets: tuple[ExecutionTargetAdapter, ...] | None = None,
@@ -245,39 +267,48 @@ def create_app(
     transport_factory: Callable[[NodeSettings], SSHTransport] = SSHTransport,
     experiment_designer: LegacyExperimentDesigner | None = None,
     plan_designer: PlanExperimentDesigner | None = None,
-    plan_provider_name: Literal["openai", "glm", "deepseek"] | None = None,
+    plan_provider_name: ProviderName | None = None,
     plan_model_name: str | None = None,
     plan_provider_factory: PlanProviderFactory = create_plan_provider,
+    legacy_provider_factory: LegacyProviderFactory = OpenAIResponsesProvider,
+    model_configuration: ModelConfiguration | None = None,
 ) -> FastAPI:
     runtime_settings = settings or AppSettings()
     configured_targets = execution_targets
     if configured_targets is None:
         configured_targets = build_execution_targets(runtime_settings, transport_factory)
-    configured_designer = experiment_designer
-    if configured_designer is None and runtime_settings.openai.api_key is not None:
-        configured_designer = OpenAIResponsesProvider(runtime_settings.openai)
-    configured_plan_designer = plan_designer
-    configured_plan_provider = plan_provider_name
-    configured_plan_model = plan_model_name
-    if configured_plan_designer is None and runtime_settings.openai.api_key is not None:
-        neutral_settings = ProviderSettings(
-            provider="openai",
-            api_key=runtime_settings.openai.api_key,
-            model=runtime_settings.openai.planner_model,
-            max_retries=runtime_settings.openai.max_retries,
-            timeout_seconds=runtime_settings.openai.timeout_seconds,
-        )
-        configured_plan_designer = plan_provider_factory(neutral_settings)
-        configured_plan_provider = neutral_settings.provider
-        configured_plan_model = neutral_settings.model
-    if (
-        configured_plan_designer is None
-        or configured_plan_provider is None
-        or configured_plan_model is None
+    coupled_plan_args = (plan_designer, plan_provider_name, plan_model_name)
+    if model_configuration is not None and (
+        experiment_designer is not None or any(value is not None for value in coupled_plan_args)
     ):
-        configured_plan_designer = None
-        configured_plan_provider = None
-        configured_plan_model = None
+        raise ValueError(
+            "model_configuration cannot be combined with designer injection arguments"
+        )
+    if any(value is not None for value in coupled_plan_args) and not all(
+        value is not None for value in coupled_plan_args
+    ):
+        raise ValueError(
+            "plan_designer, plan_provider_name, and plan_model_name must be provided together"
+        )
+    if model_configuration is not None:
+        configured_models = model_configuration
+    elif plan_designer is not None:
+        if plan_provider_name != "openai" and experiment_designer is not None:
+            raise ValueError("non-OpenAI plan configuration cannot use a legacy designer")
+        configured_models = ModelConfiguration(
+            provider=plan_provider_name,
+            model=plan_model_name,
+            plan_designer=plan_designer,
+            legacy_designer=experiment_designer,
+        )
+    elif runtime_settings.openai.api_key is not None:
+        configured_models = _openai_model_configuration(
+            runtime_settings.openai,
+            plan_provider_factory=plan_provider_factory,
+            legacy_provider_factory=legacy_provider_factory,
+        )
+    else:
+        configured_models = ModelConfiguration(legacy_designer=experiment_designer)
     application = FastAPI(
         title="Fluid Scientist",
         version="0.2.0",
@@ -285,10 +316,7 @@ def create_app(
     )
     application.mount("/assets", StaticFiles(directory=WEB_ROOT), name="assets")
     application.state.execution_targets = configured_targets
-    application.state.experiment_designer = configured_designer
-    application.state.plan_designer = configured_plan_designer
-    application.state.plan_provider_name = configured_plan_provider
-    application.state.plan_model_name = configured_plan_model
+    application.state.model_configuration = configured_models
     target_registry = {target.target_id: target for target in configured_targets}
     project_service = ProjectService(
         repository or SQLWorkflowRepository(runtime_settings.database.url)
@@ -315,7 +343,13 @@ def create_app(
 
     @application.post("/api/experiment-designs", response_model=ExperimentDesign)
     def design_experiment(request: ExperimentDesignRequest) -> ExperimentDesign:
-        designer = application.state.experiment_designer
+        model_snapshot = application.state.model_configuration
+        if model_snapshot.provider not in {None, "openai"}:
+            raise HTTPException(
+                status_code=409,
+                detail="Selected provider supports /api/experiment-plans only",
+            )
+        designer = model_snapshot.legacy_designer
         if designer is None:
             raise HTTPException(
                 status_code=503,
@@ -345,7 +379,12 @@ def create_app(
             planner_model=request.planner_model,
             extractor_model=request.extractor_model,
         )
-        application.state.experiment_designer = OpenAIResponsesProvider(model_settings)
+        configured_models = _openai_model_configuration(
+            model_settings,
+            plan_provider_factory=plan_provider_factory,
+            legacy_provider_factory=legacy_provider_factory,
+        )
+        application.state.model_configuration = configured_models
         return OpenAIConfigurationView(
             configured=True,
             planner_model=model_settings.planner_model,
@@ -364,9 +403,21 @@ def create_app(
             api_key=request.api_key,
         )
         designer = plan_provider_factory(provider_settings)
-        application.state.plan_designer = designer
-        application.state.plan_provider_name = provider_settings.provider
-        application.state.plan_model_name = provider_settings.model
+        legacy_designer = None
+        if provider_settings.provider == "openai":
+            legacy_settings = OpenAISettings(
+                api_key=provider_settings.api_key,
+                planner_model=provider_settings.model,
+                extractor_model=provider_settings.model,
+            )
+            legacy_designer = legacy_provider_factory(legacy_settings)
+        configured_models = ModelConfiguration(
+            provider=provider_settings.provider,
+            model=provider_settings.model,
+            plan_designer=designer,
+            legacy_designer=legacy_designer,
+        )
+        application.state.model_configuration = configured_models
         return ModelConfigurationView(
             configured=True,
             provider=provider_settings.provider,
@@ -377,20 +428,11 @@ def create_app(
         "/api/model-configurations", response_model=ModelConfigurationView
     )
     def get_plan_provider_configuration() -> ModelConfigurationView:
-        provider = application.state.plan_provider_name
-        model = application.state.plan_model_name
-        configured = (
-            application.state.plan_designer is not None
-            and provider is not None
-            and model is not None
-        )
-        if not configured:
-            provider = None
-            model = None
+        model_snapshot = application.state.model_configuration
         return ModelConfigurationView(
-            configured=configured,
-            provider=provider,
-            model=model,
+            configured=model_snapshot.configured,
+            provider=model_snapshot.provider,
+            model=model_snapshot.model,
         )
 
     @application.get(
@@ -402,9 +444,10 @@ def create_app(
 
     @application.post("/api/experiment-plans", response_model=ExperimentPlanView)
     def create_experiment_plan(request: ExperimentPlanRequest) -> ExperimentPlanView:
-        designer = application.state.plan_designer
-        provider = application.state.plan_provider_name
-        model = application.state.plan_model_name
+        model_snapshot = application.state.model_configuration
+        designer = model_snapshot.plan_designer
+        provider = model_snapshot.provider
+        model = model_snapshot.model
         if designer is None or provider is None or model is None:
             raise HTTPException(
                 status_code=503,
