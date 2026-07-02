@@ -14,7 +14,14 @@ const validateCustomCaseButton = document.querySelector("#validate-custom-case")
 const submitCustomCaseButton = document.querySelector("#submit-custom-case");
 const configureModelButton = document.querySelector("#configure-model");
 const viewPostprocessButton = document.querySelector("#view-postprocess");
+const modelProvider = document.querySelector("#model-provider");
+const modelApiKey = document.querySelector("#model-api-key");
+const modelId = document.querySelector("#model-id");
+const compileExperimentButton = document.querySelector("#compile-experiment");
+const submitPlannedExperimentButton = document.querySelector("#submit-planned-experiment");
 let currentProject = null;
+let currentPlan = null;
+let currentCompilation = null;
 let selectedTarget = "";
 let pollTimer = null;
 let latestBenchmarkResults = null;
@@ -23,6 +30,11 @@ const benchmarkCaseId = "pilot-pipe";
 const projectStorageKey = "fluid-scientist-project-id";
 const targetStorageKey = "fluid-scientist-target-id";
 const customSubmitEndpoint = "/api/custom-cases/submit";
+const modelDefaults = {
+  openai: "gpt-5.4",
+  glm: "glm-5.1",
+  deepseek: "deepseek-chat",
+};
 
 const number = (value, digits = 2) => Number(value).toFixed(digits);
 
@@ -154,8 +166,103 @@ function gateTwoApproved() {
 
 function refreshBenchmarkControls() {
   const ready = currentProject?.workflow_state === "PILOT_READY" && gateTwoApproved();
-  benchmarkForm.hidden = !ready;
+  benchmarkForm.hidden = !ready || Boolean(currentPlan);
   submitBenchmarkButton.disabled = !ready || !selectedTarget;
+  const binding = currentPlan
+    ? currentProject?.approved_artifacts?.[currentPlan.plan_id]
+    : null;
+  submitPlannedExperimentButton.disabled = !(
+    ready
+    && selectedTarget
+    && currentCompilation
+    && binding?.archive_sha256 === currentCompilation.archive_sha256
+  );
+}
+
+const humanize = (name) => name.replaceAll("_", " ");
+
+function displayValue(value) {
+  if (Array.isArray(value)) return value.join(" · ");
+  if (value === null || value === undefined) return "自动";
+  if (typeof value === "number") return Number.isInteger(value) ? String(value) : String(value);
+  return String(value);
+}
+
+function renderDefinitionList(targetId, entries) {
+  const target = document.querySelector(`#${targetId}`);
+  target.replaceChildren(...entries.map(([key, value]) => {
+    const row = document.createElement("div");
+    const term = document.createElement("dt");
+    const description = document.createElement("dd");
+    term.textContent = humanize(key);
+    description.textContent = displayValue(value);
+    row.append(term, description);
+    return row;
+  }));
+  if (!entries.length) target.textContent = "由内置模板确定";
+}
+
+function renderTextList(targetId, values) {
+  const target = document.querySelector(`#${targetId}`);
+  target.replaceChildren(...values.map((value) => {
+    const item = document.createElement("li");
+    item.textContent = displayValue(value);
+    return item;
+  }));
+  if (!values.length) target.textContent = "无";
+}
+
+function renderPlanReview(response) {
+  currentPlan = response;
+  currentCompilation = null;
+  const plan = response.plan;
+  const caseEntries = Object.entries(plan.case || {});
+  const geometry = caseEntries.filter(([key]) => (
+    /diameter|length|side|domain_|geometry|span/.test(key)
+  ));
+  const physics = caseEntries.filter(([key]) => (
+    /reynolds|velocity|viscosity|density/.test(key)
+  ));
+  const mesh = caseEntries.filter(([key]) => /cells|grading|mesh_strategy/.test(key));
+  const numerics = [
+    ...caseEntries.filter(([key]) => /end_time|time_step|max_courant|run_strategy/.test(key)),
+    ...Object.entries(plan.convergence_targets || {}),
+  ];
+  const boundaryDescriptions = plan.case?.boundary_conditions || ({
+    laminar_pipe: ["入口：面匹配抛物线速度", "出口：固定压力", "壁面：无滑移"],
+    cylinder_flow: ["入口：均匀速度", "圆柱：无滑移", "出口：固定压力", "前后：empty"],
+    lid_driven_cavity: ["顶盖：恒定切向速度", "其余壁面：无滑移", "压力：参考单元固定"],
+  }[plan.experiment_type] || ["由上传算例定义"]);
+
+  document.querySelector("#plan-title").textContent = plan.experiment_name;
+  document.querySelector("#plan-type").textContent = plan.experiment_type;
+  document.querySelector("#plan-provider-badge").textContent =
+    `${response.provider} / ${response.model}`;
+  document.querySelector("#plan-objective").textContent =
+    `${plan.objective} ${plan.rationale || ""}`.trim();
+  renderDefinitionList("plan-geometry", geometry);
+  renderDefinitionList("plan-physics", physics);
+  renderDefinitionList("plan-mesh", mesh);
+  renderDefinitionList("plan-numerics", numerics);
+  renderTextList("plan-boundaries", boundaryDescriptions);
+  renderTextList(
+    "plan-sweeps",
+    (plan.parameter_sweeps || []).map(
+      (sweep) => `${sweep.parameter}: ${sweep.values.join(" → ")}`,
+    ),
+  );
+  renderTextList("plan-outputs", plan.requested_outputs || []);
+  renderTextList("plan-assumptions", plan.assumptions || []);
+  renderTextList("plan-limitations", plan.limitations || []);
+  document.querySelector("#compile-preview").textContent =
+    `计划 ${response.plan_id} · v${response.plan_version}。请核对全部参数后编译。`;
+  document.querySelector("#experiment-plan-review").hidden = false;
+  compileExperimentButton.disabled = plan.experiment_type === "custom_openfoam";
+  refreshBenchmarkControls();
+  document.querySelector("#experiment-plan-review").scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+  });
 }
 
 function pipeCasePayload() {
@@ -511,16 +618,23 @@ createProjectButton.addEventListener("click", async () => {
 });
 
 designExperimentButton.addEventListener("click", async () => {
+  if (!currentProject) {
+    message.textContent = "请先创建项目，再由模型为该项目设计实验。";
+    return;
+  }
   designExperimentButton.disabled = true;
-  message.textContent = "模型正在根据研究问题和 OpenFOAM 能力设计实验…";
+  message.textContent = "模型正在生成严格类型的实验计划；它不会生成命令或直接操作工作站…";
   try {
-    const design = await requestJson("/api/experiment-designs", {
+    const design = await requestJson("/api/experiment-plans", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question: document.querySelector("#question").value }),
+      body: JSON.stringify({
+        question: document.querySelector("#question").value,
+        project_id: currentProject.project_id,
+      }),
     });
-    applyExperimentDesign(design);
-    message.textContent = "模型实验设计已写入参数表；仍需人工检查并完成 Gate 2 审批。";
+    renderPlanReview(design);
+    message.textContent = "实验计划已生成。请逐项审阅，再编译为确定性 OpenFOAM 算例。";
   } catch (error) {
     message.textContent = `模型设计不可用：${error.message}`;
   } finally {
@@ -586,30 +700,93 @@ submitCustomCaseButton.addEventListener("click", async () => {
 });
 
 configureModelButton.addEventListener("click", async () => {
-  const keyInput = document.querySelector("#openai-api-key");
   const state = document.querySelector("#model-config-state");
-  if (!keyInput.value.trim()) {
+  if (!modelApiKey.value.trim()) {
     state.textContent = "请输入 API Key；密钥只会发送到本机服务的内存。";
     return;
   }
   configureModelButton.disabled = true;
   state.textContent = "正在建立模型连接…";
   try {
-    const configured = await requestJson("/api/settings/openai", {
+    const configured = await requestJson("/api/model-configurations", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        api_key: keyInput.value,
-        planner_model: document.querySelector("#openai-planner-model").value,
-        extractor_model: "gpt-5.4-mini",
+        provider: modelProvider.value,
+        api_key: modelApiKey.value,
+        model: modelId.value,
       }),
     });
-    keyInput.value = "";
-    state.textContent = `已连接 ${configured.planner_model}；现在可点击“AI 设计实验”。`;
+    modelApiKey.value = "";
+    state.textContent = `已连接 ${configured.provider} / ${configured.model}；现在可生成实验计划。`;
   } catch (error) {
     state.textContent = `模型配置失败：${error.message}`;
   } finally {
     configureModelButton.disabled = false;
+  }
+});
+
+modelProvider.addEventListener("change", () => {
+  modelId.value = modelDefaults[modelProvider.value];
+});
+
+compileExperimentButton.addEventListener("click", async () => {
+  if (!currentPlan) return;
+  compileExperimentButton.disabled = true;
+  const preview = document.querySelector("#compile-preview");
+  preview.textContent = "正在使用受控编译器生成 OpenFOAM 13 算例并执行安全校验…";
+  try {
+    currentCompilation = await requestJson(
+      `/api/experiment-plans/${currentPlan.plan_id}/compile`,
+      { method: "POST" },
+    );
+    const commands = currentCompilation.preprocessing.join(" → ");
+    preview.textContent = [
+      `SHA-256 ${currentCompilation.archive_sha256}`,
+      `求解器 ${currentCompilation.manifest.solver}`,
+      `预处理 ${commands}`,
+      `输出 ${currentCompilation.required_outputs.join(" · ")}`,
+    ].join("\n");
+    message.textContent = "编译与安全校验通过。Gate 2 将绑定页面显示的计划版本和归档摘要。";
+    refreshBenchmarkControls();
+  } catch (error) {
+    currentCompilation = null;
+    preview.textContent = `编译失败：${error.message}`;
+  } finally {
+    compileExperimentButton.disabled = currentPlan.plan.experiment_type === "custom_openfoam";
+  }
+});
+
+submitPlannedExperimentButton.addEventListener("click", async () => {
+  if (!currentProject || !currentPlan || !currentCompilation || !selectedTarget) return;
+  submitPlannedExperimentButton.disabled = true;
+  const caseId = `planned-${currentPlan.plan.experiment_type}`;
+  message.textContent = "正在提交 Gate 2 已绑定的原始归档字节到工作站…";
+  try {
+    const submission = await requestJson(
+      `/api/projects/${currentProject.project_id}/experiment-plans/${currentPlan.plan_id}/submit`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_id: selectedTarget,
+          case_id: caseId,
+          actor: "researcher",
+          archive_sha256: currentCompilation.archive_sha256,
+        }),
+      },
+    );
+    currentProject = submission.project;
+    localStorage.setItem(projectStorageKey, currentProject.project_id);
+    localStorage.setItem(targetStorageKey, selectedTarget);
+    document.querySelector("#job-id").textContent = submission.job.job_id;
+    document.querySelector("#job-state").textContent = submission.job.state.toUpperCase();
+    document.querySelector("#job-progress").style.width = "18%";
+    message.textContent = `作业 ${submission.job.job_id} 已在工作站启动。`;
+    pollCustomCase(submission.job.job_id, selectedTarget);
+  } catch (error) {
+    message.textContent = `提交失败：${error.message}`;
+    refreshBenchmarkControls();
   }
 });
 
@@ -621,16 +798,28 @@ viewPostprocessButton.addEventListener("click", () => {
 approveButton.addEventListener("click", async () => {
   if (!currentProject) return;
   const gate = gateForState(currentProject.workflow_state);
+  if (gate === "GATE_2" && (!currentPlan || !currentCompilation)) {
+    message.textContent = "Gate 2 审批前必须先生成计划并完成确定性编译。";
+    return;
+  }
   try {
+    const approval = {
+      gate,
+      decision: "approve",
+      actor: "researcher",
+      subject_version: currentProject.version,
+    };
+    if (gate === "GATE_2") {
+      Object.assign(approval, {
+        plan_id: currentPlan.plan_id,
+        plan_version: currentPlan.plan_version,
+        archive_sha256: currentCompilation.archive_sha256,
+      });
+    }
     const project = await requestJson(`/api/projects/${currentProject.project_id}/approvals`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        gate,
-        decision: "approve",
-        actor: "researcher",
-        subject_version: currentProject.version,
-      }),
+      body: JSON.stringify(approval),
     });
     renderProject(project);
   } catch (error) {

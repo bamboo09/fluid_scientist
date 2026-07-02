@@ -83,9 +83,9 @@ def test_workbench_can_request_and_apply_model_designed_experiment() -> None:
 
     assert 'id="design-experiment"' in html
     assert 'id="design-rationale"' in html
-    assert '"/api/experiment-designs"' in script
-    assert "applyExperimentDesign" in script
-    assert "design.case" in script
+    assert '"/api/experiment-plans"' in script
+    assert "renderPlanReview" in script
+    assert "response.plan" in script
 
 
 def test_workbench_can_validate_custom_openfoam_archive_without_submitting_it() -> None:
@@ -115,10 +115,10 @@ def test_workbench_can_configure_model_without_persisting_api_key() -> None:
     html = (ROOT / "apps/web/index.html").read_text(encoding="utf-8")
     script = (ROOT / "apps/web/app.js").read_text(encoding="utf-8")
 
-    assert 'id="openai-api-key"' in html
+    assert 'id="model-api-key"' in html
     assert 'id="configure-model"' in html
     assert 'type="password"' in html
-    assert '"/api/settings/openai"' in script
+    assert '"/api/model-configurations"' in script
     assert "localStorage.setItem(targetStorageKey" in script
     assert "localStorage.setItem(\"openai" not in script
 
@@ -133,3 +133,49 @@ def test_workbench_can_submit_and_poll_a_validated_custom_case() -> None:
     assert "pollCustomCase" in script
     assert 'design.experiment_type === "custom_openfoam"' in script
     assert "VALIDATION ONLY" not in html
+
+
+def test_workbench_exposes_provider_neutral_compiled_plan_flow() -> None:
+    html = (ROOT / "apps/web/index.html").read_text(encoding="utf-8")
+    script = (ROOT / "apps/web/app.js").read_text(encoding="utf-8")
+
+    for marker in (
+        'id="model-provider"',
+        'value="openai"',
+        'value="glm"',
+        'value="deepseek"',
+        'id="model-api-key"',
+        'id="model-id"',
+        'id="experiment-plan-review"',
+        'id="plan-geometry"',
+        'id="plan-physics"',
+        'id="plan-boundaries"',
+        'id="plan-mesh"',
+        'id="plan-numerics"',
+        'id="plan-sweeps"',
+        'id="plan-outputs"',
+        'id="plan-assumptions"',
+        'id="plan-limitations"',
+        'id="compile-experiment"',
+        'id="compile-preview"',
+        'id="submit-planned-experiment"',
+    ):
+        assert marker in html
+
+    assert '"/api/model-configurations"' in script
+    assert '"/api/experiment-plans"' in script
+    assert "/compile`" in script
+    assert "/experiment-plans/${currentPlan.plan_id}/submit`" in script
+    assert "archive_sha256" in script
+    assert "plan_version" in script
+    assert 'localStorage.setItem("api' not in script
+    assert "modelApiKey.value = \"\"" in script
+
+
+def test_gate_two_approval_includes_the_visible_compiled_digest() -> None:
+    script = (ROOT / "apps/web/app.js").read_text(encoding="utf-8")
+
+    assert "plan_id: currentPlan.plan_id" in script
+    assert "plan_version: currentPlan.plan_version" in script
+    assert "archive_sha256: currentCompilation.archive_sha256" in script
+    assert "textContent" in script

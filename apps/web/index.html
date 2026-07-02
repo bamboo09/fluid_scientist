@@ -63,10 +63,17 @@
           </div>
           <aside id="design-rationale" class="design-rationale" hidden></aside>
           <details class="model-config">
-            <summary>连接实验设计模型</summary>
+            <summary>连接实验设计模型 · OpenAI / GLM / DeepSeek</summary>
             <div class="model-config-fields">
-              <label>OpenAI API Key <input id="openai-api-key" type="password" autocomplete="off" placeholder="仅保存在当前服务进程内存"></label>
-              <label>设计模型 <input id="openai-planner-model" type="text" value="gpt-5.4"></label>
+              <label>模型服务
+                <select id="model-provider">
+                  <option value="openai">OpenAI</option>
+                  <option value="glm">GLM / 智谱</option>
+                  <option value="deepseek">DeepSeek</option>
+                </select>
+              </label>
+              <label>API Key <input id="model-api-key" type="password" autocomplete="off" placeholder="仅保存在当前服务进程内存"></label>
+              <label>模型 ID <input id="model-id" type="text" value="gpt-5.4" autocomplete="off"></label>
               <button id="configure-model" class="secondary" type="button">连接模型</button>
             </div>
             <small id="model-config-state">密钥不会写入浏览器存储或项目文件；服务重启后需重新输入。</small>
@@ -85,6 +92,31 @@
         </section>
 
         <section class="dashboard-grid reveal">
+          <article id="experiment-plan-review" class="panel plan-review-panel" hidden>
+            <div class="panel-kicker"><span>MODEL → SCHEMA → CASE</span><em id="plan-provider-badge">NOT DESIGNED</em></div>
+            <div class="plan-review-heading">
+              <div><p>EXPERIMENT PLAN</p><h2 id="plan-title">等待模型设计实验</h2></div>
+              <span id="plan-type">—</span>
+            </div>
+            <p id="plan-objective" class="plan-objective"></p>
+            <div class="plan-review-grid">
+              <section><h3>几何</h3><dl id="plan-geometry"></dl></section>
+              <section><h3>物理参数</h3><dl id="plan-physics"></dl></section>
+              <section><h3>边界条件</h3><div id="plan-boundaries"></div></section>
+              <section><h3>网格</h3><dl id="plan-mesh"></dl></section>
+              <section><h3>数值设置</h3><dl id="plan-numerics"></dl></section>
+              <section><h3>参数扫描</h3><div id="plan-sweeps"></div></section>
+              <section><h3>输出指标</h3><ul id="plan-outputs"></ul></section>
+              <section><h3>假设</h3><ul id="plan-assumptions"></ul></section>
+              <section><h3>局限</h3><ul id="plan-limitations"></ul></section>
+            </div>
+            <div class="plan-actions">
+              <button id="compile-experiment" type="button"><span>编译并预览算例</span><b>→</b></button>
+              <button id="submit-planned-experiment" class="secondary" type="button" disabled><span>提交已审批算例</span><b>→</b></button>
+            </div>
+            <output id="compile-preview" class="compile-preview">尚未编译。模型只负责计划；命令与 OpenFOAM 文件由确定性编译器生成。</output>
+          </article>
+
           <article class="panel action-panel">
             <div class="panel-kicker"><span>ACTION</span><em>GATE 2</em></div>
             <h2>层流圆管可信性 Pilot</h2>
