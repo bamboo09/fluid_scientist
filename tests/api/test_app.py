@@ -206,6 +206,21 @@ def test_model_configuration_reports_unconfigured_state() -> None:
     assert response.json() == {"configured": False, "provider": None, "model": None}
 
 
+def test_model_configuration_hides_metadata_for_inconsistent_injection() -> None:
+    api = TestClient(
+        create_app(
+            plan_designer=None,
+            plan_provider_name="glm",
+            plan_model_name="glm-4.5",
+        )
+    )
+
+    response = api.get("/api/model-configurations")
+
+    assert response.status_code == 200
+    assert response.json() == {"configured": False, "provider": None, "model": None}
+
+
 @pytest.mark.parametrize(
     "payload",
     [

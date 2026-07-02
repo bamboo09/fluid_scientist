@@ -270,6 +270,14 @@ def create_app(
         configured_plan_designer = plan_provider_factory(neutral_settings)
         configured_plan_provider = neutral_settings.provider
         configured_plan_model = neutral_settings.model
+    if (
+        configured_plan_designer is None
+        or configured_plan_provider is None
+        or configured_plan_model is None
+    ):
+        configured_plan_designer = None
+        configured_plan_provider = None
+        configured_plan_model = None
     application = FastAPI(
         title="Fluid Scientist",
         version="0.2.0",
@@ -371,12 +379,16 @@ def create_app(
     def get_plan_provider_configuration() -> ModelConfigurationView:
         provider = application.state.plan_provider_name
         model = application.state.plan_model_name
+        configured = (
+            application.state.plan_designer is not None
+            and provider is not None
+            and model is not None
+        )
+        if not configured:
+            provider = None
+            model = None
         return ModelConfigurationView(
-            configured=(
-                application.state.plan_designer is not None
-                and provider is not None
-                and model is not None
-            ),
+            configured=configured,
             provider=provider,
             model=model,
         )
