@@ -338,6 +338,17 @@ def test_cavity_contains_moving_lid_probes_without_mirror_mesh() -> None:
     assert "(0.25 0.5 0.0078125)" in files["system/controlDict"]
 
 
+@pytest.mark.parametrize("plan", [cylinder_plan(), cavity_plan()])
+def test_transient_foundation13_solver_has_required_final_field_solvers(plan) -> None:
+    solution = archive_files(compile_plan(plan).archive)["system/fvSolution"]
+
+    assert "pFinal" in solution
+    assert "$p;" in solution
+    assert "UFinal" in solution
+    assert "$U;" in solution
+    assert solution.count("relTol 0;") >= 2
+
+
 @pytest.mark.parametrize(
     ("plan", "expected"),
     [

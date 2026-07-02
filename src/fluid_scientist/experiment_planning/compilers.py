@@ -827,12 +827,22 @@ solvers
         tolerance {residual};
         relTol 0.01;
     }}
+    pFinal
+    {{
+        $p;
+        relTol 0;
+    }}
     U
     {{
         solver smoothSolver;
         smoother symGaussSeidel;
         tolerance {residual};
         relTol 0.01;
+    }}
+    UFinal
+    {{
+        $U;
+        relTol 0;
     }}
 }}
 PIMPLE
