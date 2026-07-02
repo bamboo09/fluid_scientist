@@ -789,7 +789,16 @@ def create_app(
             )
             plan = ExperimentPlan.model_validate_json(stored_plan.plan_json)
             experiment_name = plan.root.experiment_name
-            job_id = existing or _experiment_job_id(project_id, experiment_name)
+            gate_two = next(
+                approval
+                for approval in project_service.get(project_id).approvals
+                if approval.gate == "GATE_2"
+            )
+            job_id = existing or _experiment_job_id(
+                project_id,
+                experiment_name,
+                timestamp=gate_two.approved_at,
+            )
             job = (
                 status_method(job_id)
                 if existing
@@ -916,12 +925,19 @@ def _bound_benchmark(
     return target, job_id
 
 
-def _experiment_job_id(project_id: str, experiment_name: str) -> str:
+def _experiment_job_id(
+    project_id: str,
+    experiment_name: str,
+    *,
+    timestamp: datetime | None = None,
+) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", experiment_name.lower()).strip("-")
     slug = (slug or "openfoam-experiment")[:48].rstrip("-")
-    timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
+    timestamp_text = (timestamp or datetime.now(UTC)).astimezone(UTC).strftime(
+        "%Y%m%d-%H%M%S"
+    )
     project_suffix = project_id.replace("-", "")[:8].lower()
-    return f"{timestamp}-{slug}-{project_suffix}"
+    return f"{timestamp_text}-{slug}-{project_suffix}"
 
 
 app = create_app()

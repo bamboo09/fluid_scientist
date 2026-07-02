@@ -1,6 +1,8 @@
 import io
 import re
 import tarfile
+import time
+from datetime import datetime
 
 from fastapi.testclient import TestClient
 from sqlalchemy import update
@@ -462,6 +464,10 @@ def test_bound_experiment_submission_uses_exact_approved_archive(tmp_path) -> No
             "archive_sha256": preview["archive_sha256"],
         },
     ).json()
+    gate_two_approved_at = next(
+        item["approved_at"] for item in approval["approvals"] if item["gate"] == "GATE_2"
+    )
+    time.sleep(1.1)
 
     submitted = client.post(
         f"/api/projects/{project['project_id']}/experiment-plans/{plan['plan_id']}/submit",
@@ -475,6 +481,8 @@ def test_bound_experiment_submission_uses_exact_approved_archive(tmp_path) -> No
 
     assert submitted.status_code == 201
     assert submitted.json()["project"]["workflow_state"] == "PILOT_RUNNING"
+    approved_timestamp = datetime.fromisoformat(gate_two_approved_at).strftime("%Y%m%d-%H%M%S")
+    assert submitted.json()["job"]["job_id"].startswith(approved_timestamp)
     assert target.submissions
     submitted_archive = target.submissions[0][1]
     assert validate_custom_case_archive(submitted_archive).archive_sha256 == preview[
