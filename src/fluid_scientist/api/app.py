@@ -4,13 +4,20 @@ import re
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Literal, Protocol
+from typing import Annotated, Literal, Protocol
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, ConfigDict, Field, SecretStr
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StringConstraints,
+    field_validator,
+)
 
 from fluid_scientist.adapters.custom_openfoam import (
     CustomCaseManifest,
@@ -21,8 +28,12 @@ from fluid_scientist.adapters.fakes import build_demo_service
 from fluid_scientist.adapters.openai_provider import (
     ExperimentDesign,
     OpenAIResponsesProvider,
-    ProviderOutputError,
-    ProviderRequestError,
+)
+from fluid_scientist.adapters.openai_provider import (
+    ProviderOutputError as LegacyProviderOutputError,
+)
+from fluid_scientist.adapters.openai_provider import (
+    ProviderRequestError as LegacyProviderRequestError,
 )
 from fluid_scientist.adapters.openfoam import (
     LaminarPipeCase,
@@ -40,11 +51,27 @@ from fluid_scientist.execution_targets.workstation import (
     WorkerCollection,
     WorkstationOpenFOAMTarget,
 )
+from fluid_scientist.experiment_planning import (
+    ExperimentDesigner as PlanExperimentDesigner,
+)
+from fluid_scientist.experiment_planning import (
+    ExperimentPlan,
+    ProviderAuthenticationError,
+    ProviderModelNotFoundError,
+    ProviderOutputError,
+    ProviderRequestError,
+    create_plan_provider,
+)
 from fluid_scientist.orchestration.workflow import TransitionError
 from fluid_scientist.ports import WorkflowRepository
 from fluid_scientist.services.projects import ProjectService, ProjectView
 from fluid_scientist.services.research import DemoResearchResult
-from fluid_scientist.settings import AppSettings, NodeSettings, OpenAISettings
+from fluid_scientist.settings import (
+    AppSettings,
+    NodeSettings,
+    OpenAISettings,
+    ProviderSettings,
+)
 from fluid_scientist.worker.service import JobRecord
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -81,10 +108,97 @@ class OpenAIConfigurationView(BaseModel):
     extractor_model: str
 
 
-class ExperimentDesigner(Protocol):
+class LegacyExperimentDesigner(Protocol):
     def design_experiment(
         self, question: str, *, capabilities: tuple[str, ...]
     ) -> ExperimentDesign: ...
+
+
+class ModelConfigurationRequest(StrictRequest):
+    provider: Literal["openai", "glm", "deepseek"]
+    model: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=128),
+    ]
+    api_key: SecretStr = Field(min_length=1)
+
+    @field_validator("api_key")
+    @classmethod
+    def require_nonempty_api_key(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().strip():
+            raise ValueError("api_key must not be empty")
+        return value
+
+
+class ModelConfigurationView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    configured: bool
+    provider: Literal["openai", "glm", "deepseek"] | None
+    model: str | None
+
+
+class ExperimentPlanRequest(StrictRequest):
+    question: str = Field(min_length=10, max_length=2_000)
+
+
+class ExperimentPlanView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Literal["openai", "glm", "deepseek"]
+    model: str
+    plan: ExperimentPlan
+
+
+class ExperimentCapabilityView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    experiment_type: Literal[
+        "laminar_pipe",
+        "cylinder_flow",
+        "lid_driven_cavity",
+        "custom_openfoam",
+    ]
+    label: str
+    required_outputs: tuple[str, ...]
+
+
+EXPERIMENT_CAPABILITIES = (
+    ExperimentCapabilityView(
+        experiment_type="laminar_pipe",
+        label="Laminar pipe",
+        required_outputs=("pressure_drop", "mass_imbalance", "residuals"),
+    ),
+    ExperimentCapabilityView(
+        experiment_type="cylinder_flow",
+        label="Cylinder flow",
+        required_outputs=(
+            "drag_coefficient",
+            "lift_coefficient",
+            "strouhal_number",
+            "mass_imbalance",
+            "residuals",
+        ),
+    ),
+    ExperimentCapabilityView(
+        experiment_type="lid_driven_cavity",
+        label="Lid-driven cavity",
+        required_outputs=(
+            "velocity_probes",
+            "pressure_probes",
+            "mass_imbalance",
+            "residuals",
+        ),
+    ),
+    ExperimentCapabilityView(
+        experiment_type="custom_openfoam",
+        label="Custom OpenFOAM case",
+        required_outputs=("solver_logs", "requested_fields"),
+    ),
+)
+
+PLAN_CAPABILITY_MARKERS = ("OpenFOAM-13", "workstation_openfoam")
+PlanProviderFactory = Callable[[ProviderSettings], PlanExperimentDesigner]
 
 
 class ApprovalRequest(StrictRequest):
@@ -129,7 +243,11 @@ def create_app(
     *,
     settings: AppSettings | None = None,
     transport_factory: Callable[[NodeSettings], SSHTransport] = SSHTransport,
-    experiment_designer: ExperimentDesigner | None = None,
+    experiment_designer: LegacyExperimentDesigner | None = None,
+    plan_designer: PlanExperimentDesigner | None = None,
+    plan_provider_name: Literal["openai", "glm", "deepseek"] | None = None,
+    plan_model_name: str | None = None,
+    plan_provider_factory: PlanProviderFactory = create_plan_provider,
 ) -> FastAPI:
     runtime_settings = settings or AppSettings()
     configured_targets = execution_targets
@@ -138,6 +256,20 @@ def create_app(
     configured_designer = experiment_designer
     if configured_designer is None and runtime_settings.openai.api_key is not None:
         configured_designer = OpenAIResponsesProvider(runtime_settings.openai)
+    configured_plan_designer = plan_designer
+    configured_plan_provider = plan_provider_name
+    configured_plan_model = plan_model_name
+    if configured_plan_designer is None and runtime_settings.openai.api_key is not None:
+        neutral_settings = ProviderSettings(
+            provider="openai",
+            api_key=runtime_settings.openai.api_key,
+            model=runtime_settings.openai.planner_model,
+            max_retries=runtime_settings.openai.max_retries,
+            timeout_seconds=runtime_settings.openai.timeout_seconds,
+        )
+        configured_plan_designer = plan_provider_factory(neutral_settings)
+        configured_plan_provider = neutral_settings.provider
+        configured_plan_model = neutral_settings.model
     application = FastAPI(
         title="Fluid Scientist",
         version="0.2.0",
@@ -146,6 +278,9 @@ def create_app(
     application.mount("/assets", StaticFiles(directory=WEB_ROOT), name="assets")
     application.state.execution_targets = configured_targets
     application.state.experiment_designer = configured_designer
+    application.state.plan_designer = configured_plan_designer
+    application.state.plan_provider_name = configured_plan_provider
+    application.state.plan_model_name = configured_plan_model
     target_registry = {target.target_id: target for target in configured_targets}
     project_service = ProjectService(
         repository or SQLWorkflowRepository(runtime_settings.database.url)
@@ -188,9 +323,9 @@ def create_app(
                     "custom_openfoam",
                 ),
             )
-        except ProviderOutputError as error:
+        except LegacyProviderOutputError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
-        except ProviderRequestError as error:
+        except LegacyProviderRequestError as error:
             raise HTTPException(status_code=502, detail=str(error)) from error
 
     @application.post("/api/settings/openai", response_model=OpenAIConfigurationView)
@@ -208,6 +343,89 @@ def create_app(
             planner_model=model_settings.planner_model,
             extractor_model=model_settings.extractor_model,
         )
+
+    @application.post(
+        "/api/model-configurations", response_model=ModelConfigurationView
+    )
+    def configure_plan_provider(
+        request: ModelConfigurationRequest,
+    ) -> ModelConfigurationView:
+        provider_settings = ProviderSettings(
+            provider=request.provider,
+            model=request.model,
+            api_key=request.api_key,
+        )
+        designer = plan_provider_factory(provider_settings)
+        application.state.plan_designer = designer
+        application.state.plan_provider_name = provider_settings.provider
+        application.state.plan_model_name = provider_settings.model
+        return ModelConfigurationView(
+            configured=True,
+            provider=provider_settings.provider,
+            model=provider_settings.model,
+        )
+
+    @application.get(
+        "/api/model-configurations", response_model=ModelConfigurationView
+    )
+    def get_plan_provider_configuration() -> ModelConfigurationView:
+        provider = application.state.plan_provider_name
+        model = application.state.plan_model_name
+        return ModelConfigurationView(
+            configured=(
+                application.state.plan_designer is not None
+                and provider is not None
+                and model is not None
+            ),
+            provider=provider,
+            model=model,
+        )
+
+    @application.get(
+        "/api/experiment-capabilities",
+        response_model=tuple[ExperimentCapabilityView, ...],
+    )
+    def list_experiment_capabilities() -> tuple[ExperimentCapabilityView, ...]:
+        return EXPERIMENT_CAPABILITIES
+
+    @application.post("/api/experiment-plans", response_model=ExperimentPlanView)
+    def create_experiment_plan(request: ExperimentPlanRequest) -> ExperimentPlanView:
+        designer = application.state.plan_designer
+        provider = application.state.plan_provider_name
+        model = application.state.plan_model_name
+        if designer is None or provider is None or model is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Experiment plan provider is not configured",
+            )
+        try:
+            plan = designer.design_experiment(
+                request.question,
+                capabilities=tuple(
+                    capability.experiment_type
+                    for capability in EXPERIMENT_CAPABILITIES
+                )
+                + PLAN_CAPABILITY_MARKERS,
+            )
+        except ProviderAuthenticationError as error:
+            raise HTTPException(
+                status_code=401, detail="Provider authentication failed"
+            ) from error
+        except ProviderModelNotFoundError as error:
+            raise HTTPException(
+                status_code=422, detail="Provider model was not found"
+            ) from error
+        except ProviderOutputError as error:
+            raise HTTPException(
+                status_code=422,
+                detail="Provider returned an invalid experiment plan",
+            ) from error
+        except ProviderRequestError as error:
+            raise HTTPException(
+                status_code=502,
+                detail="Experiment plan provider request failed",
+            ) from error
+        return ExperimentPlanView(provider=provider, model=model, plan=plan)
 
     @application.post("/api/custom-cases/validate", response_model=CustomCaseManifest)
     def validate_custom_case(
