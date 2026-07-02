@@ -132,6 +132,61 @@ def test_model_can_be_configured_in_memory_without_echoing_api_key() -> None:
     assert secret not in repr(api.app.state.model_configuration)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "api_key": "   ",
+            "planner_model": "gpt-5.4",
+            "extractor_model": "gpt-5.4-mini",
+        },
+        {
+            "api_key": "secret",
+            "planner_model": "  ",
+            "extractor_model": "gpt-5.4-mini",
+        },
+        {
+            "api_key": "secret",
+            "planner_model": "gpt-5.4",
+            "extractor_model": "\t\n",
+        },
+        {
+            "api_key": "secret",
+            "planner_model": "gpt-5.4",
+            "extractor_model": "gpt-5.4-mini",
+            "base_url": "https://attacker.invalid",
+        },
+    ],
+)
+def test_legacy_openai_configuration_rejects_blank_or_extra_fields(
+    payload: dict[str, str],
+) -> None:
+    api = TestClient(create_app())
+
+    response = api.post("/api/settings/openai", json=payload)
+
+    assert response.status_code == 422
+
+
+def test_runtime_openai_fallback_preserves_explicit_legacy_injection() -> None:
+    legacy = FakeExperimentDesigner()
+    settings = AppSettings(
+        openai=OpenAISettings(
+            api_key=SecretStr("runtime-secret"),
+            planner_model="gpt-runtime",
+            extractor_model="gpt-extractor",
+        )
+    )
+
+    api = create_app(settings=settings, experiment_designer=legacy)
+
+    snapshot = api.state.model_configuration
+    assert snapshot.legacy_designer is legacy
+    assert isinstance(snapshot.plan_designer, OpenAIPlanProvider)
+    assert snapshot.provider == "openai"
+    assert snapshot.model == "gpt-runtime"
+
+
 def neutral_pipe_plan(experiment_name: str = "Neutral Pipe Study") -> ExperimentPlan:
     return ExperimentPlan.model_validate(
         {

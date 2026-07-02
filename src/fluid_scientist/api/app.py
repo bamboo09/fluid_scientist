@@ -98,8 +98,21 @@ class ExperimentDesignRequest(StrictRequest):
 
 class OpenAIConfigurationRequest(StrictRequest):
     api_key: SecretStr = Field(min_length=1)
-    planner_model: str = Field(default="gpt-5.4", min_length=1, max_length=128)
-    extractor_model: str = Field(default="gpt-5.4-mini", min_length=1, max_length=128)
+    planner_model: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=128),
+    ] = "gpt-5.4"
+    extractor_model: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=128),
+    ] = "gpt-5.4-mini"
+
+    @field_validator("api_key")
+    @classmethod
+    def require_nonempty_api_key(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().strip():
+            raise ValueError("api_key must not be empty")
+        return value
 
 
 class OpenAIConfigurationView(BaseModel):
@@ -239,6 +252,7 @@ def _openai_model_configuration(
     *,
     plan_provider_factory: PlanProviderFactory,
     legacy_provider_factory: LegacyProviderFactory,
+    legacy_designer_override: LegacyExperimentDesigner | None = None,
 ) -> ModelConfiguration:
     if settings.api_key is None:
         raise ValueError("OpenAI api_key is required")
@@ -250,7 +264,11 @@ def _openai_model_configuration(
         timeout_seconds=settings.timeout_seconds,
     )
     plan_designer = plan_provider_factory(plan_settings)
-    legacy_designer = legacy_provider_factory(settings)
+    legacy_designer = (
+        legacy_designer_override
+        if legacy_designer_override is not None
+        else legacy_provider_factory(settings)
+    )
     return ModelConfiguration(
         provider="openai",
         model=settings.planner_model,
@@ -306,6 +324,7 @@ def create_app(
             runtime_settings.openai,
             plan_provider_factory=plan_provider_factory,
             legacy_provider_factory=legacy_provider_factory,
+            legacy_designer_override=experiment_designer,
         )
     else:
         configured_models = ModelConfiguration(legacy_designer=experiment_designer)
