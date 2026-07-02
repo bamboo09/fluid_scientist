@@ -1,6 +1,16 @@
 """Typed application configuration with explicit real-integration requirements."""
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, model_validator
+from typing import Annotated, Literal
+
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SecretStr,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from fluid_scientist.compat import StrEnum
@@ -21,6 +31,28 @@ class OpenAISettings(ConfigModel):
     extractor_model: str = "gpt-5.4-mini"
     max_retries: int = Field(default=2, ge=0, le=5)
     timeout_seconds: float = Field(default=120.0, gt=0, le=600)
+
+
+class ProviderSettings(ConfigModel):
+    """Ephemeral configuration for a selected experiment-plan provider."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    provider: Literal["openai", "glm", "deepseek"]
+    api_key: SecretStr
+    model: Annotated[
+        str,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=128),
+    ]
+    max_retries: int = Field(default=2, ge=0, le=5)
+    timeout_seconds: float = Field(default=120.0, gt=0, le=600)
+
+    @field_validator("api_key")
+    @classmethod
+    def require_nonempty_api_key(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().strip():
+            raise ValueError("api_key must not be empty")
+        return value
 
 
 class DatabaseSettings(ConfigModel):

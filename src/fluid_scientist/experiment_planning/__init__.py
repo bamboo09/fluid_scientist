@@ -17,6 +17,18 @@ from fluid_scientist.experiment_planning.models import (
     PipeOutput,
     PlanBase,
 )
+from fluid_scientist.experiment_planning.providers import (
+    ExperimentDesigner,
+    OpenAICompatiblePlanProvider,
+    PlanProviderError,
+    ProviderAuthenticationError,
+    ProviderEmptyOutputError,
+    ProviderMalformedOutputError,
+    ProviderModelNotFoundError,
+    ProviderOutputError,
+    ProviderRequestError,
+    ProviderSchemaError,
+)
 
 __all__ = [
     "CavityExperimentPlan",
@@ -28,10 +40,20 @@ __all__ = [
     "CylinderFlowCase",
     "CylinderOutput",
     "ExperimentPlan",
+    "ExperimentDesigner",
     "LaminarPipeCase",
     "LidDrivenCavityCase",
     "ParameterSweep",
+    "PlanProviderError",
     "PipeExperimentPlan",
     "PipeOutput",
     "PlanBase",
+    "OpenAICompatiblePlanProvider",
+    "ProviderAuthenticationError",
+    "ProviderEmptyOutputError",
+    "ProviderMalformedOutputError",
+    "ProviderModelNotFoundError",
+    "ProviderOutputError",
+    "ProviderRequestError",
+    "ProviderSchemaError",
 ]
