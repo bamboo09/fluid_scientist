@@ -272,6 +272,31 @@ def test_old_plan_confirmation_cannot_steal_an_active_experiment_poll() -> None:
     assert warning < start_polling
 
 
+def test_custom_openfoam_plan_routes_to_reviewed_archive_upload() -> None:
+    script = read_asset("apps/web/app.js")
+    render_source = function_source(script, "renderPlanCard")
+    submit_source = function_source(script, "confirmAndSubmitPlan")
+
+    assert 'plan.experiment_type === "custom_openfoam"' in render_source
+    assert "上传并审核算例归档" in render_source
+    assert 'openDialog("custom-case-drawer")' in render_source
+    custom_render_guard = render_source.index(
+        'plan.experiment_type === "custom_openfoam"'
+    )
+    custom_open = render_source.index('openDialog("custom-case-drawer")')
+    custom_return = render_source.index("return;", custom_open)
+    built_in_confirm = render_source.index("confirmAndSubmitPlan(confirm)")
+    assert custom_render_guard < custom_open < custom_return < built_in_confirm
+
+    assert 'currentPlan.plan.experiment_type === "custom_openfoam"' in submit_source
+    assert 'openDialog("custom-case-drawer")' in submit_source
+    custom_guard = submit_source.index(
+        'currentPlan.plan.experiment_type === "custom_openfoam"'
+    )
+    compile_call = submit_source.index("/compile`")
+    assert custom_guard < compile_call
+
+
 def test_planning_payload_omits_an_unselected_target() -> None:
     script = read_asset("apps/web/app.js")
     design_source = function_source(script, "designExperimentFromPrompt")

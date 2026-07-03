@@ -279,6 +279,22 @@ function renderPlanCard(response) {
   const confirm = document.createElement("button");
   confirm.type = "button";
   confirm.className = "button button-primary";
+  if (plan.experiment_type === "custom_openfoam") {
+    confirm.textContent = "上传并审核算例归档";
+    preview.textContent = "自定义 OpenFOAM 实验需要上传经过审查的 tar.gz 算例归档；模型不会生成或执行 OpenFOAM 字典与命令。";
+    confirm.addEventListener("click", () => {
+      const name = byId("custom-experiment-name");
+      if (name) name.value = plan.experiment_name || "Custom OpenFOAM Study";
+      const output = byId("custom-case-result");
+      if (output) output.textContent = "请选择与当前实验计划对应的算例归档，并先执行安全校验。";
+      openDialog("custom-case-drawer");
+    });
+    card.append(preview, confirm);
+    const taskHost = byId("task-card-host");
+    if (stream && taskHost) stream.insertBefore(card, taskHost);
+    else (stream || byId("experiment-plan-review") || document.body).append(card);
+    return;
+  }
   confirm.textContent = "确认并提交";
   confirm.addEventListener("click", () => confirmAndSubmitPlan(confirm));
   card.append(preview, confirm);
@@ -462,6 +478,11 @@ async function confirmAndSubmitPlan(button) {
   }
   if (confirmationActive || !currentProject || !currentPlan || !selectedTarget) {
     if (!selectedTarget) renderError("提交", new Error("请先选择可用的执行平台"));
+    return;
+  }
+  if (currentPlan.plan.experiment_type === "custom_openfoam") {
+    setStatus("自定义 OpenFOAM 计划必须上传并审核算例归档，不能使用内置编译器直接提交。");
+    openDialog("custom-case-drawer");
     return;
   }
   confirmationActive = true;
