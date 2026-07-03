@@ -248,6 +248,18 @@ def test_worker_execute_and_collect_persist_credibility_outputs(tmp_path) -> Non
 
     service = WorkerJobService(tmp_path, launcher=FakeLauncher())
     service.submit("benchmark-001", pipe_spec())
+    plan_path = tmp_path / "jobs/benchmark-001/case/fluidScientist/plan.json"
+    plan_path.parent.mkdir()
+    plan_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "experiment_type": "laminar_pipe",
+                "base_case": {"density_kg_m3": 1000.0},
+            }
+        ),
+        encoding="utf-8",
+    )
 
     completed = service.execute(
         "benchmark-001", runner=OpenFOAM13JobRunner(runner=CredibleRunner())

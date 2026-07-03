@@ -19,6 +19,8 @@ The first generated cylinder job failed on the workstation:
 
 A cavity submission then completed remotely while the API response was lost. The original timestamp-based retry could create another job. The planned-job timestamp now comes from the immutable Gate 2 approval, so retries reuse one job ID (`db8ff04`).
 
+During the structured-result deployment, retained pipe-job collection exposed a metadata-contract mismatch: deterministic archives store pipe inputs under `base_case`, while the new worker read `case`. A regression test reproduced the exact `KeyError`, the worker was corrected to consume `base_case`, and collection was replayed successfully against the original remote job.
+
 ## Successful real jobs
 
 ### Cylinder flow Re=100
@@ -32,6 +34,7 @@ A cavity submission then completed remotely while the API response was lost. The
 - Final residuals: `Ux=5.1214e-6`, `Uy=4.6045e-6`, `p=4.6614e-4`
 - Time directories: `0` through `0.02` at `0.001` intervals
 - ParaView: `20260702-150243-cylinder-flow-at-re-100-9e589694.foam`
+- Structured observables: `Cd=2.1947954497`, `Cl=-2.0669060683e-5`, `Cm=1.7019698341e-7`
 
 ### Laminar pipe
 
@@ -44,6 +47,7 @@ A cavity submission then completed remotely while the API response was lost. The
 - Final residuals: `Ux=5.3973e-4`, `Uy=7.8600e-4`, `Uz=2.7914e-4`, `p=8.4566e-4`
 - Time directories: `0`, `2000`
 - ParaView: `20260702-150436-laminar-pipe-flow-analysis-c4b2c0e3.foam`
+- Structured surface metrics: pressure drop `0.2823881934 Pa`; inlet mass flow `1.7333561095e-4 kg/s`; outlet mass flow `-1.7334786763e-4 kg/s`
 
 ### Lid-driven cavity
 
@@ -56,11 +60,16 @@ A cavity submission then completed remotely while the API response was lost. The
 - Final residuals: `Ux=1.3110e-12`, `Uy=1.7222e-12`, `p=9.0138e-4`
 - Time directories: `0` through `0.01`
 - ParaView: `20260702-150611-lid-driven-cavity-flow-fa9b741a.foam`
+- Structured probes: three final velocity vectors and three final pressure values were collected from the original remote case.
+
+## Evidence-bound GLM result analysis
+
+After deploying the updated worker and restarting the API, `glm-5.1` analyzed the structured payloads for all three retained jobs. Every returned claim passed the server-side exact-evidence-key allow-list. The analyses preserved deterministic values and explicitly identified the smoke-run limitations: the 30-cell pipe and 64-cell cavity meshes are too coarse for physical credibility, and the cylinder mesh has elevated non-orthogonality.
 
 ## Explicitly not yet accepted
 
 - These short cases prove mesh generation, solver startup/completion, collection, and post-processing availability; they do not establish grid independence, long-time cylinder shedding statistics, or publication-grade physical credibility.
-- The worker update in `8c3324d` adds structured pipe metrics, final `Cd/Cl`, and cavity probe extraction. Local tests pass, but remote deployment was blocked by the desktop approval quota and remains pending.
-- The evidence-bound Results Analyst supports OpenAI, GLM, and DeepSeek locally. Real GLM analysis against the updated remote observable payload remains pending worker deployment and API restart.
+- The worker update in `8c3324d` and the retained-artifact compatibility correction are deployed and accepted on the workstation.
+- Real GLM result analysis is accepted for the three retained smoke jobs. This validates evidence binding, not publication-grade physical conclusions.
 - No real OpenAI or DeepSeek credential was supplied; those providers remain contract-tested but not real-provider accepted.
 - The HPC data/login/compute-node path remains unconfigured and unaccepted.

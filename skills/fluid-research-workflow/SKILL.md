@@ -18,7 +18,7 @@ Treat solver completion, numerical convergence, physical credibility, and genera
 5. Ask OpenAI, GLM, or DeepSeek for one strict provider-neutral `ExperimentPlan`. Apply local schema validation before accepting any provider output.
 6. Design a mandatory `Pilot` before a batch. Route `laminar_pipe`, `cylinder_flow`, and `lid_driven_cavity` through deterministic compilers; route `custom_openfoam` to reviewed archive upload.
 7. Compile and preview the case before Gate 2. Bind the plan ID, plan version, and archive digest to the approval; submit the exact approved bytes without recompiling.
-8. Select the approved execution target. Use typed Slurm commands on HPC or the fixed `fluid-worker` protocol on a direct workstation; never emit or run arbitrary shell.
+8. Select the approved execution target. Use typed Slurm commands on HPC or the fixed `fluid-worker` protocol on a direct workstation; never emit or run arbitrary shell. After a worker upgrade, replay collection against an existing job from every supported experiment type before accepting the deployment.
 9. Perform deterministic validation: residuals plus monitored quantities, conservation, mesh independence/GCI, benchmark agreement, and model sensitivity.
 10. Collect deterministic metrics, force coefficients, and velocity and pressure probes before Results Analyst interpretation. Require evidence-linked claims with exact evidence keys; the model must never alter deterministic values. Label observation, inference, extrapolation, or hypothesis.
 11. Have an independent Scientific Reviewer check failures, uncertainty, and scope. Obtain Gate 3 human approval before the final report.

@@ -20,6 +20,7 @@ Use the data node for transfer, download, compilation, checksums, and artifact p
 - Read the SSH host fingerprint without accepting it. Require the researcher to compare it with the workstation's local host-key fingerprint before adding `known_hosts`.
 - Run direct workstation jobs through `fluid-worker doctor/submit/status/cancel/collect`. Do not route them through Slurm and do not pass free-form remote shell.
 - Require protocol-version and command capability checks before submission. Preserve deterministic job IDs so retries query the same job.
+- Treat worker upgrades as schema migrations. Run `doctor`, then replay `collect` against retained jobs from each supported experiment type. Verify generated metadata keys (for example `base_case`) against the deterministic compiler contract instead of assuming a new job is representative of old artifacts.
 
 ### Custom OpenFOAM execution
 

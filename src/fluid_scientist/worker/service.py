@@ -358,7 +358,7 @@ class WorkerJobService:
         if plan_path.is_file():
             plan = json.loads(plan_path.read_text(encoding="utf-8"))
             if plan.get("experiment_type") == "laminar_pipe":
-                density = float(plan["case"]["density_kg_m3"])
+                density = float(plan["base_case"]["density_kg_m3"])
                 with contextlib.suppress(RuntimeError, OSError, ValueError, KeyError):
                     metrics = extract_surface_metrics(case_root, density_kg_m3=density)
                     solver.update(asdict(metrics))
