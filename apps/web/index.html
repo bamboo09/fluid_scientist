@@ -133,7 +133,7 @@
     <dialog id="custom-case-drawer" class="settings-dialog drawer-dialog" aria-labelledby="custom-case-title">
       <form method="dialog" class="dialog-shell">
         <header><div><p class="card-kicker">高级路径</p><h2 id="custom-case-title">提交自定义 OpenFOAM 算例</h2></div><button class="icon-button" value="cancel" aria-label="关闭自定义算例">×</button></header>
-        <p>上传以算例根目录打包的 <code>tar.gz</code> 或 <code>tgz</code>。通过本地安全校验后才可提交。</p>
+        <p>模型生成的是实验计划，不能直接作为可执行算例。这里需要选择一个已准备好的 OpenFOAM Case 文件夹压缩包（<code>.tar.gz</code> 或 <code>.tgz</code>）；通过安全校验后才可提交。</p>
         <label class="field-label" for="custom-experiment-name">实验名称</label><input id="custom-experiment-name" type="text" value="Cylinder Flow Study" maxlength="80">
         <label class="file-field" for="custom-case-file"><span>算例归档</span><input id="custom-case-file" type="file" accept=".tar.gz,.tgz,application/gzip"><small>选择文件后先执行安全校验</small></label>
         <output id="custom-case-result" class="dialog-state">尚未校验</output>

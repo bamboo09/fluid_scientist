@@ -168,6 +168,8 @@ code { font-family: var(--mono); font-size: .88em; }
 .prompt-examples button:hover { border-color: var(--teal); background: var(--teal-pale); }
 
 .work-card {
+  min-width: 0;
+  max-width: 100%;
   margin-left: 52px;
   padding: clamp(20px, 4vw, 30px);
   border: 1px solid var(--line-strong);
@@ -252,7 +254,21 @@ code { font-family: var(--mono); font-size: .88em; }
 .work-card.plan-card > .plan-objective { font: 18px/1.65 var(--serif); }
 .work-card.plan-card > section:not(.plan-essentials) { display: inline-block; width: calc(33.333% - 12px); margin: 8px 8px 8px 0; vertical-align: top; }
 .work-card.plan-card > section ul { margin: 0; padding-left: 17px; color: var(--muted); font-size: 11px; }
-.work-card.plan-card > details pre { max-height: 320px; padding: 14px; overflow: auto; border: 1px solid var(--line); background: var(--paper-deep); font: 9px/1.6 var(--mono); }
+.work-card.plan-card > details { min-width: 0; max-width: 100%; overflow: hidden; }
+.work-card.plan-card > details pre {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 100%;
+  max-height: 320px;
+  padding: 14px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: pre-wrap;
+  border: 1px solid var(--line);
+  background: var(--paper-deep);
+  font: 9px/1.6 var(--mono);
+}
 .work-card.plan-card > .button.button-primary { display: block; margin-left: auto; }
 
 .card-actions, .dialog-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }

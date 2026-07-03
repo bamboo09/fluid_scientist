@@ -281,7 +281,7 @@ function renderPlanCard(response) {
   confirm.className = "button button-primary";
   if (plan.experiment_type === "custom_openfoam") {
     confirm.textContent = "上传并审核算例归档";
-    preview.textContent = "自定义 OpenFOAM 实验需要上传经过审查的 tar.gz 算例归档；模型不会生成或执行 OpenFOAM 字典与命令。";
+    preview.textContent = "模型生成的是实验计划，不能直接作为可执行算例。自定义 OpenFOAM 实验需要一个已准备好的 OpenFOAM Case 文件夹，并将它压缩为 .tar.gz 后上传审核；模型不会生成或执行任意 OpenFOAM 字典与命令。";
     confirm.addEventListener("click", () => {
       const name = byId("custom-experiment-name");
       if (name) name.value = plan.experiment_name || "Custom OpenFOAM Study";

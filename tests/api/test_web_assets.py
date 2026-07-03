@@ -19,6 +19,12 @@ def function_source(script: str, function_name: str) -> str:
     return script[start:end]
 
 
+def function_css_rule(css: str, selector: str) -> str:
+    start = css.index(f"{selector} {{")
+    end = css.index("}", start) + 1
+    return css[start:end]
+
+
 def test_workbench_is_a_utf8_conversation_first_interface() -> None:
     assets = {
         path: read_asset(path)
@@ -295,6 +301,33 @@ def test_custom_openfoam_plan_routes_to_reviewed_archive_upload() -> None:
     )
     compile_call = submit_source.index("/compile`")
     assert custom_guard < compile_call
+
+
+def test_expanded_plan_parameters_cannot_overlap_the_context_rail() -> None:
+    css = read_asset("apps/web/styles.css")
+
+    assert ".work-card {" in css
+    assert "min-width: 0;" in function_css_rule(css, ".work-card")
+    details_rule = function_css_rule(css, ".work-card.plan-card > details")
+    assert "max-width: 100%;" in details_rule
+    assert "overflow: hidden;" in details_rule
+    pre_rule = function_css_rule(css, ".work-card.plan-card > details pre")
+    for declaration in (
+        "width: 100%;",
+        "max-width: 100%;",
+        "box-sizing: border-box;",
+        "white-space: pre-wrap;",
+        "overflow-wrap: anywhere;",
+    ):
+        assert declaration in pre_rule
+
+
+def test_custom_plan_explains_why_an_openfoam_case_file_is_required() -> None:
+    assets = read_asset("apps/web/index.html") + read_asset("apps/web/app.js")
+
+    assert "OpenFOAM Case 文件夹" in assets
+    assert "模型生成的是实验计划" in assets
+    assert "不能直接作为可执行算例" in assets
 
 
 def test_planning_payload_omits_an_unselected_target() -> None:
