@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from pydantic import ValidationError
+from sqlalchemy import event
 
 from fluid_scientist.adapters.sql_repository import (
     ConcurrentUpdateError,
@@ -161,6 +162,41 @@ def test_operation_update_increments_version_and_rejects_stale_write(tmp_path) -
         repo.update_operation(updated_record, expected_version=1)
 
 
+def test_operation_update_uses_version_in_atomic_update_predicate(tmp_path) -> None:
+    repo = repository(tmp_path)
+    repo.save_snapshot("project-1", '{}', expected_version=0)
+    original = operation()
+    repo.create_operation(original)
+    updated_record = original.model_copy(
+        update={"updated_at": original.updated_at + timedelta(seconds=1)}
+    )
+    statements = []
+    event.listen(
+        repo._engine,
+        "before_cursor_execute",
+        lambda _conn, _cursor, statement, _parameters, _context, _executemany: (
+            statements.append(statement)
+        ),
+    )
+
+    repo.update_operation(updated_record, expected_version=1)
+
+    update_sql = next(
+        statement
+        for statement in statements
+        if statement.lstrip().upper().startswith("UPDATE OPERATIONS")
+    )
+    where_clause = update_sql.upper().split(" WHERE ", maxsplit=1)[1]
+    assert "OPERATIONS.VERSION" in where_clause
+
+
+def test_operation_update_rejects_nonexistent_operation(tmp_path) -> None:
+    repo = repository(tmp_path)
+
+    with pytest.raises(ConcurrentUpdateError, match="does not exist"):
+        repo.update_operation(operation(), expected_version=1)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -246,4 +282,26 @@ def test_load_operation_strictly_validates_persisted_json(tmp_path) -> None:
         )
 
     with pytest.raises(ValidationError, match="unexpected"):
+        repo.load_operation("operation-1")
+
+
+def test_load_operation_rejects_persisted_type_coercion(tmp_path) -> None:
+    database_path = tmp_path / "workflow.db"
+    repo = repository(tmp_path)
+    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.create_operation(operation())
+    with sqlite3.connect(database_path) as connection:
+        payload = json.loads(
+            connection.execute(
+                "SELECT record_json FROM operations WHERE operation_id = ?",
+                ("operation-1",),
+            ).fetchone()[0]
+        )
+        payload["cancel_requested"] = "false"
+        connection.execute(
+            "UPDATE operations SET record_json = ? WHERE operation_id = ?",
+            (json.dumps(payload), "operation-1"),
+        )
+
+    with pytest.raises(ValidationError, match="cancel_requested"):
         repo.load_operation("operation-1")

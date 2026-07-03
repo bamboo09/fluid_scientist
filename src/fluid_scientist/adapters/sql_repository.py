@@ -3,7 +3,7 @@
 import json
 from datetime import datetime
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, update
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -166,6 +166,25 @@ class SQLWorkflowRepository:
         self, record: OperationRecord, expected_version: int
     ) -> StoredOperation:
         with self._sessions.begin() as session:
+            new_version = expected_version + 1
+            result = session.execute(
+                update(OperationRow)
+                .where(
+                    OperationRow.operation_id == record.operation_id,
+                    OperationRow.version == expected_version,
+                    OperationRow.kind == record.kind.value,
+                    OperationRow.project_id == record.project_id,
+                    OperationRow.input_digest == record.input_digest,
+                )
+                .values(
+                    version=new_version,
+                    record_json=record.model_dump_json(),
+                    updated_at=record.updated_at.isoformat(),
+                )
+            )
+            if result.rowcount == 1:
+                return StoredOperation(record=record, version=new_version)
+
             row = session.get(OperationRow, record.operation_id)
             if row is None:
                 raise ConcurrentUpdateError(
@@ -185,10 +204,9 @@ class SQLWorkflowRepository:
                 raise OperationConflict(
                     f"operation {record.operation_id} identity fields are immutable"
                 )
-            row.version += 1
-            row.record_json = record.model_dump_json()
-            row.updated_at = record.updated_at.isoformat()
-            return StoredOperation(record=record, version=row.version)
+            raise ConcurrentUpdateError(
+                f"operation {record.operation_id} could not be updated atomically"
+            )
 
     def list_interrupted_operations(self) -> tuple[StoredOperation, ...]:
         with self._sessions() as session:
