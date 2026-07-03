@@ -178,6 +178,7 @@ class SQLWorkflowRepository:
                     OperationRow.kind == record.kind.value,
                     OperationRow.project_id == record.project_id,
                     OperationRow.input_digest == record.input_digest,
+                    OperationRow.created_at == record.created_at.isoformat(),
                 )
                 .values(
                     version=new_version,
@@ -206,6 +207,10 @@ class SQLWorkflowRepository:
             ):
                 raise OperationConflict(
                     f"operation {record.operation_id} identity fields are immutable"
+                )
+            if row.created_at != record.created_at.isoformat():
+                raise OperationConflict(
+                    f"operation {record.operation_id} created_at is immutable"
                 )
             raise ConcurrentUpdateError(
                 f"operation {record.operation_id} could not be updated atomically"

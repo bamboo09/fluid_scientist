@@ -276,6 +276,23 @@ def test_operation_update_rejects_identity_changes(tmp_path, field, value) -> No
         repo.update_operation(changed, expected_version=1)
 
 
+def test_operation_update_rejects_created_at_change_without_corrupting_row(
+    tmp_path,
+) -> None:
+    repo = repository(tmp_path)
+    repo.save_snapshot("project-1", '{}', expected_version=0)
+    original = operation()
+    stored = repo.create_operation(original)
+    changed = original.model_copy(
+        update={"created_at": original.created_at - timedelta(days=1)}
+    )
+
+    with pytest.raises(OperationConflict, match="created_at"):
+        repo.update_operation(changed, expected_version=1)
+
+    assert repo.load_operation(original.operation_id) == stored
+
+
 def test_find_operation_returns_exact_match_or_none(tmp_path) -> None:
     repo = repository(tmp_path)
     repo.save_snapshot("project-1", '{}', expected_version=0)
