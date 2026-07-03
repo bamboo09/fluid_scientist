@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 
 from sqlalchemy import create_engine, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -43,6 +44,10 @@ class ExperimentArtifactConflict(RuntimeError):
 
 class OperationConflict(RuntimeError):
     """Raised when an operation's immutable identity conflicts."""
+
+
+class OperationIntegrityError(RuntimeError):
+    """Raised when an operation row disagrees with its persisted record."""
 
 
 class SQLWorkflowRepository:
@@ -109,40 +114,38 @@ class SQLWorkflowRepository:
             return project_id
 
     def create_operation(self, record: OperationRecord) -> StoredOperation:
-        with self._sessions.begin() as session:
-            operation_row = session.get(OperationRow, record.operation_id)
-            if operation_row is not None:
-                existing = self._stored_operation(operation_row)
-                if existing.record != record:
-                    raise OperationConflict(
-                        f"operation {record.operation_id} already exists with different content"
+        try:
+            with self._sessions.begin() as session:
+                operation_row = session.get(OperationRow, record.operation_id)
+                if operation_row is not None:
+                    return self._resolve_operation_id_replay(operation_row, record)
+
+                self._require_project(session, record.project_id)
+                request_row = session.scalar(
+                    select(OperationRow).where(
+                        OperationRow.kind == record.kind.value,
+                        OperationRow.project_id == record.project_id,
+                        OperationRow.input_digest == record.input_digest,
                     )
-                return existing
-
-            self._require_project(session, record.project_id)
-            request_row = session.scalar(
-                select(OperationRow).where(
-                    OperationRow.kind == record.kind.value,
-                    OperationRow.project_id == record.project_id,
-                    OperationRow.input_digest == record.input_digest,
                 )
-            )
-            if request_row is not None:
-                return self._stored_operation(request_row)
+                if request_row is not None:
+                    return self._stored_operation(request_row)
 
-            session.add(
-                OperationRow(
-                    operation_id=record.operation_id,
-                    kind=record.kind.value,
-                    project_id=record.project_id,
-                    input_digest=record.input_digest,
-                    version=1,
-                    record_json=record.model_dump_json(),
-                    created_at=record.created_at.isoformat(),
-                    updated_at=record.updated_at.isoformat(),
+                session.add(
+                    OperationRow(
+                        operation_id=record.operation_id,
+                        kind=record.kind.value,
+                        project_id=record.project_id,
+                        input_digest=record.input_digest,
+                        version=1,
+                        record_json=record.model_dump_json(),
+                        created_at=record.created_at.isoformat(),
+                        updated_at=record.updated_at.isoformat(),
+                    )
                 )
-            )
-            return StoredOperation(record=record, version=1)
+                return StoredOperation(record=record, version=1)
+        except IntegrityError as error:
+            return self._resolve_operation_create_race(record, error)
 
     def load_operation(self, operation_id: str) -> StoredOperation | None:
         with self._sessions() as session:
@@ -163,7 +166,7 @@ class SQLWorkflowRepository:
             return None if row is None else self._stored_operation(row)
 
     def update_operation(
-        self, record: OperationRecord, expected_version: int
+        self, record: OperationRecord, *, expected_version: int
     ) -> StoredOperation:
         with self._sessions.begin() as session:
             new_version = expected_version + 1
@@ -409,7 +412,66 @@ class SQLWorkflowRepository:
 
     @staticmethod
     def _stored_operation(row: OperationRow) -> StoredOperation:
-        return StoredOperation(
-            record=OperationRecord.model_validate_json(row.record_json),
-            version=row.version,
-        )
+        record = OperationRecord.model_validate_json(row.record_json)
+        try:
+            row_created_at = datetime.fromisoformat(row.created_at)
+            row_updated_at = datetime.fromisoformat(row.updated_at)
+        except ValueError as error:
+            raise OperationIntegrityError(
+                f"operation {row.operation_id} has an invalid row timestamp"
+            ) from error
+        authoritative_values = {
+            "operation_id": row.operation_id,
+            "kind": row.kind,
+            "project_id": row.project_id,
+            "input_digest": row.input_digest,
+            "created_at": row_created_at,
+            "updated_at": row_updated_at,
+        }
+        record_values = {
+            "operation_id": record.operation_id,
+            "kind": record.kind.value,
+            "project_id": record.project_id,
+            "input_digest": record.input_digest,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+        }
+        for field, authoritative_value in authoritative_values.items():
+            if record_values[field] != authoritative_value:
+                raise OperationIntegrityError(
+                    f"operation {row.operation_id} {field} mismatch between row and record_json"
+                )
+        return StoredOperation(record=record, version=row.version)
+
+    def _resolve_operation_create_race(
+        self, record: OperationRecord, error: IntegrityError
+    ) -> StoredOperation:
+        with self._sessions() as session:
+            operation_row = session.get(OperationRow, record.operation_id)
+            if operation_row is not None:
+                return self._resolve_operation_id_replay(operation_row, record)
+            request_row = session.scalar(
+                select(OperationRow).where(
+                    OperationRow.kind == record.kind.value,
+                    OperationRow.project_id == record.project_id,
+                    OperationRow.input_digest == record.input_digest,
+                )
+            )
+            if request_row is not None:
+                return self._stored_operation(request_row)
+        raise OperationConflict(
+            f"operation {record.operation_id} insert conflicted but no winner was found"
+        ) from error
+
+    def _resolve_operation_id_replay(
+        self, row: OperationRow, record: OperationRecord
+    ) -> StoredOperation:
+        if (
+            row.kind != record.kind.value
+            or row.project_id != record.project_id
+            or row.input_digest != record.input_digest
+        ):
+            raise OperationConflict(
+                f"operation {record.operation_id} already exists with different identity"
+            )
+        return self._stored_operation(row)

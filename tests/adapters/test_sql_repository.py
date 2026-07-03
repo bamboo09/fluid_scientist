@@ -1,6 +1,9 @@
 import json
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
+from inspect import Parameter, signature
+from threading import Barrier
 
 import pytest
 from pydantic import ValidationError
@@ -10,6 +13,7 @@ from fluid_scientist.adapters.sql_repository import (
     ConcurrentUpdateError,
     ExternalJobConflict,
     OperationConflict,
+    OperationIntegrityError,
     SQLWorkflowRepository,
 )
 from fluid_scientist.domain.models import Approval, AuditEvent
@@ -19,6 +23,7 @@ from fluid_scientist.operations.models import (
     OperationStage,
     OperationState,
 )
+from fluid_scientist.ports import WorkflowRepository
 
 
 def repository(tmp_path) -> SQLWorkflowRepository:
@@ -131,6 +136,48 @@ def test_operation_create_is_idempotent_by_request_identity(tmp_path) -> None:
     assert repo.load_operation("operation-2") is None
 
 
+def test_concurrent_operation_create_returns_unique_constraint_winner(tmp_path) -> None:
+    repo = repository(tmp_path)
+    repo.save_snapshot("project-1", '{}', expected_version=0)
+    insert_barrier = Barrier(2)
+
+    def synchronize_operation_inserts(
+        _conn, _cursor, statement, _parameters, _context, _executemany
+    ) -> None:
+        if statement.lstrip().upper().startswith("INSERT INTO OPERATIONS"):
+            insert_barrier.wait(timeout=5)
+
+    event.listen(repo._engine, "before_cursor_execute", synchronize_operation_inserts)
+    requests = [operation("operation-1"), operation("operation-2")]
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(repo.create_operation, record) for record in requests]
+        results = [future.result(timeout=10) for future in futures]
+
+    assert results[0] == results[1]
+    assert results[0].record.operation_id in {"operation-1", "operation-2"}
+    stored = [repo.load_operation(record.operation_id) for record in requests]
+    assert sum(item is not None for item in stored) == 1
+
+
+def test_same_operation_id_replay_returns_advanced_record(tmp_path) -> None:
+    repo = repository(tmp_path)
+    repo.save_snapshot("project-1", '{}', expected_version=0)
+    original = operation()
+    repo.create_operation(original)
+    running = original.model_copy(
+        update={
+            "state": OperationState.RUNNING,
+            "updated_at": original.updated_at + timedelta(seconds=1),
+        }
+    )
+    advanced = repo.update_operation(running, expected_version=1)
+
+    replayed = repo.create_operation(original)
+
+    assert replayed == advanced
+
+
 def test_operation_id_collision_rejects_different_content(tmp_path) -> None:
     repo = repository(tmp_path)
     repo.save_snapshot("project-1", '{}', expected_version=0)
@@ -188,6 +235,18 @@ def test_operation_update_uses_version_in_atomic_update_predicate(tmp_path) -> N
     )
     where_clause = update_sql.upper().split(" WHERE ", maxsplit=1)[1]
     assert "OPERATIONS.VERSION" in where_clause
+
+
+def test_operation_update_expected_version_is_keyword_only() -> None:
+    implementation_parameter = signature(
+        SQLWorkflowRepository.update_operation
+    ).parameters["expected_version"]
+    protocol_parameter = signature(WorkflowRepository.update_operation).parameters[
+        "expected_version"
+    ]
+
+    assert implementation_parameter.kind is Parameter.KEYWORD_ONLY
+    assert protocol_parameter.kind is Parameter.KEYWORD_ONLY
 
 
 def test_operation_update_rejects_nonexistent_operation(tmp_path) -> None:
@@ -304,4 +363,37 @@ def test_load_operation_rejects_persisted_type_coercion(tmp_path) -> None:
         )
 
     with pytest.raises(ValidationError, match="cancel_requested"):
+        repo.load_operation("operation-1")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("operation_id", "operation-corrupt"),
+        ("kind", "case_generation"),
+        ("project_id", "project-corrupt"),
+        ("input_digest", f"sha256:{'b' * 64}"),
+        ("created_at", "2026-06-30T00:00:00Z"),
+        ("updated_at", "2026-07-02T00:00:00Z"),
+    ],
+)
+def test_load_operation_rejects_json_row_mismatch(tmp_path, field, value) -> None:
+    database_path = tmp_path / "workflow.db"
+    repo = repository(tmp_path)
+    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.create_operation(operation())
+    with sqlite3.connect(database_path) as connection:
+        payload = json.loads(
+            connection.execute(
+                "SELECT record_json FROM operations WHERE operation_id = ?",
+                ("operation-1",),
+            ).fetchone()[0]
+        )
+        payload[field] = value
+        connection.execute(
+            "UPDATE operations SET record_json = ? WHERE operation_id = ?",
+            (json.dumps(payload), "operation-1"),
+        )
+
+    with pytest.raises(OperationIntegrityError, match=f"{field}.*mismatch"):
         repo.load_operation("operation-1")
