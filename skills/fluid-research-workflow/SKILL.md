@@ -15,7 +15,7 @@ Treat solver completion, numerical convergence, physical credibility, and genera
 2. Obtain Gate 1 human approval before evidence-driven planning.
 3. Build an `EvidencePackage` with source locators. Use reviewed evidence for high-risk choices.
 4. Compute units, dimensionless numbers, parameter bounds, and rules with deterministic code. Never ask an LLM to supply numerical truth.
-5. Ask OpenAI, GLM, or DeepSeek for one strict provider-neutral `ExperimentPlan`. Apply local schema validation before accepting any provider output.
+5. Ask OpenAI, GLM, or DeepSeek for one strict provider-neutral `ExperimentPlan`. Apply local schema validation before accepting any provider output. On a schema-only failure, return safe field paths and validation messages to the provider for a bounded correction attempt; never include rejected raw values or relax the schema.
 6. Design a mandatory `Pilot` before a batch. Route `laminar_pipe`, `cylinder_flow`, and `lid_driven_cavity` through deterministic compilers; route `custom_openfoam` to reviewed archive upload.
 7. Compile and preview the case before Gate 2. Bind the plan ID, plan version, and archive digest to the approval; submit the exact approved bytes without recompiling.
 8. Select the approved execution target. Use typed Slurm commands on HPC or the fixed `fluid-worker` protocol on a direct workstation; never emit or run arbitrary shell. Classify process timeouts and launch failures as remote-execution errors. Retry a compiled workstation submission at most once with the same deterministic job ID, plan version, and digest. After a worker upgrade, replay collection against an existing job from every supported experiment type before accepting the deployment.

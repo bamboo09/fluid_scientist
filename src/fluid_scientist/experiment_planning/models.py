@@ -262,6 +262,18 @@ class LidDrivenCavityCase(StrictModel):
     end_time_s: float = Field(gt=0.0, le=1_000_000.0)
 
 
+def _cavity_coupled_sweep_updates(
+    case: StrictModel, parameter: str, value: float
+) -> dict[str, float | int]:
+    if not isinstance(case, LidDrivenCavityCase):
+        raise TypeError("cavity sweep coupling requires LidDrivenCavityCase")
+    if parameter == "cells_per_side":
+        if not value.is_integer():
+            raise ValueError("cells_per_side sweep values must be whole numbers")
+        return {"cells_per_side": int(value)}
+    return {}
+
+
 class CavityExperimentPlan(PlanBase):
     experiment_type: Literal["lid_driven_cavity"]
     requested_outputs: JsonTuple[CavityOutputValue] = Field(min_length=1)
@@ -277,8 +289,10 @@ class CavityExperimentPlan(PlanBase):
                 "side_length_m",
                 "lid_velocity_m_s",
                 "kinematic_viscosity_m2_s",
+                "cells_per_side",
             },
             label="lid-driven cavity",
+            coupled_updates=_cavity_coupled_sweep_updates,
         )
         return self
 

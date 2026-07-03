@@ -607,7 +607,7 @@ def create_app(
         except ProviderOutputError as error:
             raise HTTPException(
                 status_code=422,
-                detail="Provider returned an invalid experiment plan",
+                detail="模型生成的实验计划未通过严格参数校验；请重试或补充研究条件。",
             ) from error
         except ProviderRequestError as error:
             raise HTTPException(

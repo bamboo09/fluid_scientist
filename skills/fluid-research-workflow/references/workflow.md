@@ -38,7 +38,9 @@ Use the data node for transfer, download, compilation, checksums, and artifact p
 
 Support only the first-batch providers OpenAI, GLM, and DeepSeek. Accept arbitrary model IDs, but keep each interactively supplied API key only in server-process memory. Never echo a key, place it in browser storage, write it to project files, or include it in logs and Skills. Require re-entry after service restart.
 
-Use native structured parsing for OpenAI. Request JSON from GLM and DeepSeek, then perform the same strict local schema validation. Treat authentication, model-not-found, transport, empty-output, JSON, and schema failures as different typed errors. Do not retry authentication, model-not-found, or invalid-plan failures.
+Use native structured parsing for OpenAI. Request JSON from GLM and DeepSeek, then perform the same strict local schema validation. Treat authentication, model-not-found, transport, empty-output, JSON, and schema failures as different typed errors. Do not retry authentication, model-not-found, malformed-JSON, or capability-violation failures.
+
+For GLM and DeepSeek schema failures, permit only bounded correction retries using sanitized validation locations, messages, and error types. Never echo rejected field values back into logs or user-facing errors. Mesh-independence plans may sweep bounded integer resolution fields such as cavity `cells_per_side`; revalidate every sweep point through the case contract.
 
 ### Provider-neutral planning and deterministic compilation
 

@@ -835,12 +835,17 @@ def test_non_text_content_is_malformed_and_not_retried() -> None:
     assert len(client.completions.calls) == 1
 
 
-def test_schema_invalid_json_is_not_retried() -> None:
-    invalid = valid_pipe_plan() | {"unexpected": "field"}
+def test_schema_invalid_json_is_retried_with_safe_validation_feedback() -> None:
+    invalid = valid_pipe_plan() | {"unexpected": "never-print-this"}
     client = FakeClient([json.dumps(invalid), json.dumps(valid_pipe_plan())])
-    adapter = OpenAICompatiblePlanProvider(settings(), client=client)
+    adapter = OpenAICompatiblePlanProvider(settings(max_retries=1), client=client)
 
-    with pytest.raises(ProviderSchemaError, match="schema"):
-        adapter.design_experiment("Validate pressure loss", capabilities=("laminar_pipe",))
+    plan = adapter.design_experiment(
+        "Validate pressure loss", capabilities=("laminar_pipe",)
+    )
 
-    assert len(client.completions.calls) == 1
+    assert plan.root.experiment_type == "laminar_pipe"
+    assert len(client.completions.calls) == 2
+    retry_messages = json.dumps(client.completions.calls[1]["messages"])
+    assert "unexpected" in retry_messages
+    assert "never-print-this" not in retry_messages

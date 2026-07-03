@@ -424,6 +424,19 @@ def test_cavity_viscosity_sweep_respects_case_bounds() -> None:
         ExperimentPlan.model_validate(payload)
 
 
+def test_cavity_grid_independence_accepts_cells_per_side_sweep() -> None:
+    payload = cavity_plan() | {
+        "parameter_sweeps": (
+            {"parameter": "cells_per_side", "values": (32.0, 64.0, 128.0)},
+        )
+    }
+
+    plan = ExperimentPlan.model_validate(payload).root
+
+    assert plan.parameter_sweeps[0].parameter == "cells_per_side"
+    assert plan.parameter_sweeps[0].values == (32.0, 64.0, 128.0)
+
+
 def test_cavity_requires_positive_geometry_and_resolution() -> None:
     payload = cavity_plan()
     payload["case"] = {**payload["case"], "cells_per_side": 7}  # type: ignore[arg-type]

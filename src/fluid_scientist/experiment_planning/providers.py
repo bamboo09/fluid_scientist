@@ -79,6 +79,23 @@ class ProviderMalformedOutputError(ProviderOutputError):
 class ProviderSchemaError(ProviderOutputError):
     """The provider JSON did not satisfy the strict plan schema."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider: str,
+        model: str,
+        request_id: str | None = None,
+        issues: tuple[str, ...] = (),
+    ) -> None:
+        self.issues = issues
+        super().__init__(
+            message,
+            provider=provider,
+            model=model,
+            request_id=request_id,
+        )
+
 
 class _PlanProviderSupport:
     """Shared safe error, request-context, and capability mechanics."""
@@ -186,12 +203,17 @@ class OpenAICompatiblePlanProvider(_PlanProviderSupport):
     def _design_experiment(
         self, question: str, *, capabilities: tuple[str, ...]
     ) -> ExperimentPlan:
+        validation_feedback: tuple[str, ...] = ()
         for attempt in range(self._settings.max_retries + 1):
             request_id: str | None = None
             try:
                 response = self._client.chat.completions.create(
                     model=self._settings.model,
-                    messages=self._messages(question, capabilities),
+                    messages=self._messages(
+                        question,
+                        capabilities,
+                        validation_feedback=validation_feedback,
+                    ),
                     response_format={"type": "json_object"},
                     stream=False,
                     timeout=self._settings.timeout_seconds,
@@ -221,6 +243,10 @@ class OpenAICompatiblePlanProvider(_PlanProviderSupport):
                 )
                 self._last_request_id.set(request_id)
                 return plan
+            except ProviderSchemaError as error:
+                if attempt == self._settings.max_retries:
+                    raise
+                validation_feedback = error.issues
             except AuthenticationError as error:
                 request_id = self._request_id(error)
                 self._last_request_id.set(request_id)
@@ -278,10 +304,17 @@ class OpenAICompatiblePlanProvider(_PlanProviderSupport):
                     "provider returned malformed JSON",
                     request_id=request_id,
                 ) from None
-            raise self._error(
-                ProviderSchemaError,
+            issues = tuple(
+                f"{'.'.join(str(part) for part in item['loc']) or '<root>'}: "
+                f"{item['msg']} [{item['type']}]"[:240]
+                for item in error.errors()[:12]
+            )
+            raise ProviderSchemaError(
                 "provider JSON failed strict plan schema validation",
+                provider=self._settings.provider,
+                model=self._settings.model,
                 request_id=request_id,
+                issues=issues,
             ) from None
 
     @staticmethod
@@ -294,7 +327,10 @@ class OpenAICompatiblePlanProvider(_PlanProviderSupport):
 
     @staticmethod
     def _messages(
-        question: str, capabilities: tuple[str, ...]
+        question: str,
+        capabilities: tuple[str, ...],
+        *,
+        validation_feedback: tuple[str, ...] = (),
     ) -> list[dict[str, str]]:
         schema = json.dumps(
             ExperimentPlan.model_json_schema(), ensure_ascii=False, separators=(",", ":")
@@ -314,6 +350,14 @@ class OpenAICompatiblePlanProvider(_PlanProviderSupport):
             f"Research question: {question}\n"
             "Respond with JSON only."
         )
+        if validation_feedback:
+            feedback_json = json.dumps(
+                list(validation_feedback), ensure_ascii=False, separators=(",", ":")
+            )
+            user += (
+                "\nYour previous response was rejected by strict schema validation. "
+                f"Correct these issues and return the complete plan: {feedback_json}"
+            )
         return [
             {"role": "system", "content": system},
             {"role": "user", "content": user},

@@ -654,7 +654,7 @@ def test_experiment_plan_question_is_strict(question: str) -> None:
         (
             ProviderOutputError("raw secret", provider="glm", model="model"),
             422,
-            "Provider returned an invalid experiment plan",
+            "模型生成的实验计划未通过严格参数校验；请重试或补充研究条件。",
         ),
         (
             ProviderModelNotFoundError(
