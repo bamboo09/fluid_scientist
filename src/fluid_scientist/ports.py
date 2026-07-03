@@ -1,5 +1,6 @@
 """Dependency-inversion ports for models, evidence, HPC, simulation, and persistence."""
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -13,6 +14,7 @@ from fluid_scientist.domain.models import (
     ResearchSpec,
     ValidationResult,
 )
+from fluid_scientist.operations.models import OperationKind, OperationRecord
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,12 @@ class SimulationResult:
 class StoredWorkflow:
     project_id: str
     snapshot: str
+    version: int
+
+
+@dataclass(frozen=True)
+class StoredOperation:
+    record: OperationRecord
     version: int
 
 
@@ -98,6 +106,20 @@ class WorkflowRepository(Protocol):
     def load_snapshot(self, project_id: str) -> StoredWorkflow | None: ...
 
     def latest_project_id(self) -> str | None: ...
+
+    def create_operation(self, record: OperationRecord) -> StoredOperation: ...
+
+    def load_operation(self, operation_id: str) -> StoredOperation | None: ...
+
+    def find_operation(
+        self, kind: OperationKind, project_id: str, input_digest: str
+    ) -> StoredOperation | None: ...
+
+    def update_operation(
+        self, record: OperationRecord, expected_version: int
+    ) -> StoredOperation: ...
+
+    def list_interrupted_operations(self) -> Sequence[StoredOperation]: ...
 
     def bind_external_job(self, project_id: str, case_id: str, job_id: str) -> str: ...
 

@@ -26,6 +26,22 @@ class WorkflowSnapshotRow(Base):
     updated_at: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class OperationRow(Base):
+    __tablename__ = "operations"
+    __table_args__ = (UniqueConstraint("kind", "project_id", "input_digest"),)
+
+    operation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.project_id", ondelete="CASCADE"), index=True
+    )
+    input_digest: Mapped[str] = mapped_column(String(71), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    record_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 class ApprovalRow(Base):
     __tablename__ = "approvals"
 

@@ -15,13 +15,16 @@ from fluid_scientist.db import (
     CompiledExperimentRow,
     ExperimentPlanRow,
     ExternalJobRow,
+    OperationRow,
     ProjectRow,
     WorkflowSnapshotRow,
 )
 from fluid_scientist.domain.models import Approval, AuditEvent
+from fluid_scientist.operations.models import OperationKind, OperationRecord, OperationState
 from fluid_scientist.ports import (
     StoredCompiledExperiment,
     StoredExperimentPlan,
+    StoredOperation,
     StoredWorkflow,
 )
 
@@ -36,6 +39,10 @@ class ExternalJobConflict(RuntimeError):
 
 class ExperimentArtifactConflict(RuntimeError):
     """Raised when immutable plan or compiled bytes are replaced."""
+
+
+class OperationConflict(RuntimeError):
+    """Raised when an operation's immutable identity conflicts."""
 
 
 class SQLWorkflowRepository:
@@ -100,6 +107,102 @@ class SQLWorkflowRepository:
                 .limit(1)
             )
             return project_id
+
+    def create_operation(self, record: OperationRecord) -> StoredOperation:
+        with self._sessions.begin() as session:
+            operation_row = session.get(OperationRow, record.operation_id)
+            if operation_row is not None:
+                existing = self._stored_operation(operation_row)
+                if existing.record != record:
+                    raise OperationConflict(
+                        f"operation {record.operation_id} already exists with different content"
+                    )
+                return existing
+
+            self._require_project(session, record.project_id)
+            request_row = session.scalar(
+                select(OperationRow).where(
+                    OperationRow.kind == record.kind.value,
+                    OperationRow.project_id == record.project_id,
+                    OperationRow.input_digest == record.input_digest,
+                )
+            )
+            if request_row is not None:
+                return self._stored_operation(request_row)
+
+            session.add(
+                OperationRow(
+                    operation_id=record.operation_id,
+                    kind=record.kind.value,
+                    project_id=record.project_id,
+                    input_digest=record.input_digest,
+                    version=1,
+                    record_json=record.model_dump_json(),
+                    created_at=record.created_at.isoformat(),
+                    updated_at=record.updated_at.isoformat(),
+                )
+            )
+            return StoredOperation(record=record, version=1)
+
+    def load_operation(self, operation_id: str) -> StoredOperation | None:
+        with self._sessions() as session:
+            row = session.get(OperationRow, operation_id)
+            return None if row is None else self._stored_operation(row)
+
+    def find_operation(
+        self, kind: OperationKind, project_id: str, input_digest: str
+    ) -> StoredOperation | None:
+        with self._sessions() as session:
+            row = session.scalar(
+                select(OperationRow).where(
+                    OperationRow.kind == kind.value,
+                    OperationRow.project_id == project_id,
+                    OperationRow.input_digest == input_digest,
+                )
+            )
+            return None if row is None else self._stored_operation(row)
+
+    def update_operation(
+        self, record: OperationRecord, expected_version: int
+    ) -> StoredOperation:
+        with self._sessions.begin() as session:
+            row = session.get(OperationRow, record.operation_id)
+            if row is None:
+                raise ConcurrentUpdateError(
+                    f"operation {record.operation_id} does not exist at expected version "
+                    f"{expected_version}"
+                )
+            if row.version != expected_version:
+                raise ConcurrentUpdateError(
+                    f"operation {record.operation_id} is version {row.version}, "
+                    f"expected {expected_version}"
+                )
+            if (
+                row.kind != record.kind.value
+                or row.project_id != record.project_id
+                or row.input_digest != record.input_digest
+            ):
+                raise OperationConflict(
+                    f"operation {record.operation_id} identity fields are immutable"
+                )
+            row.version += 1
+            row.record_json = record.model_dump_json()
+            row.updated_at = record.updated_at.isoformat()
+            return StoredOperation(record=record, version=row.version)
+
+    def list_interrupted_operations(self) -> tuple[StoredOperation, ...]:
+        with self._sessions() as session:
+            rows = session.scalars(
+                select(OperationRow).order_by(
+                    OperationRow.created_at, OperationRow.operation_id
+                )
+            ).all()
+            stored = (self._stored_operation(row) for row in rows)
+            return tuple(
+                item
+                for item in stored
+                if item.record.state in {OperationState.QUEUED, OperationState.RUNNING}
+            )
 
     def store_experiment_plan(self, plan: StoredExperimentPlan) -> StoredExperimentPlan:
         with self._sessions.begin() as session:
@@ -284,4 +387,11 @@ class SQLWorkflowRepository:
             archive_sha256=row.archive_sha256,
             archive=row.archive,
             preview_json=row.preview_json,
+        )
+
+    @staticmethod
+    def _stored_operation(row: OperationRow) -> StoredOperation:
+        return StoredOperation(
+            record=OperationRecord.model_validate_json(row.record_json),
+            version=row.version,
         )
