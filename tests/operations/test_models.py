@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 from pydantic import ValidationError
@@ -26,26 +26,29 @@ def make_record(**updates: object) -> OperationRecord:
 
 
 def test_operation_enums_expose_persisted_values() -> None:
-    assert {kind.value for kind in OperationKind} == {"plan", "case_generation"}
-    assert {state.value for state in OperationState} == {
-        "queued",
-        "running",
-        "succeeded",
-        "failed",
-        "cancelled",
-    }
-    assert [stage.value for stage in OperationStage] == [
-        "queued",
-        "model_planning",
-        "schema_correction",
-        "storing_plan",
-        "case_model",
-        "static_validation",
-        "deterministic_packaging",
-        "ready_for_review",
-        "target_check",
-        "remote_execution",
-        "complete",
+    assert [(name, item.value) for name, item in OperationKind.__members__.items()] == [
+        ("PLAN", "plan"),
+        ("CASE_GENERATION", "case_generation"),
+    ]
+    assert [(name, item.value) for name, item in OperationState.__members__.items()] == [
+        ("QUEUED", "queued"),
+        ("RUNNING", "running"),
+        ("SUCCEEDED", "succeeded"),
+        ("FAILED", "failed"),
+        ("CANCELLED", "cancelled"),
+    ]
+    assert [(name, item.value) for name, item in OperationStage.__members__.items()] == [
+        ("QUEUED", "queued"),
+        ("MODEL_PLANNING", "model_planning"),
+        ("SCHEMA_CORRECTION", "schema_correction"),
+        ("STORING_PLAN", "storing_plan"),
+        ("CASE_MODEL", "case_model"),
+        ("STATIC_VALIDATION", "static_validation"),
+        ("DETERMINISTIC_PACKAGING", "deterministic_packaging"),
+        ("READY_FOR_REVIEW", "ready_for_review"),
+        ("TARGET_CHECK", "target_check"),
+        ("REMOTE_EXECUTION", "remote_execution"),
+        ("COMPLETE", "complete"),
     ]
 
 
@@ -74,6 +77,32 @@ def test_operation_record_excludes_sensitive_and_raw_input_fields() -> None:
 def test_operation_record_rejects_extra_fields() -> None:
     with pytest.raises(ValidationError, match="Extra inputs"):
         make_record(api_key="secret")
+
+
+@pytest.mark.parametrize(
+    ("field", "coercive_value"),
+    [
+        ("cancel_requested", 1),
+        ("kind", "plan"),
+        ("state", "queued"),
+        ("stage", "queued"),
+        ("created_at", "2026-07-04T00:00:00Z"),
+        ("updated_at", "2026-07-04T00:00:00Z"),
+    ],
+)
+def test_python_validation_rejects_coercive_inputs(
+    field: str, coercive_value: object
+) -> None:
+    with pytest.raises(ValidationError):
+        make_record(**{field: coercive_value})
+
+
+def test_json_round_trip_preserves_strict_operation_record() -> None:
+    record = make_record()
+
+    restored = OperationRecord.model_validate_json(record.model_dump_json())
+
+    assert restored == record
 
 
 @pytest.mark.parametrize(
@@ -115,10 +144,27 @@ def test_operation_record_rejects_naive_timestamps(field: str) -> None:
         make_record(**{field: datetime(2026, 7, 4)})
 
 
+@pytest.mark.parametrize("field", ["created_at", "updated_at"])
+def test_operation_record_rejects_non_utc_timestamps(field: str) -> None:
+    non_utc = timezone(timedelta(hours=8))
+
+    with pytest.raises(ValidationError, match="UTC"):
+        make_record(**{field: datetime(2026, 7, 4, tzinfo=non_utc)})
+
+
+def test_operation_record_rejects_updated_at_before_created_at() -> None:
+    with pytest.raises(ValidationError, match="updated_at"):
+        make_record(
+            created_at=datetime(2026, 7, 5, tzinfo=UTC),
+            updated_at=datetime(2026, 7, 4, tzinfo=UTC),
+        )
+
+
 @pytest.mark.parametrize("field", ["operation_id", "project_id"])
-def test_operation_record_rejects_empty_identifiers(field: str) -> None:
+@pytest.mark.parametrize("value", ["", " ", "\t\n"])
+def test_operation_record_rejects_blank_identifiers(field: str, value: str) -> None:
     with pytest.raises(ValidationError):
-        make_record(**{field: ""})
+        make_record(**{field: value})
 
 
 def test_operation_record_is_frozen() -> None:

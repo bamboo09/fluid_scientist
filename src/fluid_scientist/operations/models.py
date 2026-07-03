@@ -1,10 +1,23 @@
 """Persisted contracts for asynchronous operations."""
 
-from datetime import datetime
+from datetime import datetime, timedelta
+from typing import Annotated
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    field_validator,
+    model_validator,
+)
 
 from fluid_scientist.compat import UTC, StrEnum
+
+NonEmptyIdentifier = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1)
+]
 
 
 class OperationKind(StrEnum):
@@ -35,11 +48,11 @@ class OperationStage(StrEnum):
 
 
 class OperationRecord(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
 
-    operation_id: str = Field(min_length=1)
+    operation_id: NonEmptyIdentifier
     kind: OperationKind
-    project_id: str = Field(min_length=1)
+    project_id: NonEmptyIdentifier
     input_digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     state: OperationState = OperationState.QUEUED
     stage: OperationStage = OperationStage.QUEUED
@@ -49,6 +62,19 @@ class OperationRecord(BaseModel):
     cancel_requested: bool = False
     created_at: AwareDatetime
     updated_at: AwareDatetime
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def require_utc(cls, value: datetime) -> datetime:
+        if value.utcoffset() != timedelta(0):
+            raise ValueError("operation timestamps must use UTC")
+        return value
+
+    @model_validator(mode="after")
+    def require_chronological_timestamps(self) -> "OperationRecord":
+        if self.updated_at < self.created_at:
+            raise ValueError("updated_at cannot be before created_at")
+        return self
 
     @classmethod
     def new(
