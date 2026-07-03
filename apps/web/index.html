@@ -29,7 +29,7 @@
     <div class="workbench-shell">
       <main class="workbench">
         <section id="conversation-stream" class="conversation-stream" aria-label="实验对话" aria-live="polite">
-          <article class="message message-assistant">
+          <article id="welcome-message" class="message message-assistant">
             <div class="message-avatar" aria-hidden="true">FS</div>
             <div class="message-body">
               <p class="message-meta">研究助手 · 现在</p>
@@ -41,6 +41,12 @@
                 <button type="button" data-prompt="设计顶盖驱动方腔的网格无关性实验，并比较中心线速度。">方腔流网格验证</button>
               </div>
             </div>
+          </article>
+
+          <article id="research-question-card" class="research-question-card" hidden>
+            <p class="card-kicker">当前研究问题</p>
+            <h1 id="research-question-text"></h1>
+            <p id="session-status" class="session-status" role="status"></p>
           </article>
 
           <article id="experiment-plan-review" class="work-card plan-card" hidden>
@@ -96,6 +102,9 @@
             <button id="design-experiment" class="button button-primary" type="submit" disabled>设计实验 <span aria-hidden="true">→</span></button>
           </div>
         </form>
+        <div class="session-actions">
+          <button id="start-new-experiment" class="button button-secondary" type="button" hidden>研究另一个问题</button>
+        </div>
       </main>
 
       <aside id="task-context" class="context-rail" aria-label="当前实验上下文">

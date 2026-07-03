@@ -16,6 +16,11 @@ const targetSelect = byId("execution-target");
 const modelProvider = byId("model-provider");
 const modelId = byId("model-id");
 const modelApiKey = byId("model-api-key");
+const welcomeMessage = byId("welcome-message");
+const researchQuestionCard = byId("research-question-card");
+const researchQuestionText = byId("research-question-text");
+const researchForm = byId("research-form");
+const startNewExperiment = byId("start-new-experiment");
 
 let modelConfiguration = { configured: false, provider: null, model: null };
 let executionTargets = [];
@@ -75,8 +80,51 @@ function persist(key, value) {
 }
 
 function setStatus(message) {
-  const node = byId("composer-status") || byId("form-message") || byId("system-state");
+  const node = researchQuestionCard && !researchQuestionCard.hidden
+    ? byId("session-status")
+    : byId("composer-status") || byId("form-message") || byId("system-state");
   if (node) node.textContent = message;
+}
+
+function showResearchQuestion(question) {
+  if (welcomeMessage) welcomeMessage.hidden = true;
+  if (researchQuestionText) researchQuestionText.textContent = question;
+  if (researchQuestionCard) researchQuestionCard.hidden = false;
+  if (researchForm) researchForm.hidden = true;
+  if (startNewExperiment) startNewExperiment.hidden = false;
+  if (promptInput) promptInput.value = "";
+}
+
+function restoreResearchComposer(question) {
+  if (researchForm) researchForm.hidden = false;
+  if (startNewExperiment) startNewExperiment.hidden = true;
+  if (promptInput) promptInput.value = question;
+  refreshComposer();
+}
+
+function resetResearchSession() {
+  if (!canStartExperiment(activeTask)) return;
+  window.clearTimeout(pollTimer);
+  pollTimer = null;
+  currentProject = null;
+  currentPlan = null;
+  currentCompilation = null;
+  activeTask = null;
+  latestResults = null;
+  for (const key of [storageKeys.projectId, storageKeys.planId, storageKeys.caseId]) {
+    localStorage.removeItem(key);
+  }
+  for (const id of ["active-plan-card", "active-task-card"]) byId(id)?.remove();
+  if (byId("report")) byId("report").hidden = true;
+  if (researchQuestionCard) researchQuestionCard.hidden = true;
+  if (welcomeMessage) welcomeMessage.hidden = false;
+  if (researchForm) researchForm.hidden = false;
+  if (startNewExperiment) startNewExperiment.hidden = true;
+  if (promptInput) promptInput.value = "";
+  setStatus("");
+  updateContext();
+  refreshComposer();
+  promptInput?.focus();
 }
 
 function makeCard(className, title) {
@@ -325,7 +373,7 @@ async function designExperimentFromPrompt(event) {
   }
   const question = promptInput?.value.trim() || "";
   if (!question || !modelConfiguration.configured) return;
-  appendConversation("user", question);
+  showResearchQuestion(question);
   designButton.disabled = true;
   setStatus("模型正在生成结构化实验计划…");
   try {
@@ -356,6 +404,7 @@ async function designExperimentFromPrompt(event) {
     setStatus("实验计划已生成。请审阅假设、参数和局限后确认。 ");
   } catch (error) {
     renderError("实验设计", error);
+    restoreResearchComposer(question);
   } finally {
     refreshComposer();
   }
@@ -779,12 +828,14 @@ async function restoreActiveExperiment() {
       currentProject = await response.json();
       persist(storageKeys.projectId, currentProject.project_id);
     }
+    if (currentProject?.question) showResearchQuestion(currentProject.question);
     if (planId) {
       currentPlan = await requestJson(`/api/experiment-plans/${planId}`);
-      const restoredPlan = restoredPlanForProject(currentPlan, currentProject);
+      const planOwnerMatches = currentPlan.project_id === currentProject.project_id;
+      const restoredPlan = planOwnerMatches
+        ? restoredPlanForProject(currentPlan, currentProject)
+        : null;
       if (!restoredPlan) {
-        const stalePlanId = currentPlan.project_id;
-        const recoveredProjectId = currentProject.project_id;
         currentPlan = null;
         currentCompilation = null;
         localStorage.removeItem(storageKeys.planId);
@@ -792,7 +843,7 @@ async function restoreActiveExperiment() {
         updateContext();
         appendConversation(
           "assistant",
-          `恢复警告：计划所属项目 ${stalePlanId || "未知"} 与当前项目 ${recoveredProjectId} 不一致，已丢弃过期计划和算例标识。`,
+          "已检测到上次实验的过期草稿，已自动清理，不会影响当前实验。",
           "workflow-event",
         );
         return;
@@ -992,6 +1043,7 @@ function bindEvents() {
   byId("open-model-settings")?.addEventListener("click", () => openDialog("model-settings"));
   byId("open-target-settings")?.addEventListener("click", () => openDialog("target-settings"));
   byId("open-custom-case")?.addEventListener("click", () => openDialog("custom-case-drawer"));
+  startNewExperiment?.addEventListener("click", resetResearchSession);
   document.querySelectorAll("[data-open-dialog]").forEach((button) => {
     button.addEventListener("click", () => openDialog(button.dataset.openDialog));
   });

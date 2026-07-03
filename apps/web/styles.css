@@ -167,6 +167,22 @@ code { font-family: var(--mono); font-size: .88em; }
 }
 .prompt-examples button:hover { border-color: var(--teal); background: var(--teal-pale); }
 
+.research-question-card {
+  margin-left: 52px;
+  padding: 4px 0 20px;
+  border-bottom: 1px solid var(--line-strong);
+}
+.research-question-card h1 {
+  max-width: 760px;
+  margin: 0;
+  color: var(--ink);
+  font: 500 clamp(27px, 4.2vw, 46px)/1.2 var(--serif);
+  letter-spacing: -.025em;
+}
+.session-status { min-height: 1.5em; margin: 12px 0 0; color: var(--amber); font: 10px/1.5 var(--mono); }
+.session-actions { display: flex; justify-content: flex-end; margin: 18px 0 0 52px; }
+.session-actions .button { background: transparent; }
+
 .work-card {
   min-width: 0;
   max-width: 100%;
@@ -457,7 +473,7 @@ select, input[type="text"], input[type="password"] {
   .message { grid-template-columns: 30px minmax(0, 1fr); gap: 10px; }
   .message-avatar { width: 29px; height: 29px; }
   .message h1 { font-size: 34px; }
-  .message-user, .work-card, .analysis-card, .workflow-event, .composer { margin-left: 39px; }
+  .message-user, .work-card, .analysis-card, .workflow-event, .composer, .research-question-card, .session-actions { margin-left: 39px; }
   .plan-summary-grid, .plan-notes, .detail-grid, .task-facts, .result-metrics, .credibility-grid { grid-template-columns: 1fr; }
   .plan-essentials dl { grid-template-columns: 1fr; }
   .work-card.plan-card > section:not(.plan-essentials) { display: block; width: 100%; margin-right: 0; }

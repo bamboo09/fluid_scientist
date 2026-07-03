@@ -158,26 +158,32 @@ class WorkstationOpenFOAMTarget:
 
     def submit_custom(self, job_id: str, archive: bytes) -> JobRecord:
         validate_custom_case_archive(archive)
-        transport = self._transport()
         remote_name = f"{job_id}.tar.gz"
         with tempfile.TemporaryDirectory(prefix="fluid-scientist-") as directory:
             local_archive = Path(directory) / remote_name
             local_archive.write_bytes(archive)
-            transport.upload_incoming(
-                local_archive,
-                remote_name,
-                timeout=max(self._doctor_timeout, 120.0),
-            )
-        return self._job_command(
-            (
-                RemoteArg("submit-custom"),
-                RemoteArg("--job-id"),
-                RemoteArg(job_id),
-                RemoteArg("--archive"),
-                RemoteArg(remote_name),
-                RemoteArg("--json"),
-            )
-        )
+            for attempt in range(2):
+                try:
+                    transport = self._transport()
+                    transport.upload_incoming(
+                        local_archive,
+                        remote_name,
+                        timeout=max(self._doctor_timeout, 120.0),
+                    )
+                    return self._job_command(
+                        (
+                            RemoteArg("submit-custom"),
+                            RemoteArg("--job-id"),
+                            RemoteArg(job_id),
+                            RemoteArg("--archive"),
+                            RemoteArg(remote_name),
+                            RemoteArg("--json"),
+                        )
+                    )
+                except RemoteExecutionError:
+                    if attempt == 1:
+                        raise
+        raise AssertionError("unreachable")
 
     def status(self, job_id: str) -> JobRecord:
         return self._job_command((RemoteArg("status"), RemoteArg(job_id), RemoteArg("--json")))

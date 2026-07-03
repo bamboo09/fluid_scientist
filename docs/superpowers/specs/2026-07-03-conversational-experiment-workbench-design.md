@@ -45,9 +45,9 @@ Use the central column for ordered messages and cards:
 
 The stream is the source of truth for what happened. It must remain understandable after a page refresh.
 
-### Composer
+### Composer and active question
 
-Keep a large multiline input fixed near the bottom of the main column. Its prompt explains that the researcher may describe geometry, fluid, operating conditions, outputs, constraints, or simply a research objective. The primary button is **Design experiment**. Disable it only when the input is empty or no model is configured, and explain the missing prerequisite next to the button.
+Show the large multiline composer only before a research question is submitted or when planning fails and the text needs revision. Once submitted, replace the welcome panel with one prominent **Current research question** heading at the top of the stream, clear and hide the composer, and expose only a compact **Research another question** action. Restore the same heading from the server-side project question after refresh; never duplicate the prompt as a second chat bubble.
 
 ### Context rail
 
@@ -103,7 +103,7 @@ Persist only non-secret navigation identifiers in browser storage: active projec
 
 On load:
 
-1. retrieve the active or recent project;
+1. retrieve the active or recent project, including its original research question;
 2. reconstruct plan and approval state;
 3. restore an external job binding when present;
 4. resume status or result collection for running jobs;

@@ -86,7 +86,16 @@ class SSHTransport:
         timeout: float,
     ) -> ProcessResult:
         argv = self._base_argv() + ("--", program.value, *(str(arg) for arg in args))
-        result = self._runner.run(argv, timeout=timeout)
+        try:
+            result = self._runner.run(argv, timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            raise RemoteExecutionError(
+                f"remote {program.value} timed out after {timeout:g} seconds"
+            ) from error
+        except OSError as error:
+            raise RemoteExecutionError(
+                f"remote {program.value} could not be started"
+            ) from error
         if result.returncode != 0:
             detail = result.stderr.strip() or f"exit code {result.returncode}"
             raise RemoteExecutionError(f"remote {program.value} failed: {detail}")
@@ -123,7 +132,16 @@ class SSHTransport:
         if self._node.identity_file:
             argv += ("-i", self._node.identity_file)
         destination = f"{self._node.username}@{self._node.host}:{incoming}/{remote_name}"
-        result = self._runner.run(argv + (str(local_file), destination), timeout=timeout)
+        try:
+            result = self._runner.run(
+                argv + (str(local_file), destination), timeout=timeout
+            )
+        except subprocess.TimeoutExpired as error:
+            raise RemoteExecutionError(
+                f"secure upload timed out after {timeout:g} seconds"
+            ) from error
+        except OSError as error:
+            raise RemoteExecutionError("secure upload could not be started") from error
         if result.returncode != 0:
             detail = result.stderr.strip() or f"exit code {result.returncode}"
             raise RemoteExecutionError(f"secure upload failed: {detail}")

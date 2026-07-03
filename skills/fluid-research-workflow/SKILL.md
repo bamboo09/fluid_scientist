@@ -18,7 +18,7 @@ Treat solver completion, numerical convergence, physical credibility, and genera
 5. Ask OpenAI, GLM, or DeepSeek for one strict provider-neutral `ExperimentPlan`. Apply local schema validation before accepting any provider output.
 6. Design a mandatory `Pilot` before a batch. Route `laminar_pipe`, `cylinder_flow`, and `lid_driven_cavity` through deterministic compilers; route `custom_openfoam` to reviewed archive upload.
 7. Compile and preview the case before Gate 2. Bind the plan ID, plan version, and archive digest to the approval; submit the exact approved bytes without recompiling.
-8. Select the approved execution target. Use typed Slurm commands on HPC or the fixed `fluid-worker` protocol on a direct workstation; never emit or run arbitrary shell. After a worker upgrade, replay collection against an existing job from every supported experiment type before accepting the deployment.
+8. Select the approved execution target. Use typed Slurm commands on HPC or the fixed `fluid-worker` protocol on a direct workstation; never emit or run arbitrary shell. Classify process timeouts and launch failures as remote-execution errors. Retry a compiled workstation submission at most once with the same deterministic job ID, plan version, and digest. After a worker upgrade, replay collection against an existing job from every supported experiment type before accepting the deployment.
 9. Perform deterministic validation: residuals plus monitored quantities, conservation, mesh independence/GCI, benchmark agreement, and model sensitivity.
 10. Collect deterministic metrics, force coefficients, and velocity and pressure probes before Results Analyst interpretation. Require evidence-linked claims with exact evidence keys; the model must never alter deterministic values. Label observation, inference, extrapolation, or hypothesis.
 11. Have an independent Scientific Reviewer check failures, uncertainty, and scope. Obtain Gate 3 human approval before the final report.
@@ -29,6 +29,7 @@ Treat solver completion, numerical convergence, physical credibility, and genera
 - Block batch submission when the Pilot has not passed.
 - Block any HARD physics-rule violation.
 - Block first contact with a workstation until its SSH host fingerprint is verified out of band and recorded in `known_hosts`.
+- Block SSH use when the private-key file is readable or writable by unrelated Windows principals; use an owner-only runtime copy and never commit it.
 - Limit controlled numerical repair to two recorded revisions per case.
 - Never hide failed cases, invent missing evidence, repair corrupt formulas, or generalize beyond the tested range.
 - Never execute a custom case before local and worker-side validation, and never let the model or user supply a remote destination or shell command.

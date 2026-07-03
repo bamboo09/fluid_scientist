@@ -78,6 +78,18 @@ class UploadSequenceTransport(SequenceTransport):
         self.uploads.append((local_file.read_bytes(), remote_name, timeout))
 
 
+class TransientUploadTransport(UploadSequenceTransport):
+    def __init__(self, payloads) -> None:
+        super().__init__(payloads)
+        self.failed_once = False
+
+    def upload_incoming(self, local_file, remote_name, *, timeout):
+        if not self.failed_once:
+            self.failed_once = True
+            raise RemoteExecutionError("temporary SSH timeout")
+        super().upload_incoming(local_file, remote_name, timeout=timeout)
+
+
 def worker_job(state="running") -> dict:
     return {
         "job_id": "benchmark-001",
@@ -189,6 +201,21 @@ def test_submit_custom_uploads_validated_bundle_then_uses_fixed_worker_command()
         "cylinder-001.tar.gz",
         "--json",
     )
+
+
+def test_submit_custom_retries_one_idempotent_transfer_after_transient_failure() -> None:
+    archive = custom_case_archive()
+    transport = TransientUploadTransport((capability(), custom_worker_job()))
+    target = WorkstationOpenFOAMTarget(
+        target_id="workstation-openfoam",
+        candidates=(("primary", transport),),
+    )
+
+    submitted = target.submit_custom("cylinder-001", archive)
+
+    assert submitted.job_id == "cylinder-001"
+    assert transport.failed_once is True
+    assert len(transport.uploads) == 1
 
 
 def test_status_and_cancel_use_job_id_as_typed_argument() -> None:

@@ -19,6 +19,7 @@ def test_project_stops_for_gate_one_and_blocks_early_action(tmp_path) -> None:
     assert created.status_code == 201
     project = created.json()
     assert project["workflow_state"] == "SPEC_READY"
+    assert project["question"] == "How does curvature affect bend pressure drop?"
 
     blocked = client.post(
         f"/api/projects/{project['project_id']}/actions",
@@ -58,6 +59,7 @@ def test_gate_approval_allows_action_and_persists_across_app_instances(tmp_path)
     assert stored.status_code == 200
     assert stored.json()["workflow_state"] == "EVIDENCE_READY"
     assert stored.json()["approvals"][0]["gate"] == "GATE_1"
+    assert stored.json()["question"] == "How does curvature affect bend pressure drop?"
 
 
 def test_gate_rejection_is_audited_without_advancing(tmp_path) -> None:

@@ -19,6 +19,7 @@ class ProjectView(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     project_id: str
+    question: str | None = None
     workflow_state: str
     version: int
     approvals: tuple[Approval, ...]
@@ -257,8 +258,17 @@ class ProjectService:
 
     @staticmethod
     def _view(workflow: ResearchWorkflow, version: int) -> ProjectView:
+        question = next(
+            (
+                value
+                for event in workflow.state.audit_events
+                if isinstance((value := event.payload.get("question")), str)
+            ),
+            None,
+        )
         return ProjectView(
             project_id=workflow.state.project_id,
+            question=question,
             workflow_state=workflow.state.name,
             version=version,
             approvals=tuple(workflow.state.approvals.values()),

@@ -1,3 +1,4 @@
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,11 @@ class RecordingRunner:
     def run(self, argv: tuple[str, ...], *, timeout: float) -> ProcessResult:
         self.calls.append((argv, timeout))
         return self.result
+
+
+class TimeoutRunner:
+    def run(self, argv: tuple[str, ...], *, timeout: float) -> ProcessResult:
+        raise subprocess.TimeoutExpired(argv, timeout)
 
 
 def node(tmp_path: Path) -> NodeSettings:
@@ -68,6 +74,13 @@ def test_nonzero_remote_exit_is_classified(tmp_path) -> None:
 
     with pytest.raises(RemoteExecutionError, match="denied"):
         transport.execute(RemoteProgram.SQUEUE, (RemoteArg("123"),), timeout=10)
+
+
+def test_remote_timeout_is_classified_instead_of_leaking_as_http_500(tmp_path) -> None:
+    transport = SSHTransport(node(tmp_path), runner=TimeoutRunner())
+
+    with pytest.raises(RemoteExecutionError, match="timed out"):
+        transport.execute(RemoteProgram.FLUID_WORKER, (RemoteArg("doctor"),), timeout=1)
 
 
 def test_workstation_worker_uses_home_relative_install_path(tmp_path) -> None:

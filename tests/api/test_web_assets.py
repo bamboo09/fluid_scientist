@@ -336,3 +336,36 @@ def test_planning_payload_omits_an_unselected_target() -> None:
 
     assert "buildPlanRequest(question, currentProject.project_id, selectedTarget)" in design_source
     assert "target_id: selectedTarget" not in design_source
+
+
+def test_submitted_research_question_becomes_the_session_heading() -> None:
+    html = read_asset("apps/web/index.html")
+    script = read_asset("apps/web/app.js")
+
+    for element_id in (
+        "welcome-message",
+        "research-question-card",
+        "research-question-text",
+        "start-new-experiment",
+    ):
+        assert f'id="{element_id}"' in html
+
+    source = function_source(script, "showResearchQuestion")
+    assert "welcomeMessage.hidden = true" in source
+    assert "researchQuestionText.textContent = question" in source
+    assert "researchQuestionCard.hidden = false" in source
+    assert "researchForm.hidden = true" in source
+    assert "startNewExperiment.hidden = false" in source
+
+    design_source = function_source(script, "designExperimentFromPrompt")
+    assert "showResearchQuestion(question)" in design_source
+    assert 'appendConversation("user", question)' not in design_source
+
+
+def test_stale_restore_warning_is_friendly_and_hides_internal_ids() -> None:
+    script = read_asset("apps/web/app.js")
+    restore_source = function_source(script, "restoreActiveExperiment")
+
+    assert "已检测到上次实验的过期草稿" in restore_source
+    assert "stalePlanId" not in restore_source
+    assert "recoveredProjectId" not in restore_source
