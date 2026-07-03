@@ -21,7 +21,12 @@ from fluid_scientist.db import (
     WorkflowSnapshotRow,
 )
 from fluid_scientist.domain.models import Approval, AuditEvent
-from fluid_scientist.operations.models import OperationKind, OperationRecord, OperationState
+from fluid_scientist.operations.models import (
+    OperationKind,
+    OperationRecord,
+    OperationStage,
+    OperationState,
+)
 from fluid_scientist.ports import (
     StoredCompiledExperiment,
     StoredExperimentPlan,
@@ -479,4 +484,23 @@ class SQLWorkflowRepository:
             raise OperationConflict(
                 f"operation {record.operation_id} already exists with different identity"
             )
+        if not self._is_canonical_operation_create(row, record):
+            raise OperationConflict(
+                f"operation {record.operation_id} replay is not a canonical create payload"
+            )
         return self._stored_operation(row)
+
+    @staticmethod
+    def _is_canonical_operation_create(
+        row: OperationRow, record: OperationRecord
+    ) -> bool:
+        return (
+            record.state is OperationState.QUEUED
+            and record.stage is OperationStage.QUEUED
+            and record.message == OperationRecord.model_fields["message"].default
+            and record.result_ref is None
+            and record.safe_error is None
+            and not record.cancel_requested
+            and record.created_at.isoformat() == row.created_at
+            and record.updated_at == record.created_at
+        )

@@ -178,6 +178,37 @@ def test_same_operation_id_replay_returns_advanced_record(tmp_path) -> None:
     assert replayed == advanced
 
 
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"state": OperationState.RUNNING},
+        {"stage": OperationStage.MODEL_PLANNING},
+        {"message": "altered create payload"},
+        {"result_ref": "result-1"},
+        {"safe_error": "altered"},
+        {"cancel_requested": True},
+        {"updated_at": datetime(2026, 7, 1, 0, 0, 1, tzinfo=UTC)},
+        {
+            "created_at": datetime(2026, 7, 1, 0, 0, 1, tzinfo=UTC),
+            "updated_at": datetime(2026, 7, 1, 0, 0, 1, tzinfo=UTC),
+        },
+    ],
+)
+def test_same_operation_id_rejects_noncanonical_mutable_payload(
+    tmp_path, changes
+) -> None:
+    repo = repository(tmp_path)
+    repo.save_snapshot("project-1", '{}', expected_version=0)
+    original = operation()
+    stored = repo.create_operation(original)
+    altered = original.model_copy(update=changes)
+
+    with pytest.raises(OperationConflict, match="canonical"):
+        repo.create_operation(altered)
+
+    assert repo.load_operation(original.operation_id) == stored
+
+
 def test_operation_id_collision_rejects_different_content(tmp_path) -> None:
     repo = repository(tmp_path)
     repo.save_snapshot("project-1", '{}', expected_version=0)
