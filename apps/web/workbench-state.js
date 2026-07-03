@@ -62,6 +62,43 @@ const remotePhases = new Set([
   "cancelled",
 ]);
 
+const activePhases = new Set([
+  "preparing",
+  "submitting",
+  "submitted",
+  "mesh_check",
+  "solving",
+  "collecting",
+]);
+
+const terminalRunPhases = new Set(["completed", "failed", "cancelled"]);
+
+export function shouldCreateFreshProject(project, task) {
+  return (
+    project?.workflow_state === "PILOT_VERIFIED" ||
+    terminalRunPhases.has(task?.phase)
+  );
+}
+
+export function canStartExperiment(task) {
+  return !activePhases.has(task?.phase);
+}
+
+export function buildPlanRequest(question, projectId, targetId) {
+  const request = {
+    question,
+    project_id: projectId,
+  };
+  if (targetId) {
+    request.target_id = targetId;
+  }
+  return request;
+}
+
+export function restoredPlanForProject(plan, project) {
+  return plan?.project_id === project?.project_id ? plan : null;
+}
+
 function taskDetail(task) {
   if (task.phase === "preparing") {
     return "正在准备编译与审批";

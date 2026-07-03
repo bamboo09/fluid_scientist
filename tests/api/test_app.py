@@ -13,7 +13,9 @@ from fluid_scientist.adapters.openai_provider import (
     OpenAIResponsesProvider,
 )
 from fluid_scientist.adapters.openfoam import LaminarPipeCase
+from fluid_scientist.adapters.sql_repository import SQLWorkflowRepository
 from fluid_scientist.api.app import app, create_app
+from fluid_scientist.execution_targets.base import ExecutionTargetCapability
 from fluid_scientist.experiment_planning import (
     ExperimentPlan,
     ProviderAuthenticationError,
@@ -21,6 +23,7 @@ from fluid_scientist.experiment_planning import (
     ProviderOutputError,
     ProviderRequestError,
 )
+from fluid_scientist.ports import StoredExperimentPlan
 from fluid_scientist.settings import AppSettings, OpenAISettings, ProviderSettings
 
 
@@ -60,7 +63,7 @@ def test_demo_endpoint_rejects_short_question() -> None:
 def test_static_workbench_does_not_expose_skill_navigation() -> None:
     html = client().get("/").text
 
-    assert "实验结果分析与报告" in html
+    assert "实验结果与可信度检查" in html
     assert "Skill 候选" not in html
 
 
@@ -516,15 +519,23 @@ def test_experiment_plan_returns_provider_neutral_typed_response() -> None:
             plan_model_name="deepseek-chat",
         )
     )
+    project_id = api.post(
+        "/api/projects",
+        json={"question": "Measure laminar pressure loss in a pipe."},
+    ).json()["project_id"]
 
     response = api.post(
         "/api/experiment-plans",
-        json={"question": "Design a laminar pressure-loss benchmark."},
+        json={
+            "question": "Design a laminar pressure-loss benchmark.",
+            "project_id": project_id,
+        },
     )
 
     assert response.status_code == 200
     assert response.json()["provider"] == "deepseek"
     assert response.json()["model"] == "deepseek-chat"
+    assert response.json()["project_id"] == project_id
     assert response.json()["plan"]["experiment_type"] == "laminar_pipe"
     capabilities = designer.calls[0][1]
     assert set(
@@ -532,6 +543,87 @@ def test_experiment_plan_returns_provider_neutral_typed_response() -> None:
     ).issubset(capabilities)
     assert "OpenFOAM-13" in capabilities
     assert "workstation_openfoam" in capabilities
+
+
+def test_experiment_plan_uses_the_selected_execution_target_capability() -> None:
+    class KnownTarget:
+        target_id = "known-target"
+
+        def doctor(self) -> ExecutionTargetCapability:
+            return ExecutionTargetCapability(
+                target_id=self.target_id,
+                kind="hpc_slurm",
+                available=True,
+            )
+
+    designer = FakePlanDesigner()
+    api = TestClient(
+        create_app(
+            execution_targets=(KnownTarget(),),
+            plan_designer=designer,
+            plan_provider_name="deepseek",
+            plan_model_name="deepseek-chat",
+        )
+    )
+
+    response = api.post(
+        "/api/experiment-plans",
+        json={
+            "question": "Design a laminar pressure-loss benchmark.",
+            "target_id": "known-target",
+        },
+    )
+
+    assert response.status_code == 200
+    capabilities = designer.calls[0][1]
+    assert "hpc_slurm" in capabilities or "known-target" in capabilities
+
+    unknown = api.post(
+        "/api/experiment-plans",
+        json={
+            "question": "Design a laminar pressure-loss benchmark.",
+            "target_id": "missing-target",
+        },
+    )
+    assert unknown.status_code == 404
+
+
+def test_stored_experiment_plan_can_be_recovered_by_id(tmp_path) -> None:
+    repository = SQLWorkflowRepository(f"sqlite:///{tmp_path / 'plans.db'}")
+    plan = neutral_pipe_plan("Recovered Pipe Study")
+    repository.store_experiment_plan(
+        StoredExperimentPlan(
+            plan_id="plan-recovery-1",
+            project_id=None,
+            version=3,
+            provider="glm",
+            model="glm-4.5-air",
+            plan_json=plan.model_dump_json(),
+        )
+    )
+    api = TestClient(create_app(repository=repository))
+
+    response = api.get("/api/experiment-plans/plan-recovery-1")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "provider": "glm",
+        "model": "glm-4.5-air",
+        "plan_id": "plan-recovery-1",
+        "plan_version": 3,
+        "project_id": None,
+        "plan": plan.model_dump(mode="json"),
+    }
+
+
+def test_missing_experiment_plan_recovery_returns_404(tmp_path) -> None:
+    repository = SQLWorkflowRepository(f"sqlite:///{tmp_path / 'plans.db'}")
+    api = TestClient(create_app(repository=repository))
+
+    response = api.get("/api/experiment-plans/missing-plan")
+
+    assert response.status_code == 404
+    assert response.json() == {"detail": "experiment plan not found"}
 
 
 @pytest.mark.parametrize("question", ["short", "x" * 2001])

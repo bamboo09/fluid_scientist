@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import {
+  buildPlanRequest,
+  canStartExperiment,
+  restoredPlanForProject,
+  shouldCreateFreshProject,
   storageKeys,
   taskView,
 } from "../../apps/web/workbench-state.js";
@@ -91,3 +95,75 @@ for (const phase of [
 }
 
 assert.throws(() => taskView({ phase: "unknown" }), /Unknown task phase/);
+
+// A completed/failed remote run is historical evidence, never a container for
+// a new natural-language request.  Starting again must allocate a fresh
+// project, while a still-running task must be rejected instead of silently
+// stealing the single global poll timer.
+assert.equal(
+  shouldCreateFreshProject({ workflow_state: "PILOT_VERIFIED" }, null),
+  true,
+);
+assert.equal(
+  shouldCreateFreshProject(
+    { workflow_state: "PILOT_READY" },
+    { phase: "completed", jobId: "job-old" },
+  ),
+  true,
+);
+assert.equal(
+  shouldCreateFreshProject(
+    { workflow_state: "PILOT_READY" },
+    { phase: "failed", jobId: "job-old" },
+  ),
+  true,
+);
+assert.equal(
+  shouldCreateFreshProject(
+    { workflow_state: "PILOT_READY" },
+    { phase: "cancelled", jobId: "job-old" },
+  ),
+  true,
+);
+assert.equal(
+  shouldCreateFreshProject({ workflow_state: "PILOT_READY" }, null),
+  false,
+);
+assert.equal(canStartExperiment(null), true);
+assert.equal(canStartExperiment({ phase: "completed", jobId: "job-old" }), true);
+assert.equal(canStartExperiment({ phase: "failed", jobId: "job-old" }), true);
+assert.equal(canStartExperiment({ phase: "cancelled", jobId: "job-old" }), true);
+for (const phase of ["preparing", "submitting", "submitted", "mesh_check", "solving", "collecting"]) {
+  assert.equal(
+    canStartExperiment({ phase, jobId: phase === "preparing" ? undefined : "job-live" }),
+    false,
+    `phase ${phase} must block a competing experiment`,
+  );
+}
+
+// Optional target selection must be represented by absence, not an empty
+// string that violates the API's min_length constraint.
+assert.deepEqual(
+  buildPlanRequest("研究 Re=100 圆柱绕流", "project-1", ""),
+  { question: "研究 Re=100 圆柱绕流", project_id: "project-1" },
+);
+assert.deepEqual(
+  buildPlanRequest("研究 Re=100 圆柱绕流", "project-1", "workstation"),
+  {
+    question: "研究 Re=100 圆柱绕流",
+    project_id: "project-1",
+    target_id: "workstation",
+  },
+);
+
+// Recovery is valid only when the persisted plan belongs to the recovered
+// project. A stale plan identifier from another project must be discarded.
+const recoveredPlan = { plan_id: "plan-1", project_id: "project-1" };
+assert.equal(
+  restoredPlanForProject(recoveredPlan, { project_id: "project-1" }),
+  recoveredPlan,
+);
+assert.equal(
+  restoredPlanForProject(recoveredPlan, { project_id: "project-2" }),
+  null,
+);

@@ -88,15 +88,23 @@ def test_gate_rejection_is_audited_without_advancing(tmp_path) -> None:
     assert blocked.status_code == 409
 
 
-def test_workbench_exposes_project_and_gate_controls(tmp_path) -> None:
+def test_workbench_exposes_conversation_driven_project_and_gate_workflow(tmp_path) -> None:
     client = make_client(f"sqlite:///{tmp_path / 'projects.db'}")
 
     html = client.get("/").text
+    script = client.get("/assets/app.js").text
 
-    assert 'id="create-project"' in html
-    assert 'id="gate-approve"' in html
-    assert 'id="gate-reject"' in html
+    assert 'id="experiment-prompt"' in html
+    assert 'id="design-experiment"' in html
     assert "Skill 候选" not in html
+
+    assert 'requestJson("/api/projects"' in script
+    assert 'approveGate(currentProject, "GATE_1")' in script
+    assert 'applyWorkflowAction(currentProject, "RETRIEVE_EVIDENCE")' in script
+    assert 'applyWorkflowAction(currentProject, "DESIGN_PILOT")' in script
+    assert '`/api/projects/${project.project_id}/approvals`' in script
+    assert '`/api/projects/${project.project_id}/actions`' in script
+    assert 'gate: "GATE_2"' in script
 
 
 def test_app_uses_configured_database_when_repository_is_not_injected(tmp_path) -> None:

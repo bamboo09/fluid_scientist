@@ -167,6 +167,7 @@ class ModelConfigurationView(BaseModel):
 class ExperimentPlanRequest(StrictRequest):
     question: str = Field(min_length=10, max_length=2_000)
     project_id: str | None = Field(default=None, min_length=1, max_length=128)
+    target_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class ExperimentPlanView(BaseModel):
@@ -176,6 +177,7 @@ class ExperimentPlanView(BaseModel):
     model: str
     plan_id: str
     plan_version: int = Field(ge=1)
+    project_id: str | None
     plan: ExperimentPlan
 
 
@@ -565,14 +567,34 @@ def create_app(
                 status_code=503,
                 detail="Experiment plan provider is not configured",
             )
+        capabilities = tuple(
+            capability.experiment_type for capability in EXPERIMENT_CAPABILITIES
+        ) + PLAN_CAPABILITY_MARKERS
+        if request.target_id is not None:
+            target = target_registry.get(request.target_id)
+            if target is None:
+                raise HTTPException(
+                    status_code=404, detail="execution target not found"
+                )
+            try:
+                target_capability = target.doctor()
+            except (RemoteExecutionError, OSError) as error:
+                raise HTTPException(
+                    status_code=503,
+                    detail="execution target capability check failed",
+                ) from error
+            if not target_capability.available:
+                raise HTTPException(
+                    status_code=503, detail="execution target is unavailable"
+                )
+            capabilities += (
+                target_capability.kind,
+                target_capability.target_id,
+            )
         try:
             designed_plan = designer.design_experiment(
                 request.question,
-                capabilities=tuple(
-                    capability.experiment_type
-                    for capability in EXPERIMENT_CAPABILITIES
-                )
-                + PLAN_CAPABILITY_MARKERS,
+                capabilities=capabilities,
             )
         except ProviderAuthenticationError as error:
             raise HTTPException(
@@ -613,7 +635,27 @@ def create_app(
             model=model,
             plan_id=stored.plan_id,
             plan_version=stored.version,
+            project_id=stored.project_id,
             plan=plan,
+        )
+
+    @application.get(
+        "/api/experiment-plans/{plan_id}", response_model=ExperimentPlanView
+    )
+    def get_experiment_plan(plan_id: str) -> ExperimentPlanView:
+        try:
+            stored = project_service.load_experiment_plan(plan_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=404, detail="experiment plan not found"
+            ) from error
+        return ExperimentPlanView(
+            provider=stored.provider,
+            model=stored.model,
+            plan_id=stored.plan_id,
+            plan_version=stored.version,
+            project_id=stored.project_id,
+            plan=ExperimentPlan.model_validate_json(stored.plan_json),
         )
 
     @application.post(
