@@ -22,6 +22,7 @@ Treat solver completion, numerical convergence, physical credibility, and genera
 9. Perform deterministic validation: residuals plus monitored quantities, conservation, mesh independence/GCI, benchmark agreement, and model sensitivity.
 10. Collect deterministic metrics, force coefficients, and velocity and pressure probes before Results Analyst interpretation. Require evidence-linked claims with exact evidence keys; the model must never alter deterministic values. Label observation, inference, extrapolation, or hypothesis.
 11. Have an independent Scientific Reviewer check failures, uncertainty, and scope. Obtain Gate 3 human approval before the final report.
+12. In user-facing task views, never show `submitted` until the execution target returns an external job ID. Persist only non-secret identifiers, validate recovered plan ownership, and resume polling the same job without resubmission.
 
 ## Hard stops
 

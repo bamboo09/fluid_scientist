@@ -21,6 +21,8 @@ Use the data node for transfer, download, compilation, checksums, and artifact p
 - Run direct workstation jobs through `fluid-worker doctor/submit/status/cancel/collect`. Do not route them through Slurm and do not pass free-form remote shell.
 - Require protocol-version and command capability checks before submission. Preserve deterministic job IDs so retries query the same job.
 - Treat worker upgrades as schema migrations. Run `doctor`, then replay `collect` against retained jobs from each supported experiment type. Verify generated metadata keys (for example `base_case`) against the deterministic compiler contract instead of assuming a new job is representative of old artifacts.
+- Treat the external job ID as the submission truth boundary. A button click, local timer, or lost HTTP response is not submission evidence. Display the remote PID and submission time when returned; retry the same approved plan/case/digest idempotently when the response is ambiguous.
+- On browser recovery, fetch the stored plan and verify its owning project before restoring plan/case identifiers. Never let stale mixed identifiers trigger compilation, approval, or submission. Keep transient status-query errors visible and retry with bounded backoff instead of converting them into remote job failures.
 
 ### Custom OpenFOAM execution
 
