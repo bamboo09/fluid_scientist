@@ -478,6 +478,25 @@ test("large charts are deterministically sampled and bound fallback DOM", () => 
   assert.doesNotMatch(chart.textContent, /NaN|Infinity/);
 });
 
+test("scientific envelope sampling preserves endpoints narrow peaks and troughs", () => {
+  const series = Array.from({ length: 150_000 }, (_, index) => ({
+    position: index,
+    velocity: Math.sin(index / 17) * 0.01,
+  }));
+  series[77_777].velocity = 100;
+  series[99_999].velocity = -100;
+  const chart = renderCavityCenterlineProfile(series);
+  const svg = chart.children.find((child) => child.tagName === "SVG");
+  const polyline = svg.children.find((child) => child.tagName === "POLYLINE");
+  const points = polyline.getAttribute("points").split(" ");
+  assert.equal(points.length <= 240, true);
+  assert.match(points[0], /^60\.00,/);
+  assert.match(points.at(-1), /^538\.00,/);
+  assert.equal(points.some((point) => point.endsWith(",30.00")), true);
+  assert.equal(points.some((point) => point.endsWith(",230.00")), true);
+  assert.match(chart.textContent, /包络采样/);
+});
+
 test("residual evidence sanitizes hostile labels and caps field history", () => {
   const root = element();
   const results = validResults();

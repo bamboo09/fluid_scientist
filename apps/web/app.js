@@ -21,6 +21,7 @@ import {
   bindPostprocessButton as bindPostprocessReveal,
 } from "./postprocess.js";
 import {
+  AnalysisRequestController,
   analysisAvailability,
   normalizeResultPayload,
   plannedResultUrl,
@@ -64,6 +65,7 @@ let operationPoller = null;
 let lastOperationAnnouncement = "";
 const renderedPlanRefs = new Set();
 const planRequests = new Map();
+const analysisRequests = new AnalysisRequestController();
 
 const modelDefaults = Object.freeze({
   openai: "gpt-5.4",
@@ -581,6 +583,7 @@ async function submitPlanOperation(question) {
       currentCompilation = null;
       activeTask = null;
       latestResults = null;
+      postprocessSessionVersion += 1;
       activeOperation = null;
       activeOperationId = "";
       localStorage.removeItem(storageKeys.projectId);
@@ -889,8 +892,9 @@ async function fetchCurrentPostprocessResults(expectedSessionKey) {
   }
   latestResults = normalizeResultPayload(results, {
     source: "planned",
-    planId: identity.planId,
+    identity,
   });
+  postprocessSessionVersion += 1;
   return latestResults.postprocessPayload;
 }
 
@@ -915,8 +919,8 @@ function bindPostprocessButton(button, root, results = () => latestResults) {
   });
 }
 
-function renderResultsCard(results, { source = "planned", planId = null } = {}) {
-  latestResults = normalizeResultPayload(results, { source, planId });
+function renderResultsCard(results, { source = "planned", identity = null } = {}) {
+  latestResults = normalizeResultPayload(results, { source, identity });
   postprocessSessionVersion += 1;
   renderTaskCard({
     ...activeTask,
@@ -981,7 +985,10 @@ async function pollPlannedExperiment(jobId, targetId, projectId, planId, caseId)
         projectId, planId, caseId, targetId, action: "results",
       }));
       currentProject = results.project || currentProject;
-      renderResultsCard(results, { source: "planned", planId });
+      renderResultsCard(results, {
+        source: "planned",
+        identity: { projectId, planId, caseId, targetId },
+      });
       return;
     }
     schedulePoll(() => pollPlannedExperiment(jobId, targetId, projectId, planId, caseId));
@@ -1021,21 +1028,37 @@ function renderExperimentAnalysis(result) {
   addList(card, "建议下一步", analysis.recommended_next_steps);
 }
 
-async function analyzeExperimentResults() {
-  const identity = postprocessIdentity();
-  const availability = analysisAvailability({ resultContext: latestResults, ...identity });
+async function analyzeExperimentResults(event) {
+  const analyzeButton = event?.currentTarget;
+  const resultContext = latestResults;
+  const identity = resultContext?.boundIdentity;
+  const generation = postprocessSessionVersion;
+  const sessionKey = `${generation}:${JSON.stringify(identity)}`;
+  const isCurrent = () => (
+    latestResults === resultContext
+    && postprocessSessionVersion === generation
+    && analysisAvailability({ resultContext, ...postprocessIdentity() }).allowed
+  );
+  const availability = analysisAvailability({ resultContext, ...postprocessIdentity() });
   if (!availability.allowed) {
     renderError("模型结果分析", new Error(availability.message));
     return;
   }
   try {
-    const analysis = await requestJson(
-      plannedResultUrl({ ...identity, action: "analysis" }),
-      { method: "POST" },
-    );
-    renderExperimentAnalysis(analysis);
+    await analysisRequests.run({
+      sessionKey,
+      request: () => requestJson(
+        plannedResultUrl({ ...identity, action: "analysis" }),
+        { method: "POST" },
+      ),
+      isCurrent,
+      onResult: renderExperimentAnalysis,
+      onPending: (pending) => {
+        if (isCurrent() && analyzeButton) analyzeButton.disabled = pending;
+      },
+    });
   } catch (error) {
-    renderError("模型结果分析", error);
+    if (isCurrent()) renderError("模型结果分析", error);
   }
 }
 

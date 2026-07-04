@@ -390,6 +390,21 @@ def test_both_postprocess_buttons_use_one_reveal_controller() -> None:
     assert "renderCylinderForceHistory" in controller
 
 
+def test_result_analysis_is_bound_to_complete_identity_and_stale_safe() -> None:
+    app = read_asset("apps/web/app.js")
+    state = read_asset("apps/web/result-state.js")
+    analyze = function_source(app, "analyzeExperimentResults")
+
+    for key in ("projectId", "planId", "caseId", "targetId"):
+        assert key in state
+    assert "boundIdentity" in state
+    assert "AnalysisRequestController" in app
+    assert "latestResults === resultContext" in analyze
+    assert "postprocessSessionVersion === generation" in analyze
+    assert "const analyzeButton = event?.currentTarget" in analyze
+    assert "plannedResultUrl({ ...identity" in analyze
+
+
 def test_polling_failures_show_a_visible_chinese_auto_retry_warning() -> None:
     script = read_asset("apps/web/app.js")
     render_source = function_source(script, "renderTaskCard")

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  AnalysisRequestController,
   analysisAvailability,
   normalizeResultPayload,
   plannedResultUrl,
@@ -30,9 +31,15 @@ test("planned envelope keeps its summary and bound plan identity", () => {
     summary: { mesh_passed: false, solver_completed: true, cells: 1024 },
     collection: { mesh: { passed: true, cells: 99 }, solver: { completed: false } },
   };
-  const normalized = normalizeResultPayload(payload, { source: "planned", planId: "plan-1" });
+  const identity = {
+    projectId: "project-1",
+    planId: "plan-1",
+    caseId: "case-1",
+    targetId: "target-1",
+  };
+  const normalized = normalizeResultPayload(payload, { source: "planned", identity });
   assert.equal(normalized.summary.cells, 1024);
-  assert.equal(normalized.boundPlanId, "plan-1");
+  assert.deepEqual(normalized.boundIdentity, identity);
   assert.equal(normalized.postprocessPayload, payload);
 });
 
@@ -52,7 +59,15 @@ test("legacy custom results cannot use a stale planned analysis route", () => {
 test("planned analysis requires the exact bound plan and all identifiers", () => {
   const planned = normalizeResultPayload(
     { collection: { mesh: {}, solver: {} } },
-    { source: "planned", planId: "plan-bound" },
+    {
+      source: "planned",
+      identity: {
+        projectId: "project-1",
+        planId: "plan-bound",
+        caseId: "case-1",
+        targetId: "target-1",
+      },
+    },
   );
   assert.equal(analysisAvailability({
     resultContext: planned,
@@ -68,6 +83,66 @@ test("planned analysis requires the exact bound plan and all identifiers", () =>
     caseId: "case-1",
     targetId: "target-1",
   }).allowed, true);
+});
+
+test("planned analysis rejects project case and target drift under the same plan", () => {
+  const identity = {
+    projectId: "project-1",
+    planId: "plan-1",
+    caseId: "case-1",
+    targetId: "target-1",
+  };
+  const planned = normalizeResultPayload(
+    { collection: { mesh: {}, solver: {} } },
+    { source: "planned", identity },
+  );
+  for (const changed of [
+    { ...identity, projectId: "project-2" },
+    { ...identity, caseId: "case-2" },
+    { ...identity, targetId: "target-2" },
+  ]) {
+    assert.equal(analysisAvailability({ resultContext: planned, ...changed }).allowed, false);
+  }
+});
+
+test("analysis controller deduplicates clicks and discards a stale response", async () => {
+  const controller = new AnalysisRequestController();
+  let currentSession = "session-1";
+  let resolveOld;
+  let requests = 0;
+  const rendered = [];
+  const request = () => {
+    requests += 1;
+    return new Promise((resolve) => { resolveOld = resolve; });
+  };
+  const options = {
+    sessionKey: "session-1",
+    request,
+    isCurrent: (sessionKey) => currentSession === sessionKey,
+    onResult: (result) => rendered.push(result),
+  };
+  const first = controller.run(options);
+  const second = controller.run(options);
+  assert.equal(first, second);
+  assert.equal(requests, 1);
+
+  currentSession = "session-2";
+  resolveOld({ analysis: "old" });
+  const outcome = await first;
+  assert.equal(outcome.stale, true);
+  assert.deepEqual(rendered, []);
+
+  await controller.run({
+    sessionKey: "session-2",
+    request: async () => {
+      requests += 1;
+      return { analysis: "new" };
+    },
+    isCurrent: (sessionKey) => currentSession === sessionKey,
+    onResult: (result) => rendered.push(result),
+  });
+  assert.equal(requests, 2);
+  assert.deepEqual(rendered, [{ analysis: "new" }]);
 });
 
 test("result and analysis URLs encode every untrusted identifier", () => {

@@ -94,15 +94,45 @@ function appendTable(root, captionText, rows, className = "evidence-table") {
 
 function numericPoints(series, xKeys, yKeys) {
   if (!Array.isArray(series)) return [];
-  const points = [];
-  for (const index of sampleIndexes(series.length, MAX_CHART_POINTS)) {
+  return envelopePoints(series.length, MAX_CHART_POINTS, (index) => {
     const item = series[index];
-    if (!item || typeof item !== "object") continue;
+    if (!item || typeof item !== "object") return null;
     const x = xKeys.map((key) => finiteNumber(item[key])).find((value) => value !== null);
     const y = yKeys.map((key) => finiteNumber(item[key])).find((value) => value !== null);
-    if (x !== undefined && y !== undefined) points.push({ x, y });
+    return x !== undefined && y !== undefined ? { x, y } : null;
+  });
+}
+
+function envelopePoints(length, limit, pointAt) {
+  if (length <= 0) return [];
+  if (length <= limit) {
+    return Array.from({ length }, (_, index) => pointAt(index)).filter(Boolean);
   }
-  return points;
+  const selected = new Map();
+  const add = (index, point) => {
+    if (point) selected.set(index, point);
+  };
+  add(0, pointAt(0));
+  const bucketCount = Math.floor((limit - 2) / 2);
+  const interiorLength = length - 2;
+  for (let bucket = 0; bucket < bucketCount; bucket += 1) {
+    const start = 1 + Math.floor((bucket * interiorLength) / bucketCount);
+    const end = 1 + Math.floor(((bucket + 1) * interiorLength) / bucketCount);
+    let minimum = null;
+    let maximum = null;
+    for (let index = start; index < end; index += 1) {
+      const point = pointAt(index);
+      if (!point) continue;
+      if (!minimum || point.y < minimum.point.y) minimum = { index, point };
+      if (!maximum || point.y > maximum.point.y) maximum = { index, point };
+    }
+    if (minimum) add(minimum.index, minimum.point);
+    if (maximum) add(maximum.index, maximum.point);
+  }
+  add(length - 1, pointAt(length - 1));
+  return [...selected.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, point]) => point);
 }
 
 function sampleIndexes(length, limit) {
@@ -118,11 +148,11 @@ function parallelPoints(series, xKeys, yKeys) {
   const xValues = xKeys.map((key) => series[key]).find(Array.isArray);
   const yValues = yKeys.map((key) => series[key]).find(Array.isArray);
   if (!xValues || !yValues || xValues.length !== yValues.length) return [];
-  return sampleIndexes(xValues.length, MAX_CHART_POINTS).flatMap((index) => {
+  return envelopePoints(xValues.length, MAX_CHART_POINTS, (index) => {
     const xValue = xValues[index];
     const x = finiteNumber(xValue);
     const y = finiteNumber(yValues[index]);
-    return x === null || y === null ? [] : [{ x, y }];
+    return x === null || y === null ? null : { x, y };
   });
 }
 
@@ -222,7 +252,7 @@ function renderChart({ title, xLabel, yLabel, series }) {
     if (totalCount > entry.points.length || totalCount > MAX_CHART_TABLE_ROWS) {
       root.append(node(
         "p",
-        `${entry.label}共 ${totalCount} 个原始点；绘制 ${entry.points.length} 个代表点，已省略 ${Math.max(0, totalCount - entry.points.length)} 个绘图点；表格显示前 ${Math.min(MAX_CHART_TABLE_ROWS, entry.points.length)} 条。`,
+        `${entry.label}共 ${totalCount} 个原始点；采用首尾与分桶极值包络采样，绘制 ${entry.points.length} 个代表点，已省略 ${Math.max(0, totalCount - entry.points.length)} 个绘图点；表格显示前 ${Math.min(MAX_CHART_TABLE_ROWS, entry.points.length)} 条。`,
         "evidence-summary",
       ));
     }
