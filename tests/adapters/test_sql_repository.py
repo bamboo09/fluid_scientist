@@ -23,7 +23,7 @@ from fluid_scientist.operations.models import (
     OperationStage,
     OperationState,
 )
-from fluid_scientist.ports import WorkflowRepository
+from fluid_scientist.ports import StoredExperimentPlan, WorkflowRepository
 
 
 def repository(tmp_path) -> SQLWorkflowRepository:
@@ -106,7 +106,7 @@ def test_external_job_binding_is_idempotent_and_rejects_mismatch(tmp_path) -> No
 
 def test_operation_create_and_load_round_trip(tmp_path) -> None:
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     record = operation()
 
     stored = repo.create_operation(record)
@@ -125,7 +125,7 @@ def test_operation_create_requires_existing_project(tmp_path) -> None:
 
 def test_operation_create_is_idempotent_by_request_identity(tmp_path) -> None:
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     original = operation()
     duplicate_request = operation("operation-2")
 
@@ -138,7 +138,7 @@ def test_operation_create_is_idempotent_by_request_identity(tmp_path) -> None:
 
 def test_concurrent_operation_create_returns_unique_constraint_winner(tmp_path) -> None:
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     insert_barrier = Barrier(2)
 
     def synchronize_operation_inserts(
@@ -162,7 +162,7 @@ def test_concurrent_operation_create_returns_unique_constraint_winner(tmp_path) 
 
 def test_same_operation_id_replay_returns_advanced_record(tmp_path) -> None:
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     original = operation()
     repo.create_operation(original)
     running = original.model_copy(
@@ -187,6 +187,7 @@ def test_same_operation_id_replay_returns_advanced_record(tmp_path) -> None:
         {"result_ref": "result-1"},
         {"safe_error": "altered"},
         {"cancel_requested": True},
+        {"attempt": 2},
         {"updated_at": datetime(2026, 7, 1, 0, 0, 1, tzinfo=UTC)},
         {
             "created_at": datetime(2026, 7, 1, 0, 0, 1, tzinfo=UTC),
@@ -194,11 +195,9 @@ def test_same_operation_id_replay_returns_advanced_record(tmp_path) -> None:
         },
     ],
 )
-def test_same_operation_id_rejects_noncanonical_mutable_payload(
-    tmp_path, changes
-) -> None:
+def test_same_operation_id_rejects_noncanonical_mutable_payload(tmp_path, changes) -> None:
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     original = operation()
     stored = repo.create_operation(original)
     altered = original.model_copy(update=changes)
@@ -211,7 +210,7 @@ def test_same_operation_id_rejects_noncanonical_mutable_payload(
 
 def test_operation_id_collision_rejects_different_content(tmp_path) -> None:
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     repo.create_operation(operation())
     changed = operation(project_id="missing-project")
 
@@ -221,7 +220,7 @@ def test_operation_id_collision_rejects_different_content(tmp_path) -> None:
 
 def test_operation_update_increments_version_and_rejects_stale_write(tmp_path) -> None:
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     original = operation()
     repo.create_operation(original)
     updated_record = original.model_copy(
@@ -242,7 +241,7 @@ def test_operation_update_increments_version_and_rejects_stale_write(tmp_path) -
 
 def test_operation_update_uses_version_in_atomic_update_predicate(tmp_path) -> None:
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     original = operation()
     repo.create_operation(original)
     updated_record = original.model_copy(
@@ -252,8 +251,8 @@ def test_operation_update_uses_version_in_atomic_update_predicate(tmp_path) -> N
     event.listen(
         repo._engine,
         "before_cursor_execute",
-        lambda _conn, _cursor, statement, _parameters, _context, _executemany: (
-            statements.append(statement)
+        lambda _conn, _cursor, statement, _parameters, _context, _executemany: statements.append(
+            statement
         ),
     )
 
@@ -269,15 +268,83 @@ def test_operation_update_uses_version_in_atomic_update_predicate(tmp_path) -> N
 
 
 def test_operation_update_expected_version_is_keyword_only() -> None:
-    implementation_parameter = signature(
-        SQLWorkflowRepository.update_operation
-    ).parameters["expected_version"]
+    implementation_parameter = signature(SQLWorkflowRepository.update_operation).parameters[
+        "expected_version"
+    ]
     protocol_parameter = signature(WorkflowRepository.update_operation).parameters[
         "expected_version"
     ]
 
     assert implementation_parameter.kind is Parameter.KEYWORD_ONLY
     assert protocol_parameter.kind is Parameter.KEYWORD_ONLY
+
+
+def test_complete_planning_operation_atomically_stores_plan_and_success(tmp_path) -> None:
+    repo = repository(tmp_path)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
+    original = operation()
+    created = repo.create_operation(original)
+    plan = StoredExperimentPlan(
+        plan_id="plan-1",
+        project_id="project-1",
+        version=1,
+        provider="glm",
+        model="glm-5.1",
+        plan_json='{"accepted":true}',
+    )
+    succeeded = original.model_copy(
+        update={
+            "state": OperationState.SUCCEEDED,
+            "stage": OperationStage.COMPLETE,
+            "message": "实验计划已生成",
+            "result_ref": plan.plan_id,
+            "updated_at": original.updated_at + timedelta(seconds=1),
+        }
+    )
+
+    stored = repo.complete_planning_operation(plan, succeeded, expected_version=created.version)
+
+    assert stored.record == succeeded
+    assert repo.load_operation(original.operation_id) == stored
+    assert repo.load_experiment_plan(plan.plan_id) == plan
+
+
+def test_complete_planning_operation_stale_version_leaves_no_orphan_plan(tmp_path) -> None:
+    repo = repository(tmp_path)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
+    original = operation()
+    repo.create_operation(original)
+    cancelled = original.model_copy(
+        update={
+            "state": OperationState.CANCELLED,
+            "stage": OperationStage.COMPLETE,
+            "cancel_requested": True,
+            "updated_at": original.updated_at + timedelta(seconds=1),
+        }
+    )
+    repo.update_operation(cancelled, expected_version=1)
+    plan = StoredExperimentPlan(
+        plan_id="stale-plan",
+        project_id="project-1",
+        version=1,
+        provider="glm",
+        model="glm-5.1",
+        plan_json='{"stale":true}',
+    )
+    stale_success = original.model_copy(
+        update={
+            "state": OperationState.SUCCEEDED,
+            "stage": OperationStage.COMPLETE,
+            "result_ref": plan.plan_id,
+            "updated_at": original.updated_at + timedelta(seconds=2),
+        }
+    )
+
+    with pytest.raises(ConcurrentUpdateError):
+        repo.complete_planning_operation(plan, stale_success, expected_version=1)
+
+    assert repo.load_experiment_plan(plan.plan_id) is None
+    assert repo.load_operation(original.operation_id).record == cancelled
 
 
 def test_operation_update_rejects_nonexistent_operation(tmp_path) -> None:
@@ -297,8 +364,8 @@ def test_operation_update_rejects_nonexistent_operation(tmp_path) -> None:
 )
 def test_operation_update_rejects_identity_changes(tmp_path, field, value) -> None:
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
-    repo.save_snapshot("project-2", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
+    repo.save_snapshot("project-2", "{}", expected_version=0)
     original = operation()
     repo.create_operation(original)
     changed = original.model_copy(update={field: value})
@@ -311,12 +378,10 @@ def test_operation_update_rejects_created_at_change_without_corrupting_row(
     tmp_path,
 ) -> None:
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     original = operation()
     stored = repo.create_operation(original)
-    changed = original.model_copy(
-        update={"created_at": original.created_at - timedelta(days=1)}
-    )
+    changed = original.model_copy(update={"created_at": original.created_at - timedelta(days=1)})
 
     with pytest.raises(OperationConflict, match="created_at"):
         repo.update_operation(changed, expected_version=1)
@@ -326,7 +391,7 @@ def test_operation_update_rejects_created_at_change_without_corrupting_row(
 
 def test_find_operation_returns_exact_match_or_none(tmp_path) -> None:
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     record = operation()
     stored = repo.create_operation(record)
 
@@ -336,7 +401,7 @@ def test_find_operation_returns_exact_match_or_none(tmp_path) -> None:
 
 def test_list_interrupted_operations_filters_and_orders_records(tmp_path) -> None:
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     later = datetime(2026, 7, 2, tzinfo=UTC)
     earlier = datetime(2026, 7, 1, tzinfo=UTC)
     records = [
@@ -373,7 +438,7 @@ def test_list_interrupted_operations_filters_and_orders_records(tmp_path) -> Non
 def test_load_operation_strictly_validates_persisted_json(tmp_path) -> None:
     database_path = tmp_path / "workflow.db"
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     repo.create_operation(operation())
     with sqlite3.connect(database_path) as connection:
         payload = json.loads(
@@ -395,7 +460,7 @@ def test_load_operation_strictly_validates_persisted_json(tmp_path) -> None:
 def test_load_operation_rejects_persisted_type_coercion(tmp_path) -> None:
     database_path = tmp_path / "workflow.db"
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     repo.create_operation(operation())
     with sqlite3.connect(database_path) as connection:
         payload = json.loads(
@@ -414,6 +479,52 @@ def test_load_operation_rejects_persisted_type_coercion(tmp_path) -> None:
         repo.load_operation("operation-1")
 
 
+def test_load_operation_rejects_coercive_attempt(tmp_path) -> None:
+    database_path = tmp_path / "workflow.db"
+    repo = repository(tmp_path)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
+    repo.create_operation(operation())
+    with sqlite3.connect(database_path) as connection:
+        payload = json.loads(
+            connection.execute(
+                "SELECT record_json FROM operations WHERE operation_id = ?",
+                ("operation-1",),
+            ).fetchone()[0]
+        )
+        payload["attempt"] = "1"
+        connection.execute(
+            "UPDATE operations SET record_json = ? WHERE operation_id = ?",
+            (json.dumps(payload), "operation-1"),
+        )
+
+    with pytest.raises(ValidationError, match="attempt"):
+        repo.load_operation("operation-1")
+
+
+def test_load_legacy_operation_without_attempt_defaults_to_first_attempt(tmp_path) -> None:
+    database_path = tmp_path / "workflow.db"
+    repo = repository(tmp_path)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
+    repo.create_operation(operation())
+    with sqlite3.connect(database_path) as connection:
+        payload = json.loads(
+            connection.execute(
+                "SELECT record_json FROM operations WHERE operation_id = ?",
+                ("operation-1",),
+            ).fetchone()[0]
+        )
+        payload.pop("attempt")
+        connection.execute(
+            "UPDATE operations SET record_json = ? WHERE operation_id = ?",
+            (json.dumps(payload), "operation-1"),
+        )
+
+    restored = repo.load_operation("operation-1")
+
+    assert restored is not None
+    assert restored.record.attempt == 1
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -428,7 +539,7 @@ def test_load_operation_rejects_persisted_type_coercion(tmp_path) -> None:
 def test_load_operation_rejects_json_row_mismatch(tmp_path, field, value) -> None:
     database_path = tmp_path / "workflow.db"
     repo = repository(tmp_path)
-    repo.save_snapshot("project-1", '{}', expected_version=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
     repo.create_operation(operation())
     with sqlite3.connect(database_path) as connection:
         payload = json.loads(

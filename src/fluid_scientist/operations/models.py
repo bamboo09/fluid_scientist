@@ -15,9 +15,7 @@ from pydantic import (
 
 from fluid_scientist.compat import UTC, StrEnum
 
-NonEmptyIdentifier = Annotated[
-    str, StringConstraints(strip_whitespace=True, min_length=1)
-]
+NonEmptyIdentifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
 
 class OperationKind(StrEnum):
@@ -60,6 +58,7 @@ class OperationRecord(BaseModel):
     result_ref: str | None = None
     safe_error: str | None = None
     cancel_requested: bool = False
+    attempt: int = Field(default=1, ge=1)
     created_at: AwareDatetime
     updated_at: AwareDatetime
 

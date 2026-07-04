@@ -116,6 +116,10 @@ class _PlanProviderSupport:
         return self._settings.provider
 
     @property
+    def model_name(self) -> str:
+        return self._settings.model
+
+    @property
     def last_request_id(self) -> str | None:
         """Return the terminal request ID published in the current context."""
 
@@ -160,9 +164,7 @@ class _PlanProviderSupport:
 
     @staticmethod
     def _request_id(value: Any) -> str | None:
-        request_id = getattr(value, "_request_id", None) or getattr(
-            value, "request_id", None
-        )
+        request_id = getattr(value, "_request_id", None) or getattr(value, "request_id", None)
         if isinstance(request_id, str):
             return request_id
         response = getattr(value, "response", None)
@@ -207,9 +209,7 @@ class OpenAICompatiblePlanProvider(_PlanProviderSupport):
         progress: Callable[[str], None] | None = None,
     ) -> ExperimentPlan:
         self._begin_request()
-        return self._design_experiment(
-            question, capabilities=capabilities, progress=progress
-        )
+        return self._design_experiment(question, capabilities=capabilities, progress=progress)
 
     def _design_experiment(
         self,
@@ -255,9 +255,7 @@ class OpenAICompatiblePlanProvider(_PlanProviderSupport):
                     self._last_request_id.set(request_id)
                     raise error
                 plan = self._validate_content(content, request_id=request_id)
-                self._validate_capability(
-                    plan, capabilities, request_id=request_id
-                )
+                self._validate_capability(plan, capabilities, request_id=request_id)
                 self._last_request_id.set(request_id)
                 return plan
             except ProviderSchemaError as error:
@@ -310,9 +308,7 @@ class OpenAICompatiblePlanProvider(_PlanProviderSupport):
                     ) from None
         raise AssertionError("provider retry loop terminated unexpectedly")
 
-    def _validate_content(
-        self, content: str, *, request_id: str | None
-    ) -> ExperimentPlan:
+    def _validate_content(self, content: str, *, request_id: str | None) -> ExperimentPlan:
         try:
             return ExperimentPlan.model_validate_json(content)
         except ValidationError as error:
@@ -354,9 +350,7 @@ class OpenAICompatiblePlanProvider(_PlanProviderSupport):
         schema = json.dumps(
             ExperimentPlan.model_json_schema(), ensure_ascii=False, separators=(",", ":")
         )
-        capability_json = json.dumps(
-            list(capabilities), ensure_ascii=False, separators=(",", ":")
-        )
+        capability_json = json.dumps(list(capabilities), ensure_ascii=False, separators=(",", ":"))
         system = (
             "Act as a fluid-mechanics experiment designer. Return exactly one JSON object "
             "matching the strict JSON Schema below. Select only an experiment_type present "

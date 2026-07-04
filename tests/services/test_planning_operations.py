@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
+from sqlalchemy import select
 
 from fluid_scientist.adapters.sql_repository import ConcurrentUpdateError, SQLWorkflowRepository
+from fluid_scientist.db import ExperimentPlanRow
 from fluid_scientist.experiment_planning.models import ExperimentPlan
 from fluid_scientist.experiment_planning.providers import (
     ExperimentDesigner,
@@ -49,6 +51,12 @@ def valid_plan() -> ExperimentPlan:
     )
 
 
+def named_plan(name: str) -> ExperimentPlan:
+    payload = valid_plan().model_dump()
+    payload["experiment_name"] = name
+    return ExperimentPlan.model_validate(payload)
+
+
 class ControlledExecutor:
     def __init__(self, *, fail_submit: bool = False) -> None:
         self.pending: list[tuple[object, tuple[object, ...], dict[str, object]]] = []
@@ -73,6 +81,21 @@ class ShutdownRecordingExecutor(ControlledExecutor):
 
     def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
         self.shutdown_calls.append((wait, cancel_futures))
+
+
+class TrackingThreadExecutor:
+    def __init__(self, max_workers: int = 2) -> None:
+        self.pool = ThreadPoolExecutor(max_workers=max_workers)
+        self.futures: list[Future[object]] = []
+
+    def submit(self, fn: object, /, *args: object, **kwargs: object) -> Future[object]:
+        assert callable(fn)
+        future = self.pool.submit(fn, *args, **kwargs)
+        self.futures.append(future)
+        return future
+
+    def shutdown(self) -> None:
+        self.pool.shutdown(wait=True, cancel_futures=True)
 
 
 class ConflictRepository(SQLWorkflowRepository):
@@ -106,6 +129,18 @@ class ConcurrentRequeueRepository(SQLWorkflowRepository):
         return stored
 
 
+class BlockingCompletionRepository(SQLWorkflowRepository):
+    def __init__(self, database_url: str) -> None:
+        super().__init__(database_url)
+        self.completion_entered = Event()
+        self.release_completion = Event()
+
+    def complete_planning_operation(self, plan, record, *, expected_version: int):
+        self.completion_entered.set()
+        assert self.release_completion.wait(timeout=5)
+        return super().complete_planning_operation(plan, record, expected_version=expected_version)
+
+
 class RecordingRepository(SQLWorkflowRepository):
     def __init__(self) -> None:
         super().__init__("sqlite://")
@@ -113,6 +148,13 @@ class RecordingRepository(SQLWorkflowRepository):
 
     def update_operation(self, record, *, expected_version: int) -> StoredOperation:
         stored = super().update_operation(record, expected_version=expected_version)
+        self.transitions.append((record.state.value, record.stage.value, record.message))
+        return stored
+
+    def complete_planning_operation(self, plan, record, *, expected_version: int):
+        stored = super().complete_planning_operation(
+            plan, record, expected_version=expected_version
+        )
         self.transitions.append((record.state.value, record.stage.value, record.message))
         return stored
 
@@ -249,7 +291,87 @@ def test_resubmit_terminal_operation_reuses_id_and_schedules_once(initial_state:
     assert retried.state is OperationState.QUEUED
     assert retried.safe_error is None
     assert retried.cancel_requested is False
+    assert retried.attempt == first.attempt + 1
     assert len(executor.pending) == 1
+
+
+def test_cancel_immediate_resubmit_isolated_by_persisted_attempt(tmp_path) -> None:
+    repo = SQLWorkflowRepository(f"sqlite:///{tmp_path / 'attempts.db'}")
+    repo.save_snapshot("project-1", "{}", expected_version=0)
+    executor = TrackingThreadExecutor()
+    service = PlanningOperationService(repo, executor=executor)
+    old_started = Event()
+    release_old = Event()
+
+    class BlockingOldDesigner:
+        def design_experiment(self, question, *, capabilities, progress=None):
+            old_started.set()
+            assert release_old.wait(timeout=5)
+            return named_plan("stale attempt")
+
+    try:
+        first = submit(service, BlockingOldDesigner())
+        assert old_started.wait(timeout=5)
+        cancelled = service.cancel(first.operation_id)
+        retried = submit(service, FakeDesigner(named_plan("winning attempt")))
+
+        assert cancelled.attempt == 1
+        assert retried.attempt == 2
+        assert len(executor.futures) == 2
+        executor.futures[1].result(timeout=5)
+        release_old.set()
+        executor.futures[0].result(timeout=5)
+
+        final = service.get(first.operation_id)
+        assert final.state is OperationState.SUCCEEDED
+        assert final.attempt == 2
+        stored = repo.load_experiment_plan(final.result_ref)
+        assert stored is not None
+        assert ExperimentPlan.model_validate_json(stored.plan_json) == named_plan("winning attempt")
+        with repo._sessions() as session:
+            plans = session.scalars(select(ExperimentPlanRow)).all()
+        assert len(plans) == 1
+    finally:
+        release_old.set()
+        executor.shutdown()
+
+
+def test_cross_service_cancel_wins_before_atomic_plan_persistence(tmp_path) -> None:
+    repo = BlockingCompletionRepository(f"sqlite:///{tmp_path / 'cancel-store.db'}")
+    repo.save_snapshot("project-1", "{}", expected_version=0)
+    executor = TrackingThreadExecutor(max_workers=1)
+    worker_service = PlanningOperationService(repo, executor=executor)
+    cancelling_service = PlanningOperationService(repo, executor=ControlledExecutor())
+
+    try:
+        operation = submit(worker_service, FakeDesigner(named_plan("must not persist")))
+        assert repo.completion_entered.wait(timeout=5)
+        cancelled = cancelling_service.cancel(operation.operation_id)
+        repo.release_completion.set()
+        executor.futures[0].result(timeout=5)
+
+        assert cancelled.state is OperationState.CANCELLED
+        assert worker_service.get(operation.operation_id).state is OperationState.CANCELLED
+        with repo._sessions() as session:
+            plans = session.scalars(select(ExperimentPlanRow)).all()
+        assert plans == []
+    finally:
+        repo.release_completion.set()
+        executor.shutdown()
+
+
+def test_designer_identity_mismatch_is_rejected_before_operation_creation() -> None:
+    class MiswiredDesigner(FakeDesigner):
+        provider_name = "deepseek"
+        model_name = "deepseek-chat"
+
+    repo = repository()
+    service = PlanningOperationService(repo, executor=ControlledExecutor())
+
+    with pytest.raises(ValueError, match="designer provider"):
+        submit(service, MiswiredDesigner(valid_plan()))
+
+    assert repo.list_interrupted_operations() == ()
 
 
 def test_recover_interrupted_marks_operations_failed_and_retryable() -> None:

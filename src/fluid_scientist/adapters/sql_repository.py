@@ -67,9 +67,7 @@ class SQLWorkflowRepository:
         Base.metadata.create_all(self._engine)
         self._sessions = sessionmaker(self._engine, expire_on_commit=False)
 
-    def save_snapshot(
-        self, project_id: str, snapshot: str, *, expected_version: int
-    ) -> int:
+    def save_snapshot(self, project_id: str, snapshot: str, *, expected_version: int) -> int:
         now = datetime.now(UTC).isoformat()
         with self._sessions.begin() as session:
             project = session.get(ProjectRow, project_id)
@@ -214,9 +212,7 @@ class SQLWorkflowRepository:
                     f"operation {record.operation_id} identity fields are immutable"
                 )
             if row.created_at != record.created_at.isoformat():
-                raise OperationConflict(
-                    f"operation {record.operation_id} created_at is immutable"
-                )
+                raise OperationConflict(f"operation {record.operation_id} created_at is immutable")
             raise ConcurrentUpdateError(
                 f"operation {record.operation_id} could not be updated atomically"
             )
@@ -224,9 +220,7 @@ class SQLWorkflowRepository:
     def list_interrupted_operations(self) -> tuple[StoredOperation, ...]:
         with self._sessions() as session:
             rows = session.scalars(
-                select(OperationRow).order_by(
-                    OperationRow.created_at, OperationRow.operation_id
-                )
+                select(OperationRow).order_by(OperationRow.created_at, OperationRow.operation_id)
             ).all()
             stored = (self._stored_operation(row) for row in rows)
             return tuple(
@@ -234,6 +228,59 @@ class SQLWorkflowRepository:
                 for item in stored
                 if item.record.state in {OperationState.QUEUED, OperationState.RUNNING}
             )
+
+    def complete_planning_operation(
+        self,
+        plan: StoredExperimentPlan,
+        record: OperationRecord,
+        *,
+        expected_version: int,
+    ) -> StoredOperation:
+        """Atomically persist an accepted plan and its successful operation state."""
+
+        if record.kind is not OperationKind.PLAN:
+            raise OperationConflict("only planning operations can store experiment plans")
+        if record.state is not OperationState.SUCCEEDED or record.result_ref != plan.plan_id:
+            raise OperationConflict("planning completion must reference its accepted plan")
+        if plan.project_id != record.project_id:
+            raise OperationConflict("planning operation and plan project must match")
+
+        with self._sessions.begin() as session:
+            self._require_project(session, record.project_id)
+            new_version = expected_version + 1
+            result = session.execute(
+                update(OperationRow)
+                .where(
+                    OperationRow.operation_id == record.operation_id,
+                    OperationRow.version == expected_version,
+                    OperationRow.kind == record.kind.value,
+                    OperationRow.project_id == record.project_id,
+                    OperationRow.input_digest == record.input_digest,
+                    OperationRow.created_at == record.created_at.isoformat(),
+                )
+                .values(
+                    version=new_version,
+                    record_json=record.model_dump_json(),
+                    updated_at=record.updated_at.isoformat(),
+                )
+            )
+            if result.rowcount != 1:
+                raise ConcurrentUpdateError(
+                    f"operation {record.operation_id} could not be completed at expected "
+                    f"version {expected_version}"
+                )
+            session.add(
+                ExperimentPlanRow(
+                    plan_id=plan.plan_id,
+                    project_id=plan.project_id,
+                    version=plan.version,
+                    provider=plan.provider,
+                    model=plan.model,
+                    plan_json=plan.plan_json,
+                    created_at=datetime.now(UTC).isoformat(),
+                )
+            )
+            return StoredOperation(record=record, version=new_version)
 
     def store_experiment_plan(self, plan: StoredExperimentPlan) -> StoredExperimentPlan:
         with self._sessions.begin() as session:
@@ -491,9 +538,7 @@ class SQLWorkflowRepository:
         return self._stored_operation(row)
 
     @staticmethod
-    def _is_canonical_operation_create(
-        row: OperationRow, record: OperationRecord
-    ) -> bool:
+    def _is_canonical_operation_create(row: OperationRow, record: OperationRecord) -> bool:
         return (
             record.state is OperationState.QUEUED
             and record.stage is OperationStage.QUEUED
@@ -501,6 +546,7 @@ class SQLWorkflowRepository:
             and record.result_ref is None
             and record.safe_error is None
             and not record.cancel_requested
+            and record.attempt == 1
             and record.created_at.isoformat() == row.created_at
             and record.updated_at == record.created_at
         )

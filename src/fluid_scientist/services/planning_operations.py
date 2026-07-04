@@ -7,6 +7,7 @@ import json
 import unicodedata
 from collections.abc import Callable, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from threading import RLock
 from uuid import uuid4
@@ -40,6 +41,24 @@ _PROGRESS = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class PlanningModelSnapshot:
+    """Immutable attribution and execution binding for one planning attempt."""
+
+    provider: str
+    model: str
+    designer: ExperimentDesigner
+    capabilities: tuple[str, ...]
+
+    def validate_designer_identity(self) -> None:
+        designer_provider = getattr(self.designer, "provider_name", None)
+        if designer_provider is not None and designer_provider != self.provider:
+            raise ValueError("designer provider does not match planning snapshot")
+        designer_model = getattr(self.designer, "model_name", None)
+        if designer_model is not None and designer_model != self.model:
+            raise ValueError("designer model does not match planning snapshot")
+
+
 class PlanningOperationService:
     """Run experiment design off-request while persisting safe progress."""
 
@@ -61,7 +80,7 @@ class PlanningOperationService:
             self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="fluid-planning")
         self._owns_executor = executor is None
         self._lock = RLock()
-        self._scheduled: set[str] = set()
+        self._scheduled: set[tuple[str, int]] = set()
 
     def submit(
         self,
@@ -78,7 +97,14 @@ class PlanningOperationService:
         provider = self._required("provider", provider).lower()
         model = self._required("model", model)
         canonical_capabilities = self._capabilities(capabilities)
-        digest = self._digest(question, provider, model)
+        snapshot = PlanningModelSnapshot(
+            provider=provider,
+            model=model,
+            designer=designer,
+            capabilities=canonical_capabilities,
+        )
+        snapshot.validate_designer_identity()
+        digest = self._digest(question, snapshot)
 
         with self._lock:
             stored = self._repository.find_operation(OperationKind.PLAN, project_id, digest)
@@ -101,22 +127,22 @@ class PlanningOperationService:
                     stored.record.operation_id,
                 )
 
-            if should_schedule and stored.record.operation_id not in self._scheduled:
-                self._scheduled.add(stored.record.operation_id)
+            schedule_key = (stored.record.operation_id, stored.record.attempt)
+            if should_schedule and schedule_key not in self._scheduled:
+                self._scheduled.add(schedule_key)
                 try:
                     self._executor.submit(
                         self._run,
                         stored.record.operation_id,
+                        stored.record.attempt,
                         question,
-                        provider,
-                        model,
-                        designer,
-                        canonical_capabilities,
+                        snapshot,
                     )
                 except Exception:
-                    self._scheduled.discard(stored.record.operation_id)
-                    stored = self._transition(
+                    self._scheduled.discard(schedule_key)
+                    stored, _changed = self._transition_attempt(
                         stored.record.operation_id,
+                        stored.record.attempt,
                         lambda record: self._failed(record, "无法启动实验设计任务，请重试"),
                     )
             return stored.record
@@ -179,6 +205,7 @@ class PlanningOperationService:
                 result_ref=None,
                 safe_error=None,
                 cancel_requested=False,
+                attempt=stored.record.attempt + 1,
             )
             try:
                 updated = self._repository.update_operation(
@@ -198,19 +225,16 @@ class PlanningOperationService:
     def _run(
         self,
         operation_id: str,
+        attempt: int,
         question: str,
-        provider: str,
-        model: str,
-        designer: ExperimentDesigner,
-        capabilities: tuple[str, ...],
+        snapshot: PlanningModelSnapshot,
     ) -> None:
+        schedule_key = (operation_id, attempt)
         try:
             with self._lock:
-                current = self.get(operation_id)
-                if current.terminal or current.cancel_requested:
-                    return
-                self._transition(
+                _stored, started = self._transition_attempt(
                     operation_id,
+                    attempt,
                     lambda record: self._updated(
                         record,
                         state=OperationState.RUNNING,
@@ -218,21 +242,21 @@ class PlanningOperationService:
                         message="模型正在设计实验",
                     ),
                 )
+                if not started:
+                    return
 
-            plan = designer.design_experiment(
+            plan = snapshot.designer.design_experiment(
                 question,
-                capabilities=capabilities,
-                progress=lambda stage: self._record_progress(operation_id, stage),
+                capabilities=snapshot.capabilities,
+                progress=lambda stage: self._record_progress(operation_id, attempt, stage),
             )
             if not isinstance(plan, ExperimentPlan):
                 raise TypeError("designer returned a non-plan value")
 
             with self._lock:
-                current = self.get(operation_id)
-                if current.terminal or current.cancel_requested:
-                    return
-                self._transition(
+                _stored, storing = self._transition_attempt(
                     operation_id,
+                    attempt,
                     lambda record: self._updated(
                         record,
                         state=OperationState.RUNNING,
@@ -240,52 +264,30 @@ class PlanningOperationService:
                         message="正在保存实验计划",
                     ),
                 )
-                plan_id = str(uuid4())
-                self._repository.store_experiment_plan(
-                    StoredExperimentPlan(
-                        plan_id=plan_id,
-                        project_id=current.project_id,
-                        version=1,
-                        provider=provider,
-                        model=model,
-                        plan_json=plan.model_dump_json(),
-                    )
-                )
-                self._transition(
-                    operation_id,
-                    lambda record: self._updated(
-                        record,
-                        state=OperationState.SUCCEEDED,
-                        stage=OperationStage.COMPLETE,
-                        message="实验计划已生成",
-                        result_ref=plan_id,
-                        safe_error=None,
-                    ),
-                )
+                if not storing:
+                    return
+                self._complete_attempt(operation_id, attempt, plan, snapshot)
         except Exception as error:
             safe_error = self._safe_error(error)
             with self._lock:
-                current = self.get(operation_id)
-                if not current.terminal and not current.cancel_requested:
-                    self._transition(
-                        operation_id,
-                        lambda record: self._failed(record, safe_error),
-                    )
+                self._transition_attempt(
+                    operation_id,
+                    attempt,
+                    lambda record: self._failed(record, safe_error),
+                )
         finally:
             with self._lock:
-                self._scheduled.discard(operation_id)
+                self._scheduled.discard(schedule_key)
 
-    def _record_progress(self, operation_id: str, stage: str) -> None:
+    def _record_progress(self, operation_id: str, attempt: int, stage: str) -> None:
         progress = _PROGRESS.get(stage)
         if progress is None:
             return
         with self._lock:
-            current = self.get(operation_id)
-            if current.terminal or current.cancel_requested:
-                return
             operation_stage, message = progress
-            self._transition(
+            self._transition_attempt(
                 operation_id,
+                attempt,
                 lambda record: self._updated(
                     record,
                     state=OperationState.RUNNING,
@@ -293,6 +295,78 @@ class PlanningOperationService:
                     message=message,
                 ),
             )
+
+    def _complete_attempt(
+        self,
+        operation_id: str,
+        attempt: int,
+        plan: ExperimentPlan,
+        snapshot: PlanningModelSnapshot,
+    ) -> StoredOperation | None:
+        plan_id = str(uuid4())
+        for _attempt in range(_MAX_TRANSITION_ATTEMPTS):
+            stored = self._repository.load_operation(operation_id)
+            if stored is None:
+                raise KeyError(operation_id)
+            if (
+                stored.record.attempt != attempt
+                or stored.record.terminal
+                or stored.record.cancel_requested
+            ):
+                return None
+            artifact = StoredExperimentPlan(
+                plan_id=plan_id,
+                project_id=stored.record.project_id,
+                version=1,
+                provider=snapshot.provider,
+                model=snapshot.model,
+                plan_json=plan.model_dump_json(),
+            )
+            replacement = self._updated(
+                stored.record,
+                state=OperationState.SUCCEEDED,
+                stage=OperationStage.COMPLETE,
+                message="实验计划已生成",
+                result_ref=plan_id,
+                safe_error=None,
+            )
+            try:
+                return self._repository.complete_planning_operation(
+                    artifact, replacement, expected_version=stored.version
+                )
+            except ConcurrentUpdateError:
+                continue
+        raise ConcurrentUpdateError(
+            f"operation {operation_id} could not be completed after bounded retries"
+        )
+
+    def _transition_attempt(
+        self,
+        operation_id: str,
+        attempt: int,
+        change: Callable[[OperationRecord], OperationRecord],
+    ) -> tuple[StoredOperation, bool]:
+        for _attempt in range(_MAX_TRANSITION_ATTEMPTS):
+            stored = self._repository.load_operation(operation_id)
+            if stored is None:
+                raise KeyError(operation_id)
+            if (
+                stored.record.attempt != attempt
+                or stored.record.terminal
+                or stored.record.cancel_requested
+            ):
+                return stored, False
+            replacement = change(stored.record)
+            try:
+                return (
+                    self._repository.update_operation(replacement, expected_version=stored.version),
+                    True,
+                )
+            except ConcurrentUpdateError:
+                continue
+        raise ConcurrentUpdateError(
+            f"operation {operation_id} attempt {attempt} could not be updated after bounded retries"
+        )
 
     def _transition(
         self,
@@ -376,9 +450,13 @@ class PlanningOperationService:
         return normalized
 
     @staticmethod
-    def _digest(question: str, provider: str, model: str) -> str:
+    def _digest(question: str, snapshot: PlanningModelSnapshot) -> str:
         payload = json.dumps(
-            {"question": question, "provider": provider, "model": model},
+            {
+                "question": question,
+                "provider": snapshot.provider,
+                "model": snapshot.model,
+            },
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -386,4 +464,4 @@ class PlanningOperationService:
         return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
-__all__ = ["PlanningOperationService"]
+__all__ = ["PlanningModelSnapshot", "PlanningOperationService"]

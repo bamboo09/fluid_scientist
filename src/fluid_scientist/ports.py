@@ -119,6 +119,14 @@ class WorkflowRepository(Protocol):
         self, record: OperationRecord, *, expected_version: int
     ) -> StoredOperation: ...
 
+    def complete_planning_operation(
+        self,
+        plan: StoredExperimentPlan,
+        record: OperationRecord,
+        *,
+        expected_version: int,
+    ) -> StoredOperation: ...
+
     def list_interrupted_operations(self) -> Sequence[StoredOperation]: ...
 
     def bind_external_job(self, project_id: str, case_id: str, job_id: str) -> str: ...

@@ -62,16 +62,12 @@ def test_operation_enums_expose_persisted_values() -> None:
         (OperationState.CANCELLED, True),
     ],
 )
-def test_terminal_reflects_only_finished_states(
-    state: OperationState, expected: bool
-) -> None:
+def test_terminal_reflects_only_finished_states(state: OperationState, expected: bool) -> None:
     assert make_record(state=state).terminal is expected
 
 
 def test_operation_record_excludes_sensitive_and_raw_input_fields() -> None:
-    assert {"api_key", "provider_payload", "question"}.isdisjoint(
-        OperationRecord.model_fields
-    )
+    assert {"api_key", "provider_payload", "question"}.isdisjoint(OperationRecord.model_fields)
 
 
 def test_operation_record_rejects_extra_fields() -> None:
@@ -90,9 +86,7 @@ def test_operation_record_rejects_extra_fields() -> None:
         ("updated_at", "2026-07-04T00:00:00Z"),
     ],
 )
-def test_python_validation_rejects_coercive_inputs(
-    field: str, coercive_value: object
-) -> None:
+def test_python_validation_rejects_coercive_inputs(field: str, coercive_value: object) -> None:
     with pytest.raises(ValidationError):
         make_record(**{field: coercive_value})
 
@@ -134,6 +128,7 @@ def test_new_operation_has_safe_defaults_and_utc_timestamps() -> None:
     assert record.result_ref is None
     assert record.safe_error is None
     assert record.cancel_requested is False
+    assert record.attempt == 1
     assert record.created_at.tzinfo is UTC
     assert record.updated_at.tzinfo is UTC
     assert record.created_at == record.updated_at
@@ -173,3 +168,9 @@ def test_operation_record_is_frozen() -> None:
 
     with pytest.raises(ValidationError, match="frozen"):
         record.message = "changed"  # type: ignore[misc]
+
+
+@pytest.mark.parametrize("attempt", [0, -1, True, "1", 1.5])
+def test_operation_attempt_is_a_strict_positive_integer(attempt: object) -> None:
+    with pytest.raises(ValidationError, match="attempt"):
+        make_record(attempt=attempt)
