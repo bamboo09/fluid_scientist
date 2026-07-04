@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterable
+from decimal import Decimal
 from typing import Annotated, Literal
 
 from pydantic import (
@@ -28,7 +29,13 @@ NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_lengt
 Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
 JsonScalar = str | int | float
 
+_MAX_FILE_BYTES = 1_000_000
 _MAX_TOTAL_FILE_BYTES = 8 * 1024 * 1024
+_MAX_METADATA_ITEM_BYTES = 2 * 1024
+_MAX_METADATA_BYTES = 64 * 1024
+_MAX_ENUM_VALUE_BYTES = 120
+_MAX_ENUM_BYTES = 4 * 1024
+_MAX_NUMERIC_MAGNITUDE = Decimal("1e100")
 
 
 class GeneratedCaseFile(BaseModel):
@@ -37,7 +44,14 @@ class GeneratedCaseFile(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     path: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=240)]
-    content: str = Field(max_length=1_000_000)
+    content: str = Field(max_length=_MAX_FILE_BYTES)
+
+    @field_validator("path", "content", mode="before")
+    @classmethod
+    def require_string_fields(cls, value: object) -> object:
+        if type(value) is not str:
+            raise ValueError("file path and content must be strings")
+        return value
 
     @field_validator("path")
     @classmethod
@@ -53,9 +67,11 @@ class GeneratedCaseFile(BaseModel):
     @classmethod
     def require_utf8_content(cls, value: str) -> str:
         try:
-            value.encode("utf-8")
+            encoded = value.encode("utf-8")
         except UnicodeEncodeError as error:
             raise ValueError("file content must be valid UTF-8 text") from error
+        if len(encoded) > _MAX_FILE_BYTES:
+            raise ValueError("file content exceeds 1,000,000 UTF-8 bytes")
         return value
 
 
@@ -73,7 +89,7 @@ class GeneratedCaseParameter(BaseModel):
     maximum: JsonScalar | None = None
     default: JsonScalar
     regression_values: tuple[JsonScalar, ...] = Field(min_length=2, max_length=32)
-    allowed_values: tuple[str, ...] | None = None
+    allowed_values: tuple[str, ...] | None = Field(default=None, min_length=1, max_length=64)
 
     @field_validator("minimum", "maximum", "default", mode="before")
     @classmethod
@@ -88,9 +104,7 @@ class GeneratedCaseParameter(BaseModel):
 
     @field_validator("regression_values", mode="before")
     @classmethod
-    def validate_regression_scalars(
-        cls, values: object
-    ) -> object:
+    def validate_regression_scalars(cls, values: object) -> object:
         if not isinstance(values, (list, tuple)):
             raise ValueError("regression values must be an array")
         for value in values:
@@ -117,6 +131,10 @@ class GeneratedCaseParameter(BaseModel):
             raise ValueError("allowed_values must be unique")
         if any(not value.strip() for value in self.allowed_values):
             raise ValueError("allowed_values must be non-empty strings")
+        if any(len(value.encode("utf-8")) > _MAX_ENUM_VALUE_BYTES for value in self.allowed_values):
+            raise ValueError("allowed_values items cannot exceed 120 UTF-8 bytes")
+        if sum(len(value.encode("utf-8")) for value in self.allowed_values) > _MAX_ENUM_BYTES:
+            raise ValueError("allowed_values cannot exceed 4 KiB in total")
         if not isinstance(self.default, str) or self.default not in self.allowed_values:
             raise ValueError("enum default must be one of allowed_values")
         if any(
@@ -138,11 +156,13 @@ class GeneratedCaseParameter(BaseModel):
         elif any(type(value) not in (int, float) for value in values):
             raise ValueError("float parameter values must be numeric")
 
-        minimum = float(self.minimum)
-        maximum = float(self.maximum)
+        decimal_values = tuple(Decimal(str(value)) for value in values)
+        if any(abs(value) > _MAX_NUMERIC_MAGNITUDE for value in decimal_values):
+            raise ValueError("numeric parameter exceeds supported magnitude (1e100)")
+        minimum, maximum = decimal_values[:2]
         if minimum > maximum:
             raise ValueError("minimum cannot exceed maximum")
-        if any(not minimum <= float(value) <= maximum for value in values[2:]):
+        if any(not minimum <= value <= maximum for value in decimal_values[2:]):
             raise ValueError("default and regression values must be within bounds")
         return self
 
@@ -166,6 +186,13 @@ class GeneratedCaseDraft(BaseModel):
     assumptions: tuple[NonEmptyText, ...] = Field(min_length=1, max_length=64)
     limitations: tuple[NonEmptyText, ...] = Field(min_length=1, max_length=64)
 
+    @field_validator("assumptions", "limitations")
+    @classmethod
+    def bound_metadata_items(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(len(value.encode("utf-8")) > _MAX_METADATA_ITEM_BYTES for value in values):
+            raise ValueError("assumption and limitation items cannot exceed 2 KiB")
+        return values
+
     @model_validator(mode="after")
     def validate_manifest(self) -> GeneratedCaseDraft:
         if self.preprocessing != ("blockMesh", "checkMesh"):
@@ -173,6 +200,11 @@ class GeneratedCaseDraft(BaseModel):
         self._require_unique((item.path for item in self.files), "file paths")
         self._require_unique((item.name for item in self.parameters), "parameter names")
         self._require_unique(self.requested_outputs, "requested outputs")
+        metadata_bytes = sum(
+            len(value.encode("utf-8")) for value in (*self.assumptions, *self.limitations)
+        )
+        if metadata_bytes > _MAX_METADATA_BYTES:
+            raise ValueError("assumptions and limitations cannot exceed 64 KiB in total")
         total_bytes = sum(len(item.content.encode("utf-8")) for item in self.files)
         if total_bytes > _MAX_TOTAL_FILE_BYTES:
             raise ValueError("generated case content exceeds 8 MiB")

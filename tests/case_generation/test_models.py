@@ -7,6 +7,7 @@ from pydantic import ValidationError
 from fluid_scientist.case_generation.models import (
     GeneratedCaseDraft,
     GeneratedCaseDraftView,
+    GeneratedCaseFile,
     GeneratedCaseParameter,
 )
 
@@ -78,6 +79,22 @@ def test_generated_case_contract_bounds_files_and_total_utf8_bytes() -> None:
         GeneratedCaseDraft.model_validate(payload)
 
 
+def test_generated_case_file_limit_counts_utf8_bytes_not_characters() -> None:
+    accepted = "\U0001f40d" * 250_000
+    assert GeneratedCaseFile(path="0/U", content=accepted).content == accepted
+    with pytest.raises(ValidationError, match="1,000,000 UTF-8 bytes"):
+        GeneratedCaseFile(path="0/U", content=accepted + "\U0001f40d")
+
+
+@pytest.mark.parametrize("field", ["path", "content"])
+@pytest.mark.parametrize("value", [b"0/U", bytearray(b"0/U"), 123])
+def test_generated_case_file_fields_require_real_strings(field: str, value: object) -> None:
+    payload: dict[str, object] = {"path": "0/U", "content": "text"}
+    payload[field] = value
+    with pytest.raises(ValidationError, match="string"):
+        GeneratedCaseFile.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -138,6 +155,37 @@ def test_float_parameter_requires_finite_bounded_values() -> None:
             GeneratedCaseParameter.model_validate(float_parameter() | change)
 
 
+def test_integer_bounds_preserve_large_values_exactly() -> None:
+    large = 10**40
+    parameter = GeneratedCaseParameter.model_validate(
+        {
+            "name": "sample_count",
+            "kind": "integer",
+            "minimum": large,
+            "maximum": large + 3,
+            "default": large + 1,
+            "regression_values": [large + 2, large + 3],
+        }
+    )
+    assert parameter.default == large + 1
+    with pytest.raises(ValidationError, match="supported magnitude"):
+        GeneratedCaseParameter.model_validate(
+            {
+                "name": "sample_count",
+                "kind": "integer",
+                "minimum": 10**101,
+                "maximum": 10**101 + 3,
+                "default": 10**101 + 1,
+                "regression_values": [10**101 + 2, 10**101 + 3],
+            }
+        )
+
+
+def test_huge_finite_float_is_rejected_as_validation_error() -> None:
+    with pytest.raises(ValidationError, match="supported magnitude"):
+        GeneratedCaseParameter.model_validate(float_parameter() | {"maximum": 1e308})
+
+
 @pytest.mark.parametrize("value", [True, 1.5, "1"])
 def test_integer_parameter_rejects_bool_fraction_and_coercion(value: object) -> None:
     payload = {
@@ -175,6 +223,51 @@ def test_enum_parameter_requires_coherent_unique_allowed_values() -> None:
     ):
         with pytest.raises(ValidationError):
             GeneratedCaseParameter.model_validate(valid | change)
+
+
+def test_enum_allowed_value_metadata_is_bounded() -> None:
+    base = {
+        "name": "scheme",
+        "kind": "enum",
+        "default": "a",
+        "regression_values": ["a", "b"],
+    }
+    with pytest.raises(ValidationError):
+        GeneratedCaseParameter.model_validate(
+            base | {"allowed_values": ["a", "b", "x" * 121]}
+        )
+    with pytest.raises(ValidationError):
+        GeneratedCaseParameter.model_validate(
+            base | {"allowed_values": ["a", "b", *(f"v{i}" for i in range(63))]}
+        )
+    with pytest.raises(ValidationError, match="4 KiB"):
+        GeneratedCaseParameter.model_validate(
+            base
+            | {
+                "allowed_values": [
+                    "a",
+                    "b",
+                    *(f"v{i}_" + "\U0001f40d" * 29 for i in range(62)),
+                ]
+            }
+        )
+
+
+def test_assumption_and_limitation_metadata_is_bounded() -> None:
+    payload = valid_draft_payload()
+    payload["assumptions"] = ["\U0001f40d" * 513]
+    with pytest.raises(ValidationError, match="2 KiB"):
+        GeneratedCaseDraft.model_validate(payload)
+
+    payload = valid_draft_payload()
+    payload["limitations"] = [f"limit {index}" for index in range(65)]
+    with pytest.raises(ValidationError):
+        GeneratedCaseDraft.model_validate(payload)
+
+    payload = valid_draft_payload()
+    payload["assumptions"] = ["\U0001f40d" * 500 for _ in range(33)]
+    with pytest.raises(ValidationError, match="64 KiB"):
+        GeneratedCaseDraft.model_validate(payload)
 
 
 def test_parameter_rejects_kind_incoherence_and_non_scalar_values() -> None:
