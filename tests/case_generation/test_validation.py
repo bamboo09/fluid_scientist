@@ -405,6 +405,29 @@ def test_requires_matching_foam_object_name() -> None:
         )
 
 
+def test_rejects_quoted_foamfile_header_decoy() -> None:
+    content = (
+        'note "FoamFile { class dictionary; object controlDict; }";\n'
+        "application incompressibleFluid;\n"
+    )
+
+    with pytest.raises(GeneratedCaseRejected, match="FoamFile header"):
+        validate_generated_case(replace_file(content=content))
+
+
+def test_real_foamfile_header_ignores_unrelated_quoted_decoy() -> None:
+    content = (
+        'note "FoamFile { class volScalarField; object wrong; }";\n'
+        + _foam_header("dictionary", "controlDict")
+        + 'description "class wrong; object wrong;";\n'
+        + "application incompressibleFluid;\n"
+    )
+
+    assert validate_generated_case(replace_file(content=content)).manifest.solver == (
+        "incompressibleFluid"
+    )
+
+
 def test_packaging_is_deterministic_and_downstream_validated() -> None:
     first = validate_generated_case(draft())
     second = validate_generated_case(draft())

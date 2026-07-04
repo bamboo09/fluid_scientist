@@ -157,7 +157,7 @@ def _validate_content(path: str, content: str) -> None:
         scan = validate_dictionary_security(content)
     except OpenFOAMSecurityRejected as error:
         raise GeneratedCaseRejected(str(error)) from error
-    scanned = scan.comment_stripped
+    scanned = scan.operative
 
     expected_class = _MANDATORY_CLASSES.get(path)
     if expected_class is None:
