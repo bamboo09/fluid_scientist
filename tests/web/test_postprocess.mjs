@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  bindPostprocessButton,
   renderCavityCenterlineProfile,
   renderCylinderForceHistory,
   renderPostprocessResults,
@@ -19,6 +20,7 @@ class FakeElement {
     this._text = "";
     this.focusCalls = [];
     this.scrollCalls = [];
+    this.listeners = new Map();
   }
 
   set textContent(value) {
@@ -71,6 +73,18 @@ class FakeElement {
 
   scrollIntoView(options) {
     this.scrollCalls.push(options);
+  }
+
+  addEventListener(type, listener) {
+    const listeners = this.listeners.get(type) || [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  dispatchEvent(event) {
+    event.currentTarget = this;
+    for (const listener of this.listeners.get(event.type) || []) listener(event);
+    return true;
   }
 }
 
@@ -414,4 +428,132 @@ test("observable and validation strings cannot disclose hosts paths or commands"
   assert.match(root.textContent, /converged|通过/);
   assert.doesNotMatch(root.textContent, /10\.0\.0\.[89]|\/home\/research|\/etc\/passwd|paraFoam|ssh root|command:/i);
   assert.match(root.textContent, /已省略非数值文本/);
+});
+
+test("real solver and conservation fields render as bounded evidence", () => {
+  const root = element();
+  const results = validResults();
+  results.collection.solver = {
+    completed: true,
+    global_continuity_error: 1.2e-8,
+    cumulative_continuity_error: 4.5e-7,
+    inlet_mass_flow: 0.12,
+    outlet_mass_flow: 0.1198,
+    mass_imbalance: 0.0002,
+    pressure_drop_pa: 34.5,
+    iterations: 480,
+    final_residuals: { Ux: 1e-8 },
+  };
+  renderPostprocessResults(root, results);
+  assert.match(root.textContent, /求解与守恒/);
+  for (const evidence of ["已完成", "1.2000e-8", "0.12000", "0.11980", "0.00020000", "34.500", "480"]) {
+    assert.match(root.textContent, new RegExp(evidence));
+  }
+});
+
+test("mass imbalance is derived from actual signed worker flow fields", () => {
+  const root = element();
+  const results = validResults();
+  results.collection.solver = {
+    completed: true,
+    final_residuals: { U: 1e-7 },
+    inlet_mass_flow: 0.12,
+    outlet_mass_flow: -0.1198,
+  };
+  renderPostprocessResults(root, results);
+  assert.match(root.textContent, /质量不平衡0\.0016667/);
+  assert.match(root.textContent, /迭代次数未提供/);
+});
+
+test("large charts are deterministically sampled and bound fallback DOM", () => {
+  const series = Array.from({ length: 150_000 }, (_, index) => ({
+    position: index / 149_999,
+    velocity: Math.sin(index / 1000),
+  }));
+  const chart = renderCavityCenterlineProfile(series);
+  assert.equal(chart.children.some((child) => child.tagName === "SVG"), true);
+  assert.match(chart.textContent, /150000.*代表点|150,000.*代表点/);
+  assert.match(chart.textContent, /显示前 24 条/);
+  assert.equal((chart.textContent.match(/中心线速度/g) || []).length < 40, true);
+  assert.doesNotMatch(chart.textContent, /NaN|Infinity/);
+});
+
+test("residual evidence sanitizes hostile labels and caps field history", () => {
+  const root = element();
+  const results = validResults();
+  results.collection.solver.final_residuals = Object.fromEntries(
+    Array.from({ length: 40 }, (_, index) => [`field_${index}`, 1e-6 / (index + 1)]),
+  );
+  results.collection.solver.final_residuals["ssh root@10.0.0.9 /private"] = 1e-9;
+  results.collection.solver.residual_history = {
+    "command: cat /etc/passwd": [1, 0.1],
+  };
+  renderPostprocessResults(root, results);
+  assert.doesNotMatch(root.textContent, /10\.0\.0\.9|\/private|\/etc\/passwd|ssh root|command:/i);
+  assert.match(root.textContent, /共 42 个残差字段；显示前 23 个，已省略 19 个/);
+});
+
+test("large time directories and scalar maps stay bounded with explicit omissions", () => {
+  const root = element();
+  const results = validResults();
+  results.collection.numeric_times = Array.from({ length: 150_000 }, (_, index) => index);
+  results.collection.observables = Object.fromEntries(
+    Array.from({ length: 100 }, (_, index) => [`metric_${index}`, index]),
+  );
+  assert.doesNotThrow(() => renderPostprocessResults(root, results));
+  assert.match(root.textContent, /共 150000 个，已省略 149976 个/);
+  assert.match(root.textContent, /共 100 项；显示前 24 项，已省略 76 项/);
+  assert.doesNotMatch(root.textContent, /metric_50/);
+});
+
+test("nested residual values and labels cannot leak operational text", () => {
+  const root = element();
+  const results = validResults();
+  results.collection.solver.final_residuals = {
+    U: { "ssh root@10.8.0.1 /srv/private": "command: paraFoam" },
+  };
+  results.collection.solver.residual_history = {
+    p: [{ "/etc/passwd": "10.8.0.2" }, 0.1, 0.01],
+  };
+  renderPostprocessResults(root, results);
+  assert.doesNotMatch(root.textContent, /10\.8\.0\.[12]|\/srv\/private|\/etc\/passwd|paraFoam|command:/i);
+  assert.match(root.textContent, /已省略非数值文本|p 历史/);
+});
+
+test("force chart has a visible non-color legend and accessible series labels", () => {
+  const chart = renderCylinderForceHistory([
+    { time: 0, drag: 1.1, lift: 0 },
+    { time: 1, drag: 1.2, lift: 0.2 },
+  ]);
+  assert.match(chart.textContent, /图例.*阻力.*升力/);
+  const svg = chart.children.find((child) => child.tagName === "SVG");
+  const polylines = svg.children.filter((child) => child.tagName === "POLYLINE");
+  assert.equal(polylines.every((line) => line.getAttribute("aria-label")), true);
+  assert.equal(polylines.some((line) => line.getAttribute("stroke-dasharray")), true);
+});
+
+test("static and dynamic buttons dispatch through the same reveal binder", async () => {
+  let fetches = 0;
+  for (const label of ["static", "dynamic"]) {
+    const button = element("button");
+    button.textContent = label;
+    const root = element();
+    root.hidden = true;
+    bindPostprocessButton({
+      button,
+      root,
+      getRequest: () => ({
+        fetchResults: async () => {
+          fetches += 1;
+          return validResults();
+        },
+        sessionKey: label,
+      }),
+    });
+    button.dispatchEvent({ type: "click" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(root.hidden, false);
+    assert.match(root.textContent, /浏览器后处理结果/);
+  }
+  assert.equal(fetches, 2);
 });

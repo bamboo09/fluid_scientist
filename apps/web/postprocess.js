@@ -3,6 +3,9 @@ const inflightByRoot = new WeakMap();
 const renderedByRoot = new WeakMap();
 const buttonLabels = new WeakMap();
 const MAX_EVIDENCE_ROWS = 24;
+const MAX_CHART_POINTS = 240;
+const MAX_CHART_TABLE_ROWS = 24;
+const MAX_RESIDUAL_FIELDS = 24;
 const SAFE_STATUS_VALUES = new Set([
   "complete", "completed", "converged", "diverged", "failed", "invalid", "ok",
   "passed", "valid", "warning", "不可信", "可信", "完成", "收敛", "未完成", "未收敛",
@@ -68,7 +71,8 @@ function appendTable(root, captionText, rows, className = "evidence-table") {
   const heading = node("h4", captionText);
   const table = node("table", undefined, className);
   const body = node("tbody");
-  for (const [label, value] of rows) {
+  const visibleRows = rows.slice(0, MAX_EVIDENCE_ROWS);
+  for (const [label, value] of visibleRows) {
     const row = node("tr");
     const header = node("th", label);
     header.setAttribute("scope", "row");
@@ -77,6 +81,13 @@ function appendTable(root, captionText, rows, className = "evidence-table") {
   }
   table.append(body);
   section.append(heading, table);
+  if (rows.length > visibleRows.length) {
+    section.append(node(
+      "p",
+      `共 ${rows.length} 项；显示前 ${visibleRows.length} 项，已省略 ${rows.length - visibleRows.length} 项。`,
+      "evidence-summary",
+    ));
+  }
   root.append(section);
   return section;
 }
@@ -84,7 +95,8 @@ function appendTable(root, captionText, rows, className = "evidence-table") {
 function numericPoints(series, xKeys, yKeys) {
   if (!Array.isArray(series)) return [];
   const points = [];
-  for (const item of series) {
+  for (const index of sampleIndexes(series.length, MAX_CHART_POINTS)) {
+    const item = series[index];
     if (!item || typeof item !== "object") continue;
     const x = xKeys.map((key) => finiteNumber(item[key])).find((value) => value !== null);
     const y = yKeys.map((key) => finiteNumber(item[key])).find((value) => value !== null);
@@ -93,12 +105,21 @@ function numericPoints(series, xKeys, yKeys) {
   return points;
 }
 
+function sampleIndexes(length, limit) {
+  if (length <= 0) return [];
+  if (length <= limit) return Array.from({ length }, (_, index) => index);
+  return Array.from({ length: limit }, (_, index) => (
+    Math.round((index * (length - 1)) / (limit - 1))
+  ));
+}
+
 function parallelPoints(series, xKeys, yKeys) {
   if (!series || typeof series !== "object" || Array.isArray(series)) return [];
   const xValues = xKeys.map((key) => series[key]).find(Array.isArray);
   const yValues = yKeys.map((key) => series[key]).find(Array.isArray);
   if (!xValues || !yValues || xValues.length !== yValues.length) return [];
-  return xValues.flatMap((xValue, index) => {
+  return sampleIndexes(xValues.length, MAX_CHART_POINTS).flatMap((index) => {
+    const xValue = xValues[index];
     const x = finiteNumber(xValue);
     const y = finiteNumber(yValues[index]);
     return x === null || y === null ? [] : [{ x, y }];
@@ -112,16 +133,21 @@ function missingChart(title) {
 }
 
 function renderChart({ title, xLabel, yLabel, series }) {
-  const usable = series.filter((entry) => entry.points.length >= 2);
+  const usable = series.slice(0, 4).filter((entry) => entry.points.length >= 2);
   if (!usable.length) return missingChart(title);
 
-  const allPoints = usable.flatMap((entry) => entry.points);
-  const xValues = allPoints.map((point) => point.x);
-  const yValues = allPoints.map((point) => point.y);
-  let xMin = Math.min(...xValues);
-  let xMax = Math.max(...xValues);
-  let yMin = Math.min(...yValues);
-  let yMax = Math.max(...yValues);
+  let xMin = Infinity;
+  let xMax = -Infinity;
+  let yMin = Infinity;
+  let yMax = -Infinity;
+  for (const entry of usable) {
+    for (const point of entry.points) {
+      xMin = Math.min(xMin, point.x);
+      xMax = Math.max(xMax, point.x);
+      yMin = Math.min(yMin, point.y);
+      yMax = Math.max(yMax, point.y);
+    }
+  }
   if (xMin === xMax) { xMin -= 0.5; xMax += 0.5; }
   if (yMin === yMax) { yMin -= 0.5; yMax += 0.5; }
 
@@ -133,6 +159,14 @@ function renderChart({ title, xLabel, yLabel, series }) {
   const titleId = `postprocess-chart-${++chartSequence}`;
   const root = node("section", undefined, "evidence-chart");
   root.append(node("h4", title));
+  const legend = node("div", undefined, "chart-legend");
+  legend.append(node("strong", "图例"));
+  usable.forEach((entry, index) => {
+    const item = node("span");
+    item.append(node("i", undefined, `chart-key chart-key-${index + 1}`), node("span", entry.label));
+    legend.append(item);
+  });
+  root.append(legend);
   const svg = svgNode("svg", {
     viewBox: `0 0 ${width} ${height}`,
     role: "img",
@@ -152,6 +186,9 @@ function renderChart({ title, xLabel, yLabel, series }) {
       points: entry.points.map((point) => `${xScale(point.x).toFixed(2)},${yScale(point.y).toFixed(2)}`).join(" "),
       class: `chart-series chart-series-${index + 1}`,
       fill: "none",
+      role: "img",
+      "aria-label": `${entry.label}曲线`,
+      "stroke-dasharray": index % 2 === 1 ? "7 4" : "none",
     });
     const seriesTitle = svgNode("title");
     seriesTitle.textContent = entry.label;
@@ -167,15 +204,29 @@ function renderChart({ title, xLabel, yLabel, series }) {
   for (const label of ["曲线", xLabel, yLabel]) headingRow.append(node("th", label));
   head.append(headingRow);
   const body = node("tbody");
+  let fallbackRows = 0;
   for (const entry of usable) {
     for (const point of entry.points) {
+      if (fallbackRows >= MAX_CHART_TABLE_ROWS) break;
       const row = node("tr");
       row.append(node("th", entry.label), node("td", displayValue(point.x)), node("td", displayValue(point.y)));
       body.append(row);
+      fallbackRows += 1;
     }
+    if (fallbackRows >= MAX_CHART_TABLE_ROWS) break;
   }
   fallback.append(head, body);
   root.append(fallback);
+  for (const entry of usable) {
+    const totalCount = entry.totalCount || entry.points.length;
+    if (totalCount > entry.points.length || totalCount > MAX_CHART_TABLE_ROWS) {
+      root.append(node(
+        "p",
+        `${entry.label}共 ${totalCount} 个原始点；绘制 ${entry.points.length} 个代表点，已省略 ${Math.max(0, totalCount - entry.points.length)} 个绘图点；表格显示前 ${Math.min(MAX_CHART_TABLE_ROWS, entry.points.length)} 条。`,
+        "evidence-summary",
+      ));
+    }
+  }
   for (const entry of series.filter((candidate) => candidate.points.length < 2)) {
     root.append(node("p", `${entry.label}：当前结果未包含该曲线`, "curve-note"));
   }
@@ -193,6 +244,11 @@ export function renderCavityCenterlineProfile(series) {
     yLabel: "速度",
     series: [{
       label: "中心线速度",
+      totalCount: Array.isArray(source)
+        ? source.length
+        : Array.isArray(series?.position)
+          ? series.position.length
+          : points.length,
       points: points.length ? points : parallelPoints(
         series,
         ["position", "coordinate", "x", "y"],
@@ -210,23 +266,79 @@ export function renderCylinderForceHistory(series) {
     xLabel: "时间",
     yLabel: "力系数",
     series: [
-      { label: "阻力", points: drag.length ? drag : parallelPoints(series, ["time", "t"], ["drag", "cd", "drag_coefficient"]) },
-      { label: "升力", points: lift.length ? lift : parallelPoints(series, ["time", "t"], ["lift", "cl", "lift_coefficient"]) },
+      {
+        label: "阻力",
+        totalCount: Array.isArray(series) ? series.length : series?.time?.length,
+        points: drag.length ? drag : parallelPoints(series, ["time", "t"], ["drag", "cd", "drag_coefficient"]),
+      },
+      {
+        label: "升力",
+        totalCount: Array.isArray(series) ? series.length : series?.time?.length,
+        points: lift.length ? lift : parallelPoints(series, ["time", "t"], ["lift", "cl", "lift_coefficient"]),
+      },
     ],
   });
 }
 
 function residualRows(solver) {
   const rows = [];
-  for (const [field, value] of Object.entries(solver?.final_residuals || {})) {
-    rows.push([`${field} 最终值`, displayValue(value)]);
+  const finalEntries = Object.entries(solver?.final_residuals || {});
+  const historyEntries = Object.entries(solver?.residual_history || {});
+  const totalFields = finalEntries.length + historyEntries.length;
+  const dataLimit = totalFields > MAX_RESIDUAL_FIELDS
+    ? MAX_RESIDUAL_FIELDS - 1
+    : MAX_RESIDUAL_FIELDS;
+  for (const [field, value] of finalEntries) {
+    if (rows.length >= dataLimit) break;
+    rows.push([`${displayLabel(field)} 最终值`, displayValue(value)]);
   }
-  for (const [field, history] of Object.entries(solver?.residual_history || {})) {
-    const values = Array.isArray(history) ? history.map(finiteNumber).filter((value) => value !== null) : [];
-    if (!values.length) continue;
-    rows.push([`${field} 历史`, `${values.length} 点；初值 ${displayValue(values[0])}；末值 ${displayValue(values.at(-1))}`]);
+  for (const [field, history] of historyEntries) {
+    if (rows.length >= dataLimit) break;
+    if (!Array.isArray(history)) continue;
+    let first = null;
+    let last = null;
+    let count = 0;
+    for (const value of history) {
+      const number = finiteNumber(value);
+      if (number === null) continue;
+      if (first === null) first = number;
+      last = number;
+      count += 1;
+    }
+    if (!count) continue;
+    rows.push([`${displayLabel(field)} 历史`, `${count} 点；初值 ${displayValue(first)}；末值 ${displayValue(last)}`]);
+  }
+  if (totalFields > MAX_RESIDUAL_FIELDS) {
+    rows.push([
+      "显示范围",
+      `共 ${totalFields} 个残差字段；显示前 ${dataLimit} 个，已省略 ${totalFields - dataLimit} 个`,
+    ]);
   }
   return rows.length ? rows : [["残差", "未提供"]];
+}
+
+function solverRows(solver) {
+  const source = scalarObject(solver);
+  const inlet = finiteNumber(source.inlet_mass_flow);
+  const outlet = finiteNumber(source.outlet_mass_flow);
+  const reference = inlet === null || outlet === null
+    ? 0
+    : Math.max(Math.abs(inlet), Math.abs(outlet));
+  const derivedImbalance = reference > 0
+    ? Math.abs(inlet + outlet) / reference
+    : null;
+  return [
+    ["求解器状态", source.completed === true ? "已完成" : source.completed === false ? "未完成" : "未提供"],
+    ["全局连续性误差", displayValue(source.global_continuity_error)],
+    ["累计连续性误差", displayValue(source.cumulative_continuity_error)],
+    ["入口质量流量", displayValue(source.inlet_mass_flow)],
+    ["出口质量流量", displayValue(source.outlet_mass_flow)],
+    ["质量不平衡", displayValue(
+      source.mass_imbalance ?? source.mass_imbalance_fraction ?? derivedImbalance,
+    )],
+    ["压降 / Pa", displayValue(source.pressure_drop_pa)],
+    ["迭代次数", displayValue(source.iterations)],
+  ];
 }
 
 function scalarRows(value) {
@@ -352,6 +464,7 @@ export function renderPostprocessResults(root, results) {
     ["平均非正交度", displayValue(mesh.average_non_orthogonality)],
     ["最大偏斜度", displayValue(mesh.max_skewness)],
   ]);
+  appendTable(root, "求解与守恒", solverRows(collection.solver));
   appendTable(root, "残差", residualRows(collection.solver));
 
   const rawTimes = Array.isArray(collection.numeric_times)
@@ -363,7 +476,16 @@ export function renderPostprocessResults(root, results) {
     .map(finiteNumber)
     .filter((value) => value !== null)
     .sort((a, b) => a - b);
-  appendTable(root, "数值时间", [["时间目录", numericTimes.length ? numericTimes.join("、") : "未提供"]]);
+  const visibleTimes = numericTimes.length <= MAX_EVIDENCE_ROWS
+    ? numericTimes
+    : sampleIndexes(numericTimes.length, MAX_EVIDENCE_ROWS).map((index) => numericTimes[index]);
+  const timeSummary = visibleTimes.length ? visibleTimes.join("、") : "未提供";
+  appendTable(root, "数值时间", [[
+    "时间目录",
+    numericTimes.length > visibleTimes.length
+      ? `${timeSummary}（共 ${numericTimes.length} 个，已省略 ${numericTimes.length - visibleTimes.length} 个）`
+      : timeSummary,
+  ]]);
 
   const observables = scalarObject(collection.observables);
   const observableScalars = scalarRows(observables);
@@ -458,4 +580,13 @@ export function revealPostprocess({ root, button, results, fetchResults, session
     });
   inflightByRoot.set(root, { promise, sessionKey, token });
   return promise;
+}
+
+export function bindPostprocessButton({ button, root, getRequest }) {
+  if (!button || !root || typeof getRequest !== "function") return () => {};
+  const listener = () => {
+    void revealPostprocess({ root, button, ...getRequest() });
+  };
+  button.addEventListener("click", listener);
+  return listener;
 }

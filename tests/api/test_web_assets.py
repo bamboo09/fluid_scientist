@@ -349,10 +349,11 @@ def test_structured_results_postprocessing_and_analysis_remain_reachable() -> No
     html = read_asset("apps/web/index.html")
     script = read_asset("apps/web/app.js")
     controller = read_asset("apps/web/postprocess.js")
+    state = read_asset("apps/web/result-state.js")
 
     assert 'id="postprocess-results"' in html
-    assert "/experiment-plans/${planId}/results?" in script
-    assert "/experiment-plans/${planId}/analysis?" in script
+    assert "plannedResultUrl" in script
+    assert "/experiment-plans/${encodedPlanId}/${safeAction}?" in state
     assert "renderPostprocessResults" in controller
     assert "renderExperimentAnalysis" in script
     for result_field in (
@@ -371,14 +372,15 @@ def test_both_postprocess_buttons_use_one_reveal_controller() -> None:
     controller = read_asset("apps/web/postprocess.js")
 
     assert 'id="view-postprocess"' in html
-    assert 'byId("view-postprocess")?.addEventListener' in app
+    assert 'const staticPostprocessButton = byId("view-postprocess")' in app
     assert 'from "./postprocess.js"' in app
-    assert "revealPostprocess" in app
+    assert "revealPostprocess" in controller
     assert "bindPostprocessButton" in app
+    assert "bindPostprocessReveal" in app
     assert "postButton.addEventListener" not in app
-    show_source = function_source(app, "showPostprocess")
-    assert "const sessionKey = postprocessSessionKey()" in show_source
-    assert "fetchCurrentPostprocessResults(sessionKey)" in show_source
+    bind_source = function_source(app, "bindPostprocessButton")
+    assert "const sessionKey = postprocessSessionKey()" in bind_source
+    assert "fetchCurrentPostprocessResults(sessionKey)" in bind_source
     render_source = function_source(app, "renderResultsCard")
     assert "renderPostprocessResults(results)" not in render_source
     assert 'analyzeButton.textContent = "实验结果分析与报告"' in render_source

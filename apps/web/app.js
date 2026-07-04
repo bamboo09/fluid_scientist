@@ -17,7 +17,14 @@ import {
   OperationPoller,
   createResultLoader,
 } from "./operation-lifecycle.js";
-import { revealPostprocess } from "./postprocess.js";
+import {
+  bindPostprocessButton as bindPostprocessReveal,
+} from "./postprocess.js";
+import {
+  analysisAvailability,
+  normalizeResultPayload,
+  plannedResultUrl,
+} from "./result-state.js";
 
 const $ = (selector) => document.querySelector(selector);
 const byId = (id) => document.getElementById(id);
@@ -874,20 +881,17 @@ async function fetchCurrentPostprocessResults(expectedSessionKey) {
   if (!identity.projectId || !identity.planId || !identity.caseId || !identity.targetId) {
     throw new Error("missing-result-identity");
   }
-  const query = new URLSearchParams({
-    target_id: identity.targetId,
-    case_id: identity.caseId,
-  });
-  const results = await requestJson(
-    `/api/projects/${identity.projectId}/experiment-plans/${identity.planId}/results?${query}`,
-  );
+  const results = await requestJson(plannedResultUrl({ ...identity, action: "results" }));
   const current = postprocessIdentity();
   const identityChanged = Object.keys(identity).some((key) => identity[key] !== current[key]);
   if (identityChanged || expectedSessionKey !== postprocessSessionKey()) {
     throw new Error("stale-result-session");
   }
-  latestResults = results;
-  return results;
+  latestResults = normalizeResultPayload(results, {
+    source: "planned",
+    planId: identity.planId,
+  });
+  return latestResults.postprocessPayload;
 }
 
 function postprocessSessionKey() {
@@ -895,25 +899,24 @@ function postprocessSessionKey() {
   return `${identity.projectId}:${identity.planId}:${identity.caseId}:${identity.targetId}:${postprocessSessionVersion}`;
 }
 
-function showPostprocess(button, root, results = latestResults) {
-  const sessionKey = postprocessSessionKey();
-  return revealPostprocess({
-    root,
-    button,
-    results,
-    fetchResults: () => fetchCurrentPostprocessResults(sessionKey),
-    sessionKey,
-  });
-}
-
 function bindPostprocessButton(button, root, results = () => latestResults) {
-  button.addEventListener("click", () => {
-    void showPostprocess(button, root, results());
+  return bindPostprocessReveal({
+    button,
+    root,
+    getRequest: () => {
+      const resultContext = results();
+      const sessionKey = postprocessSessionKey();
+      return {
+        results: resultContext?.postprocessPayload || resultContext || null,
+        fetchResults: () => fetchCurrentPostprocessResults(sessionKey),
+        sessionKey,
+      };
+    },
   });
 }
 
-function renderResultsCard(results) {
-  latestResults = results;
+function renderResultsCard(results, { source = "planned", planId = null } = {}) {
+  latestResults = normalizeResultPayload(results, { source, planId });
   postprocessSessionVersion += 1;
   renderTaskCard({
     ...activeTask,
@@ -927,7 +930,7 @@ function renderResultsCard(results) {
     (stream || document.body).append(card);
   }
   card.querySelectorAll(":scope > :not(h2)").forEach((node) => node.remove());
-  const summary = results.summary || {};
+  const summary = latestResults.summary;
   const body = document.createElement("p");
   body.textContent = `网格 ${summary.mesh_passed ? "通过" : "未通过"} · 求解 ${summary.solver_completed ? "完成" : "未完成"} · ${text(summary.cells)} 个单元`;
   const postButton = document.createElement("button");
@@ -939,13 +942,23 @@ function renderResultsCard(results) {
   postprocessRoot.hidden = true;
   postprocessRoot.setAttribute("aria-live", "polite");
   postprocessRoot.setAttribute("aria-busy", "false");
-  bindPostprocessButton(postButton, postprocessRoot, () => results);
+  bindPostprocessButton(postButton, postprocessRoot);
   const analyzeButton = document.createElement("button");
   analyzeButton.type = "button";
   analyzeButton.className = "button button-primary";
   analyzeButton.textContent = "实验结果分析与报告";
   analyzeButton.addEventListener("click", analyzeExperimentResults);
-  card.append(body, postButton, analyzeButton, postprocessRoot);
+  const availability = analysisAvailability({
+    resultContext: latestResults,
+    ...postprocessIdentity(),
+  });
+  analyzeButton.disabled = !availability.allowed;
+  if (!availability.allowed) analyzeButton.title = availability.message;
+  const analysisNote = document.createElement("p");
+  analysisNote.className = "result-analysis-note";
+  analysisNote.textContent = availability.allowed ? "" : availability.message;
+  analysisNote.hidden = availability.allowed;
+  card.append(body, postButton, analyzeButton, analysisNote, postprocessRoot);
 }
 
 async function pollPlannedExperiment(jobId, targetId, projectId, planId, caseId) {
@@ -964,12 +977,11 @@ async function pollPlannedExperiment(jobId, targetId, projectId, planId, caseId)
     });
     if (phase === "failed" || phase === "cancelled") return;
     if (job.state === "succeeded") {
-      const query = new URLSearchParams({ target_id: targetId, case_id: caseId });
-      const results = await requestJson(
-        `/api/projects/${projectId}/experiment-plans/${planId}/results?${query}`,
-      );
+      const results = await requestJson(plannedResultUrl({
+        projectId, planId, caseId, targetId, action: "results",
+      }));
       currentProject = results.project || currentProject;
-      renderResultsCard(results);
+      renderResultsCard(results, { source: "planned", planId });
       return;
     }
     schedulePoll(() => pollPlannedExperiment(jobId, targetId, projectId, planId, caseId));
@@ -1010,15 +1022,15 @@ function renderExperimentAnalysis(result) {
 }
 
 async function analyzeExperimentResults() {
-  const projectId = currentProject?.project_id || localStorage.getItem(storageKeys.projectId);
-  const planId = currentPlan?.plan_id || localStorage.getItem(storageKeys.planId);
-  const caseId = localStorage.getItem(storageKeys.caseId);
-  const targetId = selectedTarget || localStorage.getItem(storageKeys.targetId);
-  if (!projectId || !planId || !caseId || !targetId || !latestResults) return;
+  const identity = postprocessIdentity();
+  const availability = analysisAvailability({ resultContext: latestResults, ...identity });
+  if (!availability.allowed) {
+    renderError("模型结果分析", new Error(availability.message));
+    return;
+  }
   try {
-    const query = new URLSearchParams({ target_id: targetId, case_id: caseId });
     const analysis = await requestJson(
-      `/api/projects/${projectId}/experiment-plans/${planId}/analysis?${query}`,
+      plannedResultUrl({ ...identity, action: "analysis" }),
       { method: "POST" },
     );
     renderExperimentAnalysis(analysis);
@@ -1270,7 +1282,7 @@ async function pollCustomCase(jobId, targetId) {
     if (phase === "failed" || phase === "cancelled") return;
     if (job.state === "succeeded") {
       const collection = await requestJson(`/api/custom-cases/${jobId}/results?${query}`);
-      renderResultsCard(collection);
+      renderResultsCard(collection, { source: "legacy_custom" });
       return;
     }
     schedulePoll(() => pollCustomCase(jobId, targetId));
@@ -1323,10 +1335,11 @@ function bindEvents() {
   byId("open-custom-case")?.addEventListener("click", () => openDialog("custom-case-drawer"));
   byId("cancel-operation")?.addEventListener("click", cancelActiveOperation);
   byId("retry-operation")?.addEventListener("click", retryActiveOperation);
-  byId("view-postprocess")?.addEventListener("click", (event) => {
-    const root = byId("postprocess-results");
-    if (root) void showPostprocess(event.currentTarget, root);
-  });
+  const staticPostprocessButton = byId("view-postprocess");
+  const staticPostprocessRoot = byId("postprocess-results");
+  if (staticPostprocessButton && staticPostprocessRoot) {
+    bindPostprocessButton(staticPostprocessButton, staticPostprocessRoot);
+  }
   startNewExperiment?.addEventListener("click", resetResearchSession);
   document.querySelectorAll("[data-open-dialog]").forEach((button) => {
     button.addEventListener("click", () => openDialog(button.dataset.openDialog));
