@@ -394,7 +394,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .postprocess-results:focus { outline: 2px solid var(--teal); outline-offset: 4px; }
 .postprocess-results[aria-busy="true"] { border-left: 3px solid var(--amber); }
 .postprocess-loading { margin: 0; color: var(--muted); font: 10px/1.6 var(--mono); }
-.postprocess-summary, .curve-note { color: var(--muted); font-size: 11px; }
+.postprocess-summary, .curve-note, .evidence-summary { color: var(--muted); font-size: 11px; }
 .postprocess-section { min-width: 0; margin-top: 18px; }
 .postprocess-section h4, .evidence-chart h4 { margin: 0 0 8px; font: 600 11px/1.4 var(--sans); }
 .evidence-table, .chart-fallback {

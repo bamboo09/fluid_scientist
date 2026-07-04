@@ -331,3 +331,87 @@ test("reveal avoids smooth scrolling when reduced motion is requested", async ()
   assert.deepEqual(root.scrollCalls, [{ behavior: "auto", block: "start" }]);
   delete globalThis.window;
 });
+
+test("actual worker probe arrays render bounded finite evidence tables", () => {
+  const root = element();
+  const results = {
+    collection: {
+      mesh: { passed: true, cells: 4096 },
+      solver: { completed: true, final_residuals: { Ux: 1e-8 } },
+      observables: {
+        moment_coefficient: 2e-6,
+        velocity_probes: [
+          [0.1, 0.2, 0],
+          [-0.1, 0.3, 0],
+        ],
+        pressure_probes: [-0.02, 0.01, 0.04],
+      },
+      validation: { passed: false, relative_error: 999 },
+      post_processing: { paraview_file: "/private/run/cavity.foam" },
+    },
+    validation: { passed: true, relative_error: 0.015, measured_pressure_drop_pa: 12.4 },
+  };
+
+  renderPostprocessResults(root, results);
+
+  assert.match(root.textContent, /速度探针|velocity_probes/);
+  assert.match(root.textContent, /压力探针|pressure_probes/);
+  assert.match(root.textContent, /0\.1|0\.10000/);
+  assert.match(root.textContent, /-0\.02|-0\.020000/);
+  assert.match(root.textContent, /0\.015|0\.015000/);
+  assert.doesNotMatch(root.textContent, /999/);
+});
+
+test("structured probe points preserve coordinates and values without inventing rows", () => {
+  const root = element();
+  const results = validResults();
+  results.collection.observables = {
+    temperature_probes: [
+      { coordinates: [0, 0.5, 1], value: 298.15 },
+      { x: 1, y: 0.5, z: 0, values: [299.1, 0.02] },
+      { coordinates: [0, Infinity, 1], value: 300 },
+    ],
+  };
+
+  renderPostprocessResults(root, results);
+
+  assert.match(root.textContent, /temperature_probes/);
+  assert.match(root.textContent, /0\.5|0\.50000/);
+  assert.match(root.textContent, /298\.15/);
+  assert.match(root.textContent, /当前结果未包含.*1.*条/);
+  assert.doesNotMatch(root.textContent, /Infinity|NaN/);
+});
+
+test("large probe collections are bounded and summarized", () => {
+  const root = element();
+  const results = validResults();
+  results.collection.observables = {
+    pressure_probes: Array.from({ length: 40 }, (_, index) => index / 10),
+  };
+  renderPostprocessResults(root, results);
+  assert.match(root.textContent, /共 40 条/);
+  assert.match(root.textContent, /显示前 24 条/);
+  assert.equal((root.textContent.match(/探针 /g) || []).length <= 24, true);
+});
+
+test("observable and validation strings cannot disclose hosts paths or commands", () => {
+  const root = element();
+  const results = validResults();
+  results.collection.observables = {
+    solver_status: "converged",
+    remote_path: "/home/research/private/case",
+    host_note: "ssh root@10.0.0.8 paraFoam -case /secret",
+    "ssh root@10.0.0.9": 1,
+  };
+  results.validation = {
+    passed: true,
+    status: "通过",
+    diagnostic: "command: cat /etc/passwd on 10.0.0.8",
+  };
+
+  renderPostprocessResults(root, results);
+
+  assert.match(root.textContent, /converged|通过/);
+  assert.doesNotMatch(root.textContent, /10\.0\.0\.[89]|\/home\/research|\/etc\/passwd|paraFoam|ssh root|command:/i);
+  assert.match(root.textContent, /已省略非数值文本/);
+});

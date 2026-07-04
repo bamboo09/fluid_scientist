@@ -2,6 +2,24 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 const inflightByRoot = new WeakMap();
 const renderedByRoot = new WeakMap();
 const buttonLabels = new WeakMap();
+const MAX_EVIDENCE_ROWS = 24;
+const SAFE_STATUS_VALUES = new Set([
+  "complete", "completed", "converged", "diverged", "failed", "invalid", "ok",
+  "passed", "valid", "warning", "不可信", "可信", "完成", "收敛", "未完成", "未收敛",
+  "未通过", "通过",
+]);
+const OBSERVABLE_LABELS = Object.freeze({
+  pressure_probes: "压力探针（pressure_probes）",
+  velocity_probes: "速度探针（velocity_probes）",
+});
+const CHART_OBSERVABLES = new Set([
+  "centerline_velocity",
+  "cavity_centerline_velocity",
+  "centerline_profile",
+  "force_history",
+  "cylinder_force_history",
+  "forces",
+]);
 let chartSequence = 0;
 
 function node(tagName, text, className) {
@@ -31,8 +49,18 @@ function displayValue(value) {
   if (value === false) return "否";
   const number = finiteNumber(value);
   if (number !== null) return Number.isInteger(number) ? String(number) : number.toPrecision(5);
-  if (typeof value === "string" && value.trim()) return value.trim().slice(0, 160);
+  if (typeof value === "string" && value.trim()) {
+    const normalized = value.trim().toLowerCase();
+    return SAFE_STATUS_VALUES.has(normalized) ? value.trim() : "已省略非数值文本";
+  }
   return "未提供";
+}
+
+function displayLabel(value, fallback = "未命名字段") {
+  if (typeof value !== "string" || !/^[A-Za-z_\u3400-\u9fff][A-Za-z0-9_\-\u3400-\u9fff]{0,63}$/.test(value)) {
+    return fallback;
+  }
+  return OBSERVABLE_LABELS[value] || value;
 }
 
 function appendTable(root, captionText, rows, className = "evidence-table") {
@@ -206,10 +234,92 @@ function scalarRows(value) {
   const rows = [];
   for (const [key, item] of Object.entries(value)) {
     if (item === null || ["string", "number", "boolean"].includes(typeof item)) {
-      rows.push([key, displayValue(item)]);
+      rows.push([displayLabel(key), displayValue(item)]);
     }
   }
   return rows;
+}
+
+function finiteVector(value) {
+  if (!Array.isArray(value) || !value.length || value.length > 12) return null;
+  const numbers = value.map(finiteNumber);
+  return numbers.every((item) => item !== null) ? numbers : null;
+}
+
+function probePoint(item) {
+  const scalar = finiteNumber(item);
+  if (scalar !== null) return displayValue(scalar);
+  const vector = finiteVector(item);
+  if (vector) return `(${vector.map(displayValue).join("，")})`;
+  if (!item || typeof item !== "object" || Array.isArray(item)) return null;
+
+  const explicitCoordinates = finiteVector(
+    item.coordinates || item.coordinate || item.position,
+  );
+  const xyz = [item.x, item.y, item.z].some((value) => value !== undefined)
+    ? [item.x, item.y, item.z].map(finiteNumber)
+    : null;
+  const coordinates = explicitCoordinates
+    || (xyz?.every((value) => value !== null) ? xyz : null);
+  const rawValue = item.values ?? item.value ?? item.velocity ?? item.pressure;
+  const scalarValue = finiteNumber(rawValue);
+  const vectorValue = finiteVector(rawValue);
+  const value = scalarValue !== null
+    ? displayValue(scalarValue)
+    : vectorValue
+      ? `(${vectorValue.map(displayValue).join("，")})`
+      : null;
+  if (!coordinates || !value) return null;
+  return `坐标 (${coordinates.map(displayValue).join("，")})；值 ${value}`;
+}
+
+function normalizeProbeCollection(value) {
+  if (Array.isArray(value)) return value;
+  if (!value || typeof value !== "object") return [];
+  const coordinates = value.coordinates || value.positions;
+  const values = value.values;
+  if (!Array.isArray(coordinates) || !Array.isArray(values) || coordinates.length !== values.length) {
+    return [];
+  }
+  return coordinates.map((coordinate, index) => ({ coordinate, value: values[index] }));
+}
+
+function appendObservableEvidence(root, key, value) {
+  const items = normalizeProbeCollection(value);
+  const rows = [];
+  let invalidCount = 0;
+  for (let index = 0; index < items.length; index += 1) {
+    const rendered = probePoint(items[index]);
+    if (rendered === null) {
+      invalidCount += 1;
+      continue;
+    }
+    if (rows.length < MAX_EVIDENCE_ROWS) rows.push([`探针 ${index + 1}`, rendered]);
+  }
+  const section = appendTable(
+    root,
+    displayLabel(key, "探针观测量"),
+    rows.length ? rows : [["观测证据", "当前结果未包含有效数值"]],
+  );
+  if (items.length > MAX_EVIDENCE_ROWS) {
+    section.append(node("p", `共 ${items.length} 条；显示前 ${MAX_EVIDENCE_ROWS} 条。`, "evidence-summary"));
+  }
+  if (invalidCount) {
+    section.append(node("p", `当前结果未包含 ${invalidCount} 条有效数值，已跳过。`, "curve-note"));
+  }
+}
+
+function mergedValidation(results, collection) {
+  return {
+    ...scalarObject(collection.credibility),
+    ...scalarObject(collection.validation),
+    ...scalarObject(results?.credibility),
+    ...scalarObject(results?.validation),
+  };
+}
+
+function scalarObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : {};
 }
 
 function markerFilename(postProcessing) {
@@ -255,10 +365,17 @@ export function renderPostprocessResults(root, results) {
     .sort((a, b) => a - b);
   appendTable(root, "数值时间", [["时间目录", numericTimes.length ? numericTimes.join("、") : "未提供"]]);
 
-  const observables = collection.observables || {};
-  appendTable(root, "请求观测量", scalarRows(observables).length ? scalarRows(observables) : [["标量观测量", "未提供"]]);
-  const validation = collection.validation || collection.credibility || {};
-  appendTable(root, "验证与可信度", scalarRows(validation).length ? scalarRows(validation) : [["验证字段", "未提供"]]);
+  const observables = scalarObject(collection.observables);
+  const observableScalars = scalarRows(observables);
+  appendTable(root, "请求观测量", observableScalars.length ? observableScalars : [["标量观测量", "未提供"]]);
+  for (const [key, value] of Object.entries(observables)) {
+    if (!CHART_OBSERVABLES.has(key) && (Array.isArray(value) || scalarObject(value).values)) {
+      appendObservableEvidence(root, key, value);
+    }
+  }
+  const validation = mergedValidation(results, collection);
+  const validationRows = scalarRows(validation);
+  appendTable(root, "验证与可信度", validationRows.length ? validationRows : [["验证字段", "未提供"]]);
   appendTable(root, "ParaView 标记", [["文件名", markerFilename(collection.post_processing)]]);
 
   const cavitySeries = observables.centerline_velocity || observables.cavity_centerline_velocity || observables.centerline_profile;
