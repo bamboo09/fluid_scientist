@@ -6,6 +6,8 @@ import {
   storageKeys,
   taskView,
 } from "./workbench-state.js";
+import { elapsedLabel, operationView, planningComposerView } from "./operation-state.js";
+import { OperationPoller, createResultLoader } from "./operation-lifecycle.js";
 
 const $ = (selector) => document.querySelector(selector);
 const byId = (id) => document.getElementById(id);
@@ -21,6 +23,7 @@ const researchQuestionCard = byId("research-question-card");
 const researchQuestionText = byId("research-question-text");
 const researchForm = byId("research-form");
 const startNewExperiment = byId("start-new-experiment");
+const operationCard = byId("active-operation");
 
 let modelConfiguration = { configured: false, provider: null, model: null };
 let executionTargets = [];
@@ -34,6 +37,13 @@ let validatedCustomCase = null;
 let pollTimer = null;
 let pollDelay = 1500;
 let confirmationActive = false;
+let activeOperation = null;
+let activeOperationId = localStorage.getItem(storageKeys.operationId) || "";
+let operationElapsedTimer = null;
+let operationRequestActive = false;
+let operationPoller = null;
+const renderedPlanRefs = new Set();
+const planRequests = new Map();
 
 const modelDefaults = Object.freeze({
   openai: "gpt-5.4",
@@ -77,6 +87,7 @@ function persist(key, value) {
   else if (key === storageKeys.planId) localStorage.setItem(storageKeys.planId, value);
   else if (key === storageKeys.caseId) localStorage.setItem(storageKeys.caseId, value);
   else if (key === storageKeys.targetId) localStorage.setItem(storageKeys.targetId, value);
+  else if (key === storageKeys.operationId) localStorage.setItem(storageKeys.operationId, value);
 }
 
 function setStatus(message) {
@@ -104,6 +115,7 @@ function restoreResearchComposer(question) {
 
 function resetResearchSession() {
   if (!canStartExperiment(activeTask)) return;
+  stopOperationPolling();
   window.clearTimeout(pollTimer);
   pollTimer = null;
   currentProject = null;
@@ -111,8 +123,14 @@ function resetResearchSession() {
   currentCompilation = null;
   activeTask = null;
   latestResults = null;
-  for (const key of [storageKeys.projectId, storageKeys.planId, storageKeys.caseId]) {
+  activeOperation = null;
+  activeOperationId = "";
+  for (const key of [storageKeys.projectId, storageKeys.planId, storageKeys.caseId, storageKeys.operationId]) {
     localStorage.removeItem(key);
+  }
+  if (operationCard) {
+    operationCard.hidden = true;
+    operationCard.setAttribute("aria-busy", "false");
   }
   for (const id of ["active-plan-card", "active-task-card"]) byId(id)?.remove();
   if (byId("report")) byId("report").hidden = true;
@@ -204,15 +222,15 @@ function updateContext() {
 function refreshComposer() {
   if (!designButton || !promptInput) return;
   const reason = byId("composer-prerequisite") || byId("composer-hint");
-  const empty = !promptInput.value.trim();
-  designButton.disabled = empty || !modelConfiguration.configured;
-  if (reason) {
-    reason.textContent = !modelConfiguration.configured
-      ? "请先在模型设置中连接 OpenAI、GLM 或 DeepSeek。"
-      : empty
-        ? "请输入研究问题。"
-        : "模型仅设计结构化实验；执行仍需您的确认。";
-  }
+  const view = planningComposerView({
+    empty: !promptInput.value.trim(),
+    modelConfigured: modelConfiguration.configured,
+    targetSelected: Boolean(selectedTarget),
+    requestActive: operationRequestActive,
+    operation: activeOperationId ? activeOperation : null,
+  });
+  designButton.disabled = view.disabled;
+  if (reason) reason.textContent = view.hint;
 }
 
 async function loadModelConfiguration() {
@@ -251,6 +269,7 @@ async function loadExecutionTargets() {
     }
   }
   updateContext();
+  refreshComposer();
   return executionTargets;
 }
 
@@ -293,6 +312,7 @@ function renderPlanCard(response) {
   if (existing) existing.remove();
   const card = makeCard("work-card plan-card", plan.experiment_name || "实验计划");
   card.id = "active-plan-card";
+  renderedPlanRefs.add(response.plan_id);
   const badge = document.createElement("p");
   badge.className = "plan-type";
   badge.textContent = `${plan.experiment_type} · ${response.provider} / ${response.model}`;
@@ -351,6 +371,18 @@ function renderPlanCard(response) {
   else (stream || byId("experiment-plan-review") || document.body).append(card);
 }
 
+function requestPlan(planId) {
+  if (!planRequests.has(planId)) {
+    const request = requestJson(`/api/experiment-plans/${planId}`)
+      .catch((error) => {
+        planRequests.delete(planId);
+        throw error;
+      });
+    planRequests.set(planId, request);
+  }
+  return planRequests.get(planId);
+}
+
 async function createProject(question) {
   const project = await requestJson("/api/projects", {
     method: "POST",
@@ -361,6 +393,164 @@ async function createProject(question) {
   persist(storageKeys.projectId, project.project_id);
   updateContext();
   return project;
+}
+
+function stopOperationPolling() {
+  window.clearInterval(operationElapsedTimer);
+  operationElapsedTimer = null;
+  operationPoller?.stop();
+}
+
+function renderOperation(operation, options = {}) {
+  if (!operationCard || !operation) return;
+  const view = operationView(operation);
+  activeOperation = operation;
+  activeOperationId = operation.operation_id || activeOperationId;
+  operationCard.hidden = false;
+  operationCard.dataset.tone = view.tone;
+  const pollingPaused = Boolean(operationPoller?.paused);
+  operationCard.setAttribute("aria-busy", String(!view.terminal && !pollingPaused));
+  byId("operation-status").textContent = view.label;
+  byId("operation-stage").textContent = view.stageLabel;
+  byId("operation-elapsed").textContent = elapsedLabel(operation);
+  const message = options.networkMessage || operation.safe_error || "";
+  byId("operation-message").textContent = message;
+  const progress = operationCard.querySelector(".operation-progress");
+  progress?.classList.toggle("is-indeterminate", view.indeterminate);
+  progress?.setAttribute("aria-valuenow", String(view.percent));
+  if (byId("operation-progress-bar")) {
+    byId("operation-progress-bar").style.width = `${view.percent}%`;
+  }
+  const cancel = byId("cancel-operation");
+  const retry = byId("retry-operation");
+  if (cancel) {
+    cancel.hidden = !view.canCancel;
+    cancel.disabled = operationRequestActive;
+  }
+  if (retry) {
+    retry.hidden = !(view.canRetry || pollingPaused);
+    retry.disabled = operationRequestActive;
+    retry.textContent = pollingPaused ? "继续查询" : "重新规划";
+  }
+  window.clearInterval(operationElapsedTimer);
+  operationElapsedTimer = null;
+  if (!view.terminal) {
+    operationElapsedTimer = window.setInterval(() => {
+      const elapsed = byId("operation-elapsed");
+      if (elapsed && activeOperation) elapsed.textContent = elapsedLabel(activeOperation);
+    }, 1000);
+  }
+  refreshComposer();
+}
+
+const loadOperationResult = createResultLoader({
+  fetchPlan: requestPlan,
+  onPlan: async (response) => {
+    if (renderedPlanRefs.has(response.plan_id)) return;
+    currentPlan = response;
+    currentCompilation = null;
+    persist(storageKeys.planId, response.plan_id);
+    renderPlanCard(response);
+    setStatus("实验计划已生成。请审阅假设、参数和局限后确认。");
+  },
+});
+
+async function acceptOperationStatus(operation, context = { isCurrent: () => true }) {
+  if (!context.isCurrent()) return false;
+  renderOperation(operation);
+  if (!operationView(operation).terminal) return false;
+  if (operation.state === "succeeded") {
+    await loadOperationResult(operation.result_ref, { shouldApply: context.isCurrent });
+  } else {
+    const fallback = operation.state === "cancelled"
+      ? "实验设计已取消。"
+      : "实验设计未完成，可安全重试。";
+    setStatus(operation.safe_error || fallback);
+  }
+  return true;
+}
+
+function clearMissingOperation() {
+  stopOperationPolling();
+  activeOperation = null;
+  activeOperationId = "";
+  localStorage.removeItem(storageKeys.operationId);
+  if (operationCard) operationCard.hidden = true;
+  refreshComposer();
+}
+
+function startOperationPolling(operationId, options = {}) {
+  activeOperationId = operationId;
+  if (!operationPoller) {
+    operationPoller = new OperationPoller({
+      fetchOperation: (id, requestOptions) => requestJson(`/api/operations/${id}`, requestOptions),
+      onStatus: acceptOperationStatus,
+      onMissing: () => {
+        clearMissingOperation();
+        setStatus("上次实验设计记录已过期，可以重新开始。");
+      },
+      onNetwork: ({ failures, paused }) => {
+        if (activeOperation) {
+          renderOperation(activeOperation, {
+            networkMessage: paused
+              ? "状态查询已暂停，网络恢复后可继续查询，不会重复提交模型请求。"
+              : `状态查询暂时失败，正在自动重试（${failures}/5）。`,
+          });
+        }
+      },
+      setTimeout: window.setTimeout.bind(window),
+      clearTimeout: window.clearTimeout.bind(window),
+    });
+  }
+  return operationPoller.start(operationId, options);
+}
+
+async function submitPlanOperation(question) {
+  if (operationRequestActive) return;
+  if (!selectedTarget) {
+    setStatus("请先选择执行平台；规划不会检查平台是否在线。");
+    restoreResearchComposer(question);
+    return;
+  }
+  operationRequestActive = true;
+  designButton.disabled = true;
+  setStatus("正在建立实验设计任务…");
+  try {
+    if (shouldCreateFreshProject(currentProject, activeTask)) {
+      stopOperationPolling();
+      currentProject = null;
+      currentPlan = null;
+      currentCompilation = null;
+      activeTask = null;
+      latestResults = null;
+      activeOperation = null;
+      activeOperationId = "";
+      localStorage.removeItem(storageKeys.projectId);
+      localStorage.removeItem(storageKeys.planId);
+      localStorage.removeItem(storageKeys.caseId);
+      localStorage.removeItem(storageKeys.operationId);
+    }
+    if (!currentProject) await createProject(question);
+    const operation = await requestJson("/api/plan-operations", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(
+        buildPlanRequest(question, currentProject.project_id, selectedTarget),
+      ),
+    });
+    activeOperation = operation;
+    activeOperationId = operation.operation_id;
+    persist(storageKeys.operationId, operation.operation_id);
+    renderOperation(operation);
+    startOperationPolling(operation.operation_id, { immediate: false });
+  } catch (error) {
+    renderError("实验设计", error);
+    restoreResearchComposer(question);
+  } finally {
+    operationRequestActive = false;
+    if (activeOperation) renderOperation(activeOperation);
+    refreshComposer();
+  }
 }
 
 async function designExperimentFromPrompt(event) {
@@ -374,40 +564,7 @@ async function designExperimentFromPrompt(event) {
   const question = promptInput?.value.trim() || "";
   if (!question || !modelConfiguration.configured) return;
   showResearchQuestion(question);
-  designButton.disabled = true;
-  setStatus("模型正在生成结构化实验计划…");
-  try {
-    if (shouldCreateFreshProject(currentProject, activeTask)) {
-      window.clearTimeout(pollTimer);
-      pollTimer = null;
-      currentProject = null;
-      currentPlan = null;
-      currentCompilation = null;
-      activeTask = null;
-      latestResults = null;
-      localStorage.removeItem(storageKeys.projectId);
-      localStorage.removeItem(storageKeys.planId);
-      localStorage.removeItem(storageKeys.caseId);
-    }
-    if (!currentProject) await createProject(question);
-    const response = await requestJson("/api/experiment-plans", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(
-        buildPlanRequest(question, currentProject.project_id, selectedTarget),
-      ),
-    });
-    currentPlan = response;
-    currentCompilation = null;
-    persist(storageKeys.planId, response.plan_id);
-    renderPlanCard(response);
-    setStatus("实验计划已生成。请审阅假设、参数和局限后确认。 ");
-  } catch (error) {
-    renderError("实验设计", error);
-    restoreResearchComposer(question);
-  } finally {
-    refreshComposer();
-  }
+  await submitPlanOperation(question);
 }
 
 function renderTaskCard(task) {
@@ -813,6 +970,68 @@ async function analyzeExperimentResults() {
   }
 }
 
+async function cancelActiveOperation() {
+  if (!activeOperationId || operationRequestActive) return;
+  const operationId = activeOperationId;
+  operationRequestActive = true;
+  stopOperationPolling();
+  if (activeOperation) renderOperation(activeOperation);
+  try {
+    const operation = await requestJson(`/api/operations/${operationId}`, {
+      method: "DELETE",
+    });
+    persist(storageKeys.operationId, operation.operation_id);
+    await acceptOperationStatus(operation);
+  } catch (error) {
+    renderError("取消实验设计", error);
+    startOperationPolling(operationId);
+  } finally {
+    operationRequestActive = false;
+    if (activeOperation) renderOperation(activeOperation);
+    refreshComposer();
+  }
+}
+
+async function retryActiveOperation() {
+  if (operationRequestActive) return;
+  if (operationPoller?.paused && activeOperationId && !operationView(activeOperation || {}).terminal) {
+    operationRequestActive = true;
+    if (activeOperation) renderOperation(activeOperation);
+    try {
+      await operationPoller.resume();
+    } finally {
+      operationRequestActive = false;
+      if (activeOperation) renderOperation(activeOperation);
+    }
+    return;
+  }
+  const question = researchQuestionText?.textContent?.trim() || promptInput?.value.trim() || "";
+  if (!question) {
+    setStatus("无法恢复研究问题，请重新输入后再规划。");
+    restoreResearchComposer("");
+    return;
+  }
+  showResearchQuestion(question);
+  await submitPlanOperation(question);
+}
+
+async function restoreActiveOperation() {
+  const operationId = localStorage.getItem(storageKeys.operationId);
+  if (!operationId) return;
+  activeOperationId = operationId;
+  activeOperation = {
+    operation_id: operationId,
+    state: "queued",
+    stage: "queued",
+    created_at: new Date().toISOString(),
+  };
+  renderOperation(activeOperation, {
+    networkMessage: "正在恢复上次实验设计状态…",
+  });
+  refreshComposer();
+  void startOperationPolling(operationId);
+}
+
 async function restoreActiveExperiment() {
   const projectId = localStorage.getItem(storageKeys.projectId);
   const planId = localStorage.getItem(storageKeys.planId);
@@ -830,7 +1049,9 @@ async function restoreActiveExperiment() {
     }
     if (currentProject?.question) showResearchQuestion(currentProject.question);
     if (planId) {
-      currentPlan = await requestJson(`/api/experiment-plans/${planId}`);
+      if (currentPlan?.plan_id !== planId) {
+        currentPlan = await requestPlan(planId);
+      }
       const planOwnerMatches = currentPlan.project_id === currentProject.project_id;
       const restoredPlan = planOwnerMatches
         ? restoredPlanForProject(currentPlan, currentProject)
@@ -849,7 +1070,7 @@ async function restoreActiveExperiment() {
         return;
       }
       currentPlan = restoredPlan;
-      renderPlanCard(currentPlan);
+      if (!renderedPlanRefs.has(planId)) renderPlanCard(currentPlan);
       const approvedArtifact = currentProject.approved_artifacts?.[planId];
       if (approvedArtifact) {
         currentCompilation = {
@@ -1026,6 +1247,7 @@ function bindEvents() {
     selectedTarget = targetSelect.value;
     persist(storageKeys.targetId, selectedTarget);
     updateContext();
+    refreshComposer();
   });
   modelProvider?.addEventListener("change", () => {
     if (modelId) modelId.value = modelDefaults[modelProvider.value] || "";
@@ -1043,6 +1265,8 @@ function bindEvents() {
   byId("open-model-settings")?.addEventListener("click", () => openDialog("model-settings"));
   byId("open-target-settings")?.addEventListener("click", () => openDialog("target-settings"));
   byId("open-custom-case")?.addEventListener("click", () => openDialog("custom-case-drawer"));
+  byId("cancel-operation")?.addEventListener("click", cancelActiveOperation);
+  byId("retry-operation")?.addEventListener("click", retryActiveOperation);
   startNewExperiment?.addEventListener("click", resetResearchSession);
   document.querySelectorAll("[data-open-dialog]").forEach((button) => {
     button.addEventListener("click", () => openDialog(button.dataset.openDialog));
@@ -1057,20 +1281,28 @@ function bindEvents() {
   document.querySelectorAll("[data-close-dialog]").forEach((button) => {
     button.addEventListener("click", () => button.closest("dialog")?.close());
   });
-  window.addEventListener("beforeunload", () => window.clearTimeout(pollTimer));
+  window.addEventListener("beforeunload", () => {
+    window.clearTimeout(pollTimer);
+    stopOperationPolling();
+  });
 }
 
 async function init() {
   bindEvents();
-  const results = await Promise.allSettled([
-    loadModelConfiguration(),
-    loadExecutionTargets(),
-  ]);
-  for (const result of results) {
-    if (result.status === "rejected") renderError("初始化", result.reason);
-  }
+  const modelLoad = loadModelConfiguration().catch((error) => {
+    renderError("模型配置", error);
+  });
+  const operationRecovery = restoreActiveOperation().catch((error) => {
+    renderError("恢复实验设计", error);
+  });
+  const experimentRecovery = restoreActiveExperiment().catch((error) => {
+    renderError("恢复实验", error);
+  });
+  loadExecutionTargets().catch((error) => {
+    renderError("执行平台", error);
+  });
+  await Promise.all([operationRecovery, modelLoad, experimentRecovery]);
   refreshComposer();
-  await restoreActiveExperiment();
 }
 
 init();

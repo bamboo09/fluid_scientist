@@ -3,6 +3,7 @@ export const storageKeys = Object.freeze({
   planId: "fluid-scientist-plan-id",
   caseId: "fluid-scientist-case-id",
   targetId: "fluid-scientist-target-id",
+  operationId: "fluid-scientist-operation-id",
 });
 
 const phaseViews = Object.freeze({

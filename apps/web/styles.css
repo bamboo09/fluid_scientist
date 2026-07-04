@@ -183,6 +183,38 @@ code { font-family: var(--mono); font-size: .88em; }
 .session-actions { display: flex; justify-content: flex-end; margin: 18px 0 0 52px; }
 .session-actions .button { background: transparent; }
 
+.operation-card {
+  min-width: 0;
+  max-width: 100%;
+  margin-left: 52px;
+  padding: clamp(18px, 3vw, 25px);
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-top: 4px solid var(--teal);
+  border-radius: 4px;
+  background: rgba(251, 248, 241, .9);
+  box-shadow: var(--shadow);
+}
+.operation-card[data-tone="danger"] { border-top-color: #a5483c; }
+.operation-card[data-tone="success"] { border-top-color: var(--teal-dark); }
+.operation-card[data-tone="muted"] { border-top-color: var(--faint); }
+.operation-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
+.operation-header h2 { margin: 0; font: 500 clamp(21px, 3vw, 28px)/1.2 var(--serif); }
+.operation-elapsed { flex: 0 0 auto; color: var(--muted); font: 10px/1.5 var(--mono); }
+.operation-stage { margin: 16px 0 9px; color: var(--ink); font-size: 13px; }
+.operation-progress { height: 3px; overflow: hidden; background: rgba(19, 91, 88, .12); }
+.operation-progress i { display: block; width: 0; height: 100%; background: var(--teal); transition: width .32s ease; }
+.operation-progress.is-indeterminate i { width: 34% !important; animation: operation-wait 1.4s ease-in-out infinite; }
+.operation-message { min-height: 1.45em; margin: 10px 0 0; color: var(--muted); font: 10px/1.5 var(--mono); overflow-wrap: anywhere; }
+.operation-card[data-tone="danger"] .operation-message { color: #843b32; }
+.operation-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 13px; }
+.operation-actions:empty { display: none; }
+
+@keyframes operation-wait {
+  from { transform: translateX(-105%); }
+  to { transform: translateX(300%); }
+}
+
 .work-card {
   min-width: 0;
   max-width: 100%;
@@ -473,7 +505,7 @@ select, input[type="text"], input[type="password"] {
   .message { grid-template-columns: 30px minmax(0, 1fr); gap: 10px; }
   .message-avatar { width: 29px; height: 29px; }
   .message h1 { font-size: 34px; }
-  .message-user, .work-card, .analysis-card, .workflow-event, .composer, .research-question-card, .session-actions { margin-left: 39px; }
+  .message-user, .work-card, .analysis-card, .workflow-event, .composer, .research-question-card, .operation-card, .session-actions { margin-left: 39px; }
   .plan-summary-grid, .plan-notes, .detail-grid, .task-facts, .result-metrics, .credibility-grid { grid-template-columns: 1fr; }
   .plan-essentials dl { grid-template-columns: 1fr; }
   .work-card.plan-card > section:not(.plan-essentials) { display: block; width: 100%; margin-right: 0; }
@@ -483,6 +515,9 @@ select, input[type="text"], input[type="password"] {
   .type-chip { display: inline-block; margin-top: 10px; }
   .card-actions, .dialog-actions { flex-direction: column-reverse; }
   .button { width: 100%; }
+  .operation-header { display: block; }
+  .operation-elapsed { display: inline-block; margin-top: 8px; }
+  .operation-actions { flex-direction: column-reverse; }
   .composer { bottom: 8px; }
   .composer-footer { display: block; }
   .composer-footer .button { margin-top: 10px; }

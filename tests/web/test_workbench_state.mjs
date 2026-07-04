@@ -13,6 +13,7 @@ assert.deepEqual(storageKeys, {
   planId: "fluid-scientist-plan-id",
   caseId: "fluid-scientist-case-id",
   targetId: "fluid-scientist-target-id",
+  operationId: "fluid-scientist-operation-id",
 });
 assert.equal(Object.isFrozen(storageKeys), true);
 

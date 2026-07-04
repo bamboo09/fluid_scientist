@@ -31,6 +31,8 @@ def test_workbench_is_a_utf8_conversation_first_interface() -> None:
         for path in (
             "apps/web/index.html",
             "apps/web/app.js",
+            "apps/web/operation-lifecycle.js",
+            "apps/web/operation-state.js",
             "apps/web/workbench-state.js",
         )
     }
@@ -70,7 +72,7 @@ def test_workbench_controller_preserves_the_approved_operation_order() -> None:
     ):
         assert function_name in script
 
-    plan = script.index('"/api/experiment-plans"')
+    plan = script.index('"/api/plan-operations"')
     compile_plan = script.index("/compile`", plan)
     approval_endpoint = script.index("/approvals", compile_plan)
     gate_two = script.index('gate: "GATE_2"', approval_endpoint)
@@ -109,7 +111,8 @@ def test_model_credentials_are_never_persisted_in_the_browser() -> None:
     assert 'modelApiKey.value = ""' in script
 
     approved_storage_keys = {
-        f"storageKeys.{key}" for key in ("projectId", "planId", "caseId", "targetId")
+        f"storageKeys.{key}"
+        for key in ("projectId", "planId", "caseId", "targetId", "operationId")
     }
     storage_calls = re.findall(
         r"localStorage\.setItem\((.*?)\);", script, flags=re.DOTALL
@@ -161,6 +164,112 @@ def test_active_experiment_restores_all_identifiers_without_resubmitting() -> No
     restore_source = script[restore_start:restore_end]
     assert "/submit" not in restore_source
     assert "confirmAndSubmitPlan(" not in restore_source
+
+
+def test_planning_uses_recoverable_operation_endpoint_and_identity() -> None:
+    html = read_asset("apps/web/index.html")
+    script = read_asset("apps/web/app.js")
+    state = read_asset("apps/web/operation-state.js")
+
+    assert 'id="active-operation"' in html
+    assert 'aria-live="polite"' in html
+    assert 'aria-busy="false"' in html
+    assert '"/api/plan-operations"' in script
+    assert "storageKeys.operationId" in script
+    assert "/api/operations/${operationId}" in script
+    assert "elapsed" in state
+    assert "model_planning" in state
+    assert "schema_correction" in state
+    assert "storing_plan" in state
+
+
+def test_operation_controls_and_polling_are_stale_response_safe() -> None:
+    html = read_asset("apps/web/index.html")
+    script = read_asset("apps/web/app.js")
+    lifecycle = read_asset("apps/web/operation-lifecycle.js")
+
+    for element_id in (
+        "operation-stage",
+        "operation-status",
+        "operation-elapsed",
+        "cancel-operation",
+        "retry-operation",
+    ):
+        assert f'id="{element_id}"' in html
+
+    assert 'byId("cancel-operation")?.addEventListener' in script
+    assert 'byId("retry-operation")?.addEventListener' in script
+    assert 'method: "DELETE"' in script
+    assert "this.generation" in lifecycle
+    assert "AbortController" in lifecycle
+    assert "Math.min" in lifecycle
+    assert 'window.addEventListener("beforeunload"' in script
+
+
+def test_operation_recovery_starts_independently_from_target_discovery() -> None:
+    script = read_asset("apps/web/app.js")
+    init_source = function_source(script, "init")
+
+    bind = init_source.index("bindEvents()")
+    model = init_source.index("loadModelConfiguration()")
+    recover = init_source.index("restoreActiveOperation()")
+    target = init_source.index("loadExecutionTargets()")
+    assert bind < model
+    assert bind < recover
+    assert bind < target
+    assert "await loadExecutionTargets()" not in init_source
+    assert "Promise.allSettled" not in init_source
+    assert "experimentRecovery = restoreActiveExperiment()" in init_source
+    assert "Promise.all([operationRecovery, modelLoad, experimentRecovery])" in init_source
+
+    recovery_source = function_source(script, "restoreActiveOperation")
+    assert "localStorage.getItem(storageKeys.operationId)" in recovery_source
+    assert "startOperationPolling" in recovery_source
+    missing_source = function_source(script, "clearMissingOperation")
+    assert "localStorage.removeItem(storageKeys.operationId)" in missing_source
+    assert "error?.status === 404" in read_asset("apps/web/operation-lifecycle.js")
+
+
+def test_operation_card_only_displays_server_safe_error_text() -> None:
+    script = read_asset("apps/web/app.js")
+    render_source = function_source(script, "renderOperation")
+
+    assert "operation.safe_error" in render_source
+    assert "operation.message" not in render_source
+
+
+def test_persisted_target_allows_planning_before_target_discovery_returns() -> None:
+    script = read_asset("apps/web/app.js")
+    prefix = script[: script.index("function text(")]
+    composer = function_source(script, "refreshComposer")
+
+    assert "selectedTarget = localStorage.getItem(storageKeys.targetId)" in prefix
+    assert "targetSelected: Boolean(selectedTarget)" in composer
+    assert "loadExecutionTargets" not in composer
+
+
+def test_question_and_provider_data_are_never_persisted_during_planning() -> None:
+    script = read_asset("apps/web/app.js")
+    design_source = function_source(script, "designExperimentFromPrompt")
+    submit_source = function_source(script, "submitPlanOperation")
+
+    assert "localStorage.setItem" not in design_source
+    assert "localStorage.setItem" not in submit_source
+    assert "persist(storageKeys.operationId" in submit_source
+    assert "persist(storageKeys.planId" not in submit_source
+    for forbidden in ("api_key", "provider_payload", "plan_json"):
+        assert forbidden not in design_source + submit_source
+
+
+def test_submitted_question_has_one_top_level_presentation_not_a_second_dialogue() -> None:
+    html = read_asset("apps/web/index.html")
+    script = read_asset("apps/web/app.js")
+
+    assert html.index('id="research-question-card"') < html.index('id="active-operation"')
+    assert html.index('id="active-operation"') < html.index('id="research-form"')
+    design_source = function_source(script, "designExperimentFromPrompt")
+    assert "showResearchQuestion(question)" in design_source
+    assert 'appendConversation("user", question)' not in design_source
 
 
 def test_structured_results_postprocessing_and_analysis_remain_reachable() -> None:
@@ -330,12 +439,14 @@ def test_custom_plan_explains_why_an_openfoam_case_file_is_required() -> None:
     assert "不能直接作为可执行算例" in assets
 
 
-def test_planning_payload_omits_an_unselected_target() -> None:
+def test_planning_waits_for_a_declared_target_without_checking_reachability() -> None:
     script = read_asset("apps/web/app.js")
-    design_source = function_source(script, "designExperimentFromPrompt")
+    design_source = function_source(script, "submitPlanOperation")
 
     assert "buildPlanRequest(question, currentProject.project_id, selectedTarget)" in design_source
     assert "target_id: selectedTarget" not in design_source
+    assert "if (!selectedTarget)" in design_source
+    assert "loadExecutionTargets" not in design_source
 
 
 def test_submitted_research_question_becomes_the_session_heading() -> None:
