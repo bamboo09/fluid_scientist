@@ -47,6 +47,13 @@ export function operationView(operation = {}) {
   };
 }
 
+export function operationAnnouncement(operation = {}, message = operation.safe_error || "") {
+  const view = operationView(operation);
+  return [view.label, view.stageLabel, message]
+    .filter((item) => typeof item === "string" && item.trim())
+    .join("。");
+}
+
 export function elapsedLabel(operation = {}, now = Date.now()) {
   const startedAt = Date.parse(operation.created_at || "");
   if (!Number.isFinite(startedAt)) return "用时未知";

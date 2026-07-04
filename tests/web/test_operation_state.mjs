@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import {
   elapsedLabel,
+  operationAnnouncement,
   operationView,
   planningComposerView,
 } from "../../apps/web/operation-state.js";
@@ -65,3 +66,9 @@ assert.equal(planningComposerView({
   modelConfigured: true,
   targetSelected: false,
 }).hint, "请选择执行平台；平台连通性不会阻塞模型规划。");
+
+assert.equal(operationAnnouncement({ state: "running", stage: "model_planning" }),
+  "规划中。模型正在设计实验");
+assert.equal(operationAnnouncement(
+  { state: "failed", stage: "model_planning", safe_error: "模型暂时不可用" },
+), "规划未完成。模型正在设计实验。模型暂时不可用");

@@ -49,7 +49,8 @@
             <p id="session-status" class="session-status" role="status"></p>
           </article>
 
-          <article id="active-operation" class="operation-card" aria-live="polite" aria-busy="false" hidden>
+          <p id="operation-announcement" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></p>
+          <article id="active-operation" class="operation-card" aria-busy="false" hidden>
             <header class="operation-header">
               <div>
                 <p class="card-kicker">实验设计进度</p>
@@ -58,7 +59,7 @@
               <span id="operation-elapsed" class="operation-elapsed">尚未计时</span>
             </header>
             <p id="operation-stage" class="operation-stage">模型尚未开始规划。</p>
-            <div class="operation-progress" role="progressbar" aria-label="实验设计进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+            <div class="operation-progress" role="progressbar" aria-label="实验设计进度" aria-valuemin="0" aria-valuemax="100">
               <i id="operation-progress-bar"></i>
             </div>
             <p id="operation-message" class="operation-message"></p>

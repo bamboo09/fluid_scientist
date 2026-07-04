@@ -206,6 +206,31 @@ def test_operation_controls_and_polling_are_stale_response_safe() -> None:
     assert 'window.addEventListener("beforeunload"' in script
 
 
+def test_operation_progress_accessibility_avoids_elapsed_chatter() -> None:
+    html = read_asset("apps/web/index.html")
+    script = read_asset("apps/web/app.js")
+    operation_tag = re.search(r'<article id="active-operation"[^>]*>', html)
+    progress_tag = re.search(r'<div class="operation-progress"[^>]*>', html)
+
+    assert operation_tag is not None
+    assert 'aria-live=' not in operation_tag.group(0)
+    assert 'aria-busy="false"' in operation_tag.group(0)
+    assert 'id="operation-announcement"' in html
+    assert 'role="status"' in html
+    assert 'aria-live="polite"' in html
+    assert 'aria-atomic="true"' in html
+    assert progress_tag is not None
+    assert "aria-valuenow" not in progress_tag.group(0)
+
+    render_source = function_source(script, "renderOperation")
+    assert 'progress?.removeAttribute("aria-valuenow")' in render_source
+    assert 'progress?.setAttribute("aria-valuenow", String(view.percent))' in render_source
+    assert "announceOperation(operation, message)" in render_source
+    announce_source = function_source(script, "announceOperation")
+    assert "lastOperationAnnouncement" in announce_source
+    assert "operation-elapsed" not in announce_source
+
+
 def test_operation_recovery_starts_independently_from_target_discovery() -> None:
     script = read_asset("apps/web/app.js")
     init_source = function_source(script, "init")
@@ -267,6 +292,22 @@ def test_edit_mode_hides_the_top_question_to_avoid_duplicate_presentation() -> N
     assert "researchQuestionCard.hidden = true" in restore_source
     assert 'researchQuestionText.textContent = ""' in restore_source
     assert "researchForm.hidden = false" in restore_source
+
+
+def test_new_research_cancels_active_planning_before_clearing_identity() -> None:
+    script = read_asset("apps/web/app.js")
+    reset_source = function_source(script, "resetResearchSession")
+
+    assert "async function resetResearchSession()" in script
+    delete = reset_source.index('method: "DELETE"')
+    clear = reset_source.index("localStorage.removeItem(key)")
+    assert delete < clear
+    assert "operationRequestActive = true" in reset_source[:delete]
+    assert "startNewExperiment.disabled = true" in reset_source[:delete]
+    catch_source = reset_source[reset_source.index("catch (error)") : clear]
+    assert "startOperationPolling(operationId)" in catch_source
+    assert "localStorage.removeItem" not in catch_source
+    assert "return" in catch_source
 
 
 def test_question_and_provider_data_are_never_persisted_during_planning() -> None:

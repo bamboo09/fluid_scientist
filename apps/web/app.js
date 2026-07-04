@@ -6,7 +6,12 @@ import {
   storageKeys,
   taskView,
 } from "./workbench-state.js";
-import { elapsedLabel, operationView, planningComposerView } from "./operation-state.js";
+import {
+  elapsedLabel,
+  operationAnnouncement,
+  operationView,
+  planningComposerView,
+} from "./operation-state.js";
 import { OperationPoller, createResultLoader } from "./operation-lifecycle.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -24,6 +29,7 @@ const researchQuestionText = byId("research-question-text");
 const researchForm = byId("research-form");
 const startNewExperiment = byId("start-new-experiment");
 const operationCard = byId("active-operation");
+const operationAnnouncementNode = byId("operation-announcement");
 
 let modelConfiguration = { configured: false, provider: null, model: null };
 let executionTargets = [];
@@ -42,6 +48,7 @@ let activeOperationId = localStorage.getItem(storageKeys.operationId) || "";
 let operationElapsedTimer = null;
 let operationRequestActive = false;
 let operationPoller = null;
+let lastOperationAnnouncement = "";
 const renderedPlanRefs = new Set();
 const planRequests = new Map();
 
@@ -115,8 +122,27 @@ function restoreResearchComposer(question) {
   refreshComposer();
 }
 
-function resetResearchSession() {
+async function resetResearchSession() {
   if (!canStartExperiment(activeTask)) return;
+  if (operationRequestActive) return;
+  const operationId = activeOperationId;
+  const operationIsActive = Boolean(operationId) && !operationView(activeOperation || {}).terminal;
+  if (operationIsActive) {
+    operationRequestActive = true;
+    if (startNewExperiment) startNewExperiment.disabled = true;
+    stopOperationPolling();
+    try {
+      await requestJson(`/api/operations/${operationId}`, { method: "DELETE" });
+    } catch (error) {
+      renderError("取消实验设计", error);
+      startOperationPolling(operationId);
+      return;
+    } finally {
+      operationRequestActive = false;
+      if (startNewExperiment) startNewExperiment.disabled = false;
+      if (activeOperation) renderOperation(activeOperation);
+    }
+  }
   stopOperationPolling();
   window.clearTimeout(pollTimer);
   pollTimer = null;
@@ -134,6 +160,8 @@ function resetResearchSession() {
     operationCard.hidden = true;
     operationCard.setAttribute("aria-busy", "false");
   }
+  lastOperationAnnouncement = "";
+  if (operationAnnouncementNode) operationAnnouncementNode.textContent = "";
   for (const id of ["active-plan-card", "active-task-card"]) byId(id)?.remove();
   if (byId("report")) byId("report").hidden = true;
   if (researchQuestionCard) researchQuestionCard.hidden = true;
@@ -403,6 +431,14 @@ function stopOperationPolling() {
   operationPoller?.stop();
 }
 
+function announceOperation(operation, message) {
+  if (!operationAnnouncementNode) return;
+  const announcement = operationAnnouncement(operation, message);
+  if (announcement === lastOperationAnnouncement) return;
+  lastOperationAnnouncement = announcement;
+  operationAnnouncementNode.textContent = announcement;
+}
+
 function renderOperation(operation, options = {}) {
   if (!operationCard || !operation) return;
   const view = operationView(operation);
@@ -417,9 +453,11 @@ function renderOperation(operation, options = {}) {
   byId("operation-elapsed").textContent = elapsedLabel(operation);
   const message = options.networkMessage || operation.safe_error || "";
   byId("operation-message").textContent = message;
+  announceOperation(operation, message);
   const progress = operationCard.querySelector(".operation-progress");
   progress?.classList.toggle("is-indeterminate", view.indeterminate);
-  progress?.setAttribute("aria-valuenow", String(view.percent));
+  if (view.indeterminate) progress?.removeAttribute("aria-valuenow");
+  else progress?.setAttribute("aria-valuenow", String(view.percent));
   if (byId("operation-progress-bar")) {
     byId("operation-progress-bar").style.width = `${view.percent}%`;
   }
