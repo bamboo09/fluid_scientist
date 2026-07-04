@@ -176,9 +176,7 @@ class ConcurrentCompletions:
             self.barrier.wait()
             return SimpleNamespace(
                 choices=[
-                    SimpleNamespace(
-                        message=SimpleNamespace(content=json.dumps(valid_pipe_plan()))
-                    )
+                    SimpleNamespace(message=SimpleNamespace(content=json.dumps(valid_pipe_plan())))
                 ],
                 _request_id=request_id,
             )
@@ -277,9 +275,7 @@ def test_openai_plan_provider_rejects_capability_mismatch_locally() -> None:
     adapter = OpenAIPlanProvider(settings("openai"), client=client)
 
     with pytest.raises(ProviderOutputError, match="capabilities") as caught:
-        adapter.design_experiment(
-            "Validate pressure loss", capabilities=("cylinder_flow",)
-        )
+        adapter.design_experiment("Validate pressure loss", capabilities=("cylinder_flow",))
 
     assert len(client.parsed_responses.calls) == 1
     assert caught.value.request_id == "req-openai-123"
@@ -319,9 +315,7 @@ def test_openai_plan_provider_status_error_is_sanitized_and_not_retried() -> Non
         body={"error": {"message": "never-print-this"}},
     )
     client = FakeResponsesClient([failure, openai_envelope()])
-    adapter = OpenAIPlanProvider(
-        settings("openai", api_key="never-print-this"), client=client
-    )
+    adapter = OpenAIPlanProvider(settings("openai", api_key="never-print-this"), client=client)
 
     with pytest.raises(ProviderRequestError, match="status") as caught:
         adapter.design_experiment("Validate", capabilities=("laminar_pipe",))
@@ -419,7 +413,7 @@ def test_openai_response_validation_error_is_typed_sanitized_and_keeps_id() -> N
         [FakeRawParseOutcome(failure, "req-validation"), openai_envelope()]
     )
     adapter = OpenAIPlanProvider(
-        settings("openai", api_key="never-print-this"), client=client
+        settings("openai", max_retries=0, api_key="never-print-this"), client=client
     )
 
     with pytest.raises(ProviderSchemaError, match="schema") as caught:
@@ -436,7 +430,9 @@ def test_openai_pydantic_post_parser_error_keeps_raw_response_id() -> None:
     client = FakeResponsesClient(
         [FakeRawParseOutcome(openai_plan_validation_error(), "req-post-parser")]
     )
-    adapter = OpenAIPlanProvider(settings("openai", api_key="never-print-this"), client=client)
+    adapter = OpenAIPlanProvider(
+        settings("openai", max_retries=0, api_key="never-print-this"), client=client
+    )
 
     with pytest.raises(ProviderSchemaError, match="schema") as caught:
         adapter.design_experiment("Validate", capabilities=("laminar_pipe",))
@@ -520,9 +516,7 @@ def test_openai_plan_provider_clears_request_id_between_calls() -> None:
         ("deepseek", "https://api.deepseek.com"),
     ],
 )
-def test_provider_requests_and_validates_json_plan(
-    provider: str, expected_base_url: str
-) -> None:
+def test_provider_requests_and_validates_json_plan(provider: str, expected_base_url: str) -> None:
     client = FakeClient([json.dumps(valid_pipe_plan())])
     adapter = OpenAICompatiblePlanProvider(settings(provider), client=client)
 
@@ -637,9 +631,7 @@ def test_empty_output_retries_and_then_succeeds() -> None:
 
 def test_empty_output_final_failure_is_explicit_and_safe() -> None:
     client = FakeClient([None, ""])
-    adapter = OpenAICompatiblePlanProvider(
-        settings("deepseek", max_retries=1), client=client
-    )
+    adapter = OpenAICompatiblePlanProvider(settings("deepseek", max_retries=1), client=client)
 
     with pytest.raises(ProviderEmptyOutputError, match="empty") as caught:
         adapter.design_experiment("Validate pressure loss", capabilities=("laminar_pipe",))
@@ -668,18 +660,14 @@ def test_transient_request_failure_is_retried(failure: Exception) -> None:
     "failure",
     [
         APITimeoutError(httpx.Request("POST", "https://provider.invalid")),
-        APIConnectionError(
-            request=httpx.Request("POST", "https://provider.invalid")
-        ),
+        APIConnectionError(request=httpx.Request("POST", "https://provider.invalid")),
     ],
 )
 def test_sdk_transient_request_failure_is_retried(failure: Exception) -> None:
     client = FakeClient([failure, json.dumps(valid_pipe_plan())])
     adapter = OpenAICompatiblePlanProvider(settings(max_retries=1), client=client)
 
-    result = adapter.design_experiment(
-        "Validate pressure loss", capabilities=("laminar_pipe",)
-    )
+    result = adapter.design_experiment("Validate pressure loss", capabilities=("laminar_pipe",))
 
     assert result.root.experiment_type == "laminar_pipe"
     assert len(client.completions.calls) == 2
@@ -755,9 +743,7 @@ def test_generic_sdk_status_error_is_typed_sanitized_and_not_retried() -> None:
     )
 
     with pytest.raises(ProviderRequestError, match="status") as caught:
-        adapter.design_experiment(
-            "Validate pressure loss", capabilities=("laminar_pipe",)
-        )
+        adapter.design_experiment("Validate pressure loss", capabilities=("laminar_pipe",))
 
     assert len(client.completions.calls) == 1
     assert caught.value.request_id == "req-error-400"
@@ -840,9 +826,7 @@ def test_schema_invalid_json_is_retried_with_safe_validation_feedback() -> None:
     client = FakeClient([json.dumps(invalid), json.dumps(valid_pipe_plan())])
     adapter = OpenAICompatiblePlanProvider(settings(max_retries=1), client=client)
 
-    plan = adapter.design_experiment(
-        "Validate pressure loss", capabilities=("laminar_pipe",)
-    )
+    plan = adapter.design_experiment("Validate pressure loss", capabilities=("laminar_pipe",))
 
     assert plan.root.experiment_type == "laminar_pipe"
     assert len(client.completions.calls) == 2
@@ -883,3 +867,81 @@ def test_openai_provider_reports_every_request_attempt() -> None:
     )
 
     assert stages == ["model_planning", "model_planning"]
+
+
+@pytest.mark.parametrize(
+    "schema_failure",
+    [
+        APIResponseValidationError(
+            httpx.Response(
+                200,
+                headers={"x-request-id": "req-schema-first"},
+                request=httpx.Request("POST", "https://api.openai.com/v1/responses"),
+            ),
+            {"raw": "never-print-this"},
+            message="invalid structured response never-print-this",
+        ),
+        openai_plan_validation_error(),
+    ],
+)
+def test_openai_schema_failure_retries_with_exact_progress_sequence(
+    schema_failure: Exception,
+) -> None:
+    client = FakeResponsesClient(
+        [FakeRawParseOutcome(schema_failure, "req-schema-first"), openai_envelope()]
+    )
+    adapter = OpenAIPlanProvider(
+        settings("openai", max_retries=1, api_key="never-print-this"), client=client
+    )
+    stages: list[str] = []
+
+    result = adapter.design_experiment(
+        "Validate", capabilities=("laminar_pipe",), progress=stages.append
+    )
+
+    assert result.root.experiment_type == "laminar_pipe"
+    assert stages == ["model_planning", "schema_correction", "model_planning"]
+    assert len(client.parsed_responses.calls) == 2
+
+
+def test_openai_schema_retry_exhaustion_is_bounded_and_sanitized() -> None:
+    failures = [
+        FakeRawParseOutcome(openai_plan_validation_error(), f"req-schema-{attempt}")
+        for attempt in range(2)
+    ]
+    client = FakeResponsesClient(failures)
+    adapter = OpenAIPlanProvider(
+        settings("openai", max_retries=1, api_key="never-print-this"), client=client
+    )
+    stages: list[str] = []
+
+    with pytest.raises(ProviderSchemaError) as caught:
+        adapter.design_experiment(
+            "Validate", capabilities=("laminar_pipe",), progress=stages.append
+        )
+
+    assert stages == ["model_planning", "schema_correction", "model_planning"]
+    assert len(client.parsed_responses.calls) == 2
+    assert caught.value.request_id == "req-schema-1"
+    assert "never-print-this" not in str(caught.value)
+
+
+def test_openai_wrong_structured_output_type_uses_schema_retry() -> None:
+    client = FakeResponsesClient(
+        [
+            FakeRawParseOutcome(SimpleNamespace(secret="never-print-this"), "req-wrong-type"),
+            openai_envelope(),
+        ]
+    )
+    adapter = OpenAIPlanProvider(
+        settings("openai", max_retries=1, api_key="never-print-this"), client=client
+    )
+    stages: list[str] = []
+
+    result = adapter.design_experiment(
+        "Validate", capabilities=("laminar_pipe",), progress=stages.append
+    )
+
+    assert result.root.experiment_type == "laminar_pipe"
+    assert stages == ["model_planning", "schema_correction", "model_planning"]
+    assert len(client.parsed_responses.calls) == 2

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from concurrent.futures import Future
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from threading import Barrier
 
 import pytest
 
-from fluid_scientist.adapters.sql_repository import SQLWorkflowRepository
+from fluid_scientist.adapters.sql_repository import ConcurrentUpdateError, SQLWorkflowRepository
 from fluid_scientist.experiment_planning.models import ExperimentPlan
 from fluid_scientist.experiment_planning.providers import (
     ExperimentDesigner,
@@ -15,7 +16,7 @@ from fluid_scientist.experiment_planning.providers import (
     ProviderRequestError,
     ProviderSchemaError,
 )
-from fluid_scientist.operations import OperationState
+from fluid_scientist.operations import OperationKind, OperationRecord, OperationState
 from fluid_scientist.ports import StoredOperation
 from fluid_scientist.services.planning_operations import PlanningOperationService
 
@@ -63,6 +64,46 @@ class ControlledExecutor:
         fn, args, kwargs = self.pending.pop(0)
         assert callable(fn)
         fn(*args, **kwargs)
+
+
+class ShutdownRecordingExecutor(ControlledExecutor):
+    def __init__(self) -> None:
+        super().__init__()
+        self.shutdown_calls: list[tuple[bool, bool]] = []
+
+    def shutdown(self, wait: bool = True, *, cancel_futures: bool = False) -> None:
+        self.shutdown_calls.append((wait, cancel_futures))
+
+
+class ConflictRepository(SQLWorkflowRepository):
+    def __init__(self, conflicts: int) -> None:
+        super().__init__("sqlite://")
+        self.conflicts = conflicts
+        self.update_attempts = 0
+
+    def update_operation(self, record, *, expected_version: int) -> StoredOperation:
+        self.update_attempts += 1
+        if self.conflicts:
+            self.conflicts -= 1
+            raise ConcurrentUpdateError("synthetic optimistic conflict secret")
+        return super().update_operation(record, expected_version=expected_version)
+
+
+class ConcurrentRequeueRepository(SQLWorkflowRepository):
+    def __init__(self, database_url: str) -> None:
+        super().__init__(database_url)
+        self.requeue_barrier = Barrier(2, timeout=2)
+        self.block_requeues = False
+
+    def load_operation(self, operation_id: str) -> StoredOperation | None:
+        stored = super().load_operation(operation_id)
+        if (
+            self.block_requeues
+            and stored is not None
+            and stored.record.state in {OperationState.FAILED, OperationState.CANCELLED}
+        ):
+            self.requeue_barrier.wait()
+        return stored
 
 
 class RecordingRepository(SQLWorkflowRepository):
@@ -223,6 +264,90 @@ def test_recover_interrupted_marks_operations_failed_and_retryable() -> None:
     assert final.state is OperationState.FAILED
     assert final.safe_error == "服务重启中断了操作，可安全重试"
     assert final.result_ref is None
+
+
+def test_recover_interrupted_skips_case_generation_operations() -> None:
+    repo = repository()
+    service = PlanningOperationService(repo, executor=ControlledExecutor())
+    plan = submit(service, FakeDesigner(valid_plan()))
+    case = OperationRecord.new(
+        operation_id="case-generation-1",
+        kind=OperationKind.CASE_GENERATION,
+        project_id="project-1",
+        input_digest="sha256:" + "a" * 64,
+    )
+    repo.create_operation(case)
+
+    recovered = service.recover_interrupted()
+
+    assert [record.operation_id for record in recovered] == [plan.operation_id]
+    unchanged = repo.load_operation(case.operation_id)
+    assert unchanged is not None
+    assert unchanged.record == case
+
+
+def test_two_services_atomically_claim_one_terminal_requeue(tmp_path) -> None:
+    database_url = f"sqlite:///{(tmp_path / 'operations.db').as_posix()}"
+    repo = ConcurrentRequeueRepository(database_url)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
+    first_executor = ControlledExecutor()
+    first_service = PlanningOperationService(repo, executor=first_executor)
+    initial = submit(first_service, FakeDesigner(RuntimeError("fail once")))
+    first_executor.run_next()
+    assert first_service.get(initial.operation_id).state is OperationState.FAILED
+
+    executor_a = ControlledExecutor()
+    executor_b = ControlledExecutor()
+    service_a = PlanningOperationService(repo, executor=executor_a)
+    service_b = PlanningOperationService(repo, executor=executor_b)
+    repo.block_requeues = True
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        result_a = pool.submit(submit, service_a, FakeDesigner(valid_plan()))
+        result_b = pool.submit(submit, service_b, FakeDesigner(valid_plan()))
+        records = (result_a.result(), result_b.result())
+
+    assert {record.operation_id for record in records} == {initial.operation_id}
+    assert sum((len(executor_a.pending), len(executor_b.pending))) == 1
+
+
+def test_optimistic_transition_conflicts_are_retried() -> None:
+    repo = ConflictRepository(conflicts=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
+    service = PlanningOperationService(repo, executor=ControlledExecutor())
+    operation = submit(service, FakeDesigner(valid_plan()))
+    repo.conflicts = 2
+
+    cancelled = service.cancel(operation.operation_id)
+
+    assert cancelled.state is OperationState.CANCELLED
+    assert repo.update_attempts == 3
+
+
+def test_optimistic_transition_conflict_exhaustion_is_bounded() -> None:
+    repo = ConflictRepository(conflicts=0)
+    repo.save_snapshot("project-1", "{}", expected_version=0)
+    service = PlanningOperationService(repo, executor=ControlledExecutor())
+    operation = submit(service, FakeDesigner(valid_plan()))
+    repo.conflicts = 99
+    baseline = repo.update_attempts
+
+    with pytest.raises(ConcurrentUpdateError, match="bounded retries"):
+        service.cancel(operation.operation_id)
+
+    assert repo.update_attempts - baseline == 5
+
+
+def test_shutdown_only_closes_owned_executor_with_safe_defaults() -> None:
+    owned = ShutdownRecordingExecutor()
+    owned_service = PlanningOperationService(repository(), executor_factory=lambda: owned)
+    injected = ShutdownRecordingExecutor()
+    injected_service = PlanningOperationService(repository(), executor=injected)
+
+    owned_service.shutdown()
+    injected_service.shutdown()
+
+    assert owned.shutdown_calls == [(False, True)]
+    assert injected.shutdown_calls == []
 
 
 @pytest.mark.parametrize(

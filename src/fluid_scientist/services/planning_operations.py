@@ -48,11 +48,17 @@ class PlanningOperationService:
         repository: WorkflowRepository,
         *,
         executor: Executor | None = None,
+        executor_factory: Callable[[], Executor] | None = None,
     ) -> None:
+        if executor is not None and executor_factory is not None:
+            raise ValueError("executor and executor_factory are mutually exclusive")
         self._repository = repository
-        self._executor = executor or ThreadPoolExecutor(
-            max_workers=2, thread_name_prefix="fluid-planning"
-        )
+        if executor is not None:
+            self._executor = executor
+        elif executor_factory is not None:
+            self._executor = executor_factory()
+        else:
+            self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="fluid-planning")
         self._owns_executor = executor is None
         self._lock = RLock()
         self._scheduled: set[str] = set()
@@ -75,9 +81,7 @@ class PlanningOperationService:
         digest = self._digest(question, provider, model)
 
         with self._lock:
-            stored = self._repository.find_operation(
-                OperationKind.PLAN, project_id, digest
-            )
+            stored = self._repository.find_operation(OperationKind.PLAN, project_id, digest)
             should_schedule = False
             if stored is None:
                 operation_id = str(uuid4())
@@ -93,23 +97,9 @@ class PlanningOperationService:
                 OperationState.FAILED,
                 OperationState.CANCELLED,
             }:
-                stored = self._transition(
+                stored, should_schedule = self._claim_terminal_requeue(
                     stored.record.operation_id,
-                    lambda record: self._updated(
-                        record,
-                        state=OperationState.QUEUED,
-                        stage=OperationStage.QUEUED,
-                        message="已进入队列",
-                        result_ref=None,
-                        safe_error=None,
-                        cancel_requested=False,
-                    ),
-                    allowed_terminal_states={
-                        OperationState.FAILED,
-                        OperationState.CANCELLED,
-                    },
                 )
-                should_schedule = True
 
             if should_schedule and stored.record.operation_id not in self._scheduled:
                 self._scheduled.add(stored.record.operation_id)
@@ -127,9 +117,7 @@ class PlanningOperationService:
                     self._scheduled.discard(stored.record.operation_id)
                     stored = self._transition(
                         stored.record.operation_id,
-                        lambda record: self._failed(
-                            record, "无法启动实验设计任务，请重试"
-                        ),
+                        lambda record: self._failed(record, "无法启动实验设计任务，请重试"),
                     )
             return stored.record
 
@@ -164,14 +152,44 @@ class PlanningOperationService:
         recovered: list[OperationRecord] = []
         with self._lock:
             for item in self._repository.list_interrupted_operations():
+                if item.record.kind is not OperationKind.PLAN:
+                    continue
                 updated = self._transition(
                     item.record.operation_id,
-                    lambda record: self._failed(
-                        record, "服务重启中断了操作，可安全重试"
-                    ),
+                    lambda record: self._failed(record, "服务重启中断了操作，可安全重试"),
                 )
                 recovered.append(updated.record)
         return tuple(recovered)
+
+    def _claim_terminal_requeue(self, operation_id: str) -> tuple[StoredOperation, bool]:
+        """Atomically claim the right to schedule a terminal operation retry."""
+
+        retryable_states = {OperationState.FAILED, OperationState.CANCELLED}
+        for _attempt in range(_MAX_TRANSITION_ATTEMPTS):
+            stored = self._repository.load_operation(operation_id)
+            if stored is None:
+                raise KeyError(operation_id)
+            if stored.record.state not in retryable_states:
+                return stored, False
+            replacement = self._updated(
+                stored.record,
+                state=OperationState.QUEUED,
+                stage=OperationStage.QUEUED,
+                message="已进入队列",
+                result_ref=None,
+                safe_error=None,
+                cancel_requested=False,
+            )
+            try:
+                updated = self._repository.update_operation(
+                    replacement, expected_version=stored.version
+                )
+            except ConcurrentUpdateError:
+                continue
+            return updated, True
+        raise ConcurrentUpdateError(
+            f"operation {operation_id} could not be claimed after bounded retries"
+        )
 
     def shutdown(self, *, wait: bool = False, cancel_futures: bool = True) -> None:
         if self._owns_executor:

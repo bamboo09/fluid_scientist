@@ -128,9 +128,7 @@ class OpenAIPlanProvider(plan_providers._PlanProviderSupport):
                         "in capabilities. Do not generate shell commands or remote paths, and "
                         "do not invent unsupported solver capabilities."
                     ),
-                    input=self._json(
-                        {"question": question, "capabilities": list(capabilities)}
-                    ),
+                    input=self._json({"question": question, "capabilities": list(capabilities)}),
                     text_format=OpenAIPlanResponse,
                     store=False,
                     timeout=self._settings.timeout_seconds,
@@ -153,11 +151,15 @@ class OpenAIPlanProvider(plan_providers._PlanProviderSupport):
                         request_id=request_id,
                     )
                 plan = parsed.plan
-                self._validate_capability(
-                    plan, capabilities, request_id=request_id
-                )
+                self._validate_capability(plan, capabilities, request_id=request_id)
                 self._last_request_id.set(request_id)
                 return plan
+            except plan_providers.ProviderSchemaError:
+                if attempt < self._settings.max_retries:
+                    if progress is not None:
+                        progress("schema_correction")
+                    continue
+                raise
             except plan_providers.PlanProviderError:
                 raise
             except AuthenticationError as error:
@@ -177,11 +179,16 @@ class OpenAIPlanProvider(plan_providers._PlanProviderSupport):
             except APIResponseValidationError as error:
                 request_id = self._request_id(error) or request_id
                 self._last_request_id.set(request_id)
-                raise self._error(
+                schema_error = self._error(
                     plan_providers.ProviderSchemaError,
                     "provider structured output failed strict plan schema validation",
                     request_id=request_id,
-                ) from None
+                )
+                if attempt < self._settings.max_retries:
+                    if progress is not None:
+                        progress("schema_correction")
+                    continue
+                raise schema_error from None
             except APIStatusError as error:
                 self._publish_error_id(error)
                 if (
@@ -195,11 +202,16 @@ class OpenAIPlanProvider(plan_providers._PlanProviderSupport):
                 ) from None
             except ValidationError:
                 self._last_request_id.set(request_id)
-                raise self._error(
+                schema_error = self._error(
                     plan_providers.ProviderSchemaError,
                     "provider structured output failed strict plan schema validation",
                     request_id=request_id,
-                ) from None
+                )
+                if attempt < self._settings.max_retries:
+                    if progress is not None:
+                        progress("schema_correction")
+                    continue
+                raise schema_error from None
             except (TimeoutError, APITimeoutError) as error:
                 if attempt == self._settings.max_retries:
                     self._publish_error_id(error)
@@ -275,9 +287,7 @@ class OpenAIResponsesProvider:
                 "for the built-in analytical pipe template; route cylinder, bend, external-flow, "
                 "transient, and other geometries to custom_openfoam with explicit case guidance."
             ),
-            input_text=self._json(
-                {"question": question, "capabilities": list(capabilities)}
-            ),
+            input_text=self._json({"question": question, "capabilities": list(capabilities)}),
         )
 
     def analyze(
