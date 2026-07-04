@@ -248,6 +248,27 @@ def test_persisted_target_allows_planning_before_target_discovery_returns() -> N
     assert "loadExecutionTargets" not in composer
 
 
+def test_paused_terminal_operation_retry_does_not_submit_a_new_plan() -> None:
+    script = read_asset("apps/web/app.js")
+    retry_source = function_source(script, "retryActiveOperation")
+
+    assert "operationPoller?.paused && activeOperationId" in retry_source
+    assert "!operationView(activeOperation || {}).terminal" not in retry_source
+    paused_branch = retry_source[: retry_source.index("const question")]
+    assert "operationPoller.resume()" in paused_branch
+    assert "submitPlanOperation" not in paused_branch
+    assert "return;" in paused_branch
+
+
+def test_edit_mode_hides_the_top_question_to_avoid_duplicate_presentation() -> None:
+    script = read_asset("apps/web/app.js")
+    restore_source = function_source(script, "restoreResearchComposer")
+
+    assert "researchQuestionCard.hidden = true" in restore_source
+    assert 'researchQuestionText.textContent = ""' in restore_source
+    assert "researchForm.hidden = false" in restore_source
+
+
 def test_question_and_provider_data_are_never_persisted_during_planning() -> None:
     script = read_asset("apps/web/app.js")
     design_source = function_source(script, "designExperimentFromPrompt")

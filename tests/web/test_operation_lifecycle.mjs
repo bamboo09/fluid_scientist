@@ -183,3 +183,43 @@ test("a result that becomes stale while loading is never rendered", async () => 
   await loadResult("stale-plan");
   assert.deepEqual(rendered, ["stale-plan"]);
 });
+
+test("retrying a paused succeeded operation reloads its existing result", async () => {
+  const clock = fakeClock();
+  let operationGets = 0;
+  let planGets = 0;
+  const rendered = [];
+  const loadResult = createResultLoader({
+    fetchPlan: async (id) => {
+      planGets += 1;
+      if (planGets <= 5) throw new TypeError("offline");
+      return { plan_id: id };
+    },
+    onPlan: (plan) => rendered.push(plan.plan_id),
+  });
+  const poller = new OperationPoller({
+    fetchOperation: async () => {
+      operationGets += 1;
+      return { operation_id: "existing-op", state: "succeeded", result_ref: "existing-plan" };
+    },
+    onStatus: (operation, context) => loadResult(operation.result_ref, {
+      shouldApply: context.isCurrent,
+    }),
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+  });
+
+  await poller.start("existing-op");
+  for (let index = 0; index < 4; index += 1) {
+    clock.runNext();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(poller.paused, true);
+  assert.equal(operationGets, 5);
+  assert.equal(planGets, 5);
+
+  await poller.resume();
+  assert.equal(operationGets, 6);
+  assert.equal(planGets, 6);
+  assert.deepEqual(rendered, ["existing-plan"]);
+});

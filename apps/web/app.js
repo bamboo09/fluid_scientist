@@ -107,6 +107,8 @@ function showResearchQuestion(question) {
 }
 
 function restoreResearchComposer(question) {
+  if (researchQuestionCard) researchQuestionCard.hidden = true;
+  if (researchQuestionText) researchQuestionText.textContent = "";
   if (researchForm) researchForm.hidden = false;
   if (startNewExperiment) startNewExperiment.hidden = true;
   if (promptInput) promptInput.value = question;
@@ -508,8 +510,8 @@ function startOperationPolling(operationId, options = {}) {
 async function submitPlanOperation(question) {
   if (operationRequestActive) return;
   if (!selectedTarget) {
-    setStatus("请先选择执行平台；规划不会检查平台是否在线。");
     restoreResearchComposer(question);
+    setStatus("请先选择执行平台；规划不会检查平台是否在线。");
     return;
   }
   operationRequestActive = true;
@@ -994,7 +996,7 @@ async function cancelActiveOperation() {
 
 async function retryActiveOperation() {
   if (operationRequestActive) return;
-  if (operationPoller?.paused && activeOperationId && !operationView(activeOperation || {}).terminal) {
+  if (operationPoller?.paused && activeOperationId) {
     operationRequestActive = true;
     if (activeOperation) renderOperation(activeOperation);
     try {

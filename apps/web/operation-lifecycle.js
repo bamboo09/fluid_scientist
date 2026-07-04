@@ -79,14 +79,14 @@ export class OperationPoller {
       const operation = await this.fetchOperation(operationId, { signal: controller.signal });
       if (generation !== this.generation) return;
       this.controller = null;
-      this.networkFailures = 0;
-      this.paused = false;
       await this.onStatus(operation, {
         isCurrent: () => (
           generation === this.generation && operationId === this.operationId
         ),
       });
       if (generation !== this.generation) return;
+      this.networkFailures = 0;
+      this.paused = false;
       if (terminalStates.has(operation.state)) {
         this.stop();
       } else {
