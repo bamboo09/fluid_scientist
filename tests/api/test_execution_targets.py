@@ -418,6 +418,46 @@ def test_custom_case_can_be_submitted_polled_and_collected() -> None:
     assert results.json()["post_processing"]["paraview_file"].endswith(".foam")
 
 
+def test_custom_case_submit_bypasses_cached_health_and_blocks_freshly_offline_target() -> None:
+    class ChangingTarget(CustomCaseTarget):
+        def __init__(self) -> None:
+            super().__init__()
+            self.available = True
+            self.doctor_calls = 0
+
+        def doctor(self):
+            self.doctor_calls += 1
+            return ExecutionTargetCapability(
+                target_id=self.target_id,
+                kind="workstation_openfoam",
+                available=self.available,
+                reason=None if self.available else "offline",
+            )
+
+    target = ChangingTarget()
+    client = TestClient(create_app(execution_targets=(target,)))
+    archive = custom_archive()
+    cached = client.get("/api/execution-targets")
+    assert cached.status_code == 200
+    assert cached.json()[0]["available"] is True
+    target.available = False
+
+    response = client.post(
+        "/api/custom-cases/submit",
+        params={
+            "target_id": target.target_id,
+            "experiment_name": "Fresh doctor gate",
+        },
+        content=archive,
+        headers={"Content-Type": "application/gzip"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "execution target is unavailable"}
+    assert target.doctor_calls == 2
+    assert target.submissions == []
+
+
 class StaticPipePlanner:
     def design_experiment(self, question: str, *, capabilities: tuple[str, ...]):
         return PipeExperimentPlan.model_validate(

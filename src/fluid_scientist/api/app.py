@@ -823,7 +823,7 @@ def create_app(
             )
         job_id = _experiment_job_id(str(uuid4()), experiment_name)
         try:
-            return submit_custom(job_id, payload)
+            return _submit_custom_fresh(target, submit_custom, job_id, payload)
         except CustomCaseRejected as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
         except (RemoteExecutionError, OSError) as error:
