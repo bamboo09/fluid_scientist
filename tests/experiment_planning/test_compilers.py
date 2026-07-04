@@ -166,7 +166,7 @@ def test_builtin_archives_have_no_runtime_dictionary_directives(plan: object) ->
     files = archive_files(compile_plan(plan).archive)
 
     combined = "\n".join(files.values())
-    for forbidden in ("#includeEtc", "#include", "#calc", "#neg"):
+    for forbidden in ("#includeEtc", "#include", "#calc", "#neg", "libs ("):
         assert forbidden not in combined
 
 

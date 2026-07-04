@@ -2,12 +2,18 @@
 
 import hashlib
 import io
-import re
 import tarfile
 from pathlib import PurePosixPath
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from fluid_scientist.openfoam_security import (
+    OpenFOAMSecurityRejected,
+    require_literal_solver,
+    validate_dictionary_security,
+    validate_member_path_policy,
+)
 
 
 class CustomCaseRejected(ValueError):
@@ -31,57 +37,6 @@ _REQUIRED = {
     "system/fvSchemes",
     "system/fvSolution",
 }
-_DYNAMIC_CODE = (
-    "#codestream",
-    "codedfixedvalue",
-    "codedmixed",
-    "codeexecute",
-    "codewrite",
-    "codeend",
-    "systemcall",
-)
-_SOLVER = re.compile(r"\b(?:solver|application)\s+([A-Za-z0-9_.-]+)\s*;")
-
-
-def _strip_comments(content: str) -> str:
-    """Remove dictionary comments while respecting quoted strings."""
-    output: list[str] = []
-    index = 0
-    quote: str | None = None
-    while index < len(content):
-        character = content[index]
-        following = content[index + 1] if index + 1 < len(content) else ""
-        if quote is not None:
-            output.append(character)
-            if character == "\\" and following:
-                output.append(following)
-                index += 2
-                continue
-            if character == quote:
-                quote = None
-            index += 1
-            continue
-        if character in {'"', "'"}:
-            quote = character
-            output.append(character)
-            index += 1
-            continue
-        if character == "/" and following == "/":
-            index += 2
-            while index < len(content) and content[index] not in "\r\n":
-                index += 1
-            continue
-        if character == "/" and following == "*":
-            end = content.find("*/", index + 2)
-            if end < 0:
-                raise CustomCaseRejected("case dictionary has an unterminated comment")
-            index = end + 2
-            continue
-        output.append(character)
-        index += 1
-    return "".join(output)
-
-
 def validate_custom_case_archive(
     payload: bytes,
     *,
@@ -107,6 +62,10 @@ def validate_custom_case_archive(
             path = PurePosixPath(member.name)
             if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
                 raise CustomCaseRejected("archive member path is unsafe")
+            try:
+                validate_member_path_policy(member.name)
+            except OpenFOAMSecurityRejected as error:
+                raise CustomCaseRejected(str(error)) from error
             if member.issym() or member.islnk():
                 raise CustomCaseRejected("archive links are not allowed")
             if not (member.isfile() or member.isdir()):
@@ -123,8 +82,10 @@ def validate_custom_case_archive(
                 raw = handle.read()
                 try:
                     texts[normalized] = raw.decode("utf-8")
-                except UnicodeDecodeError:
-                    texts[normalized] = ""
+                except UnicodeDecodeError as error:
+                    raise CustomCaseRejected(
+                        "case file content is not valid UTF-8"
+                    ) from error
 
     name_set = set(names)
     missing = sorted(_REQUIRED - name_set)
@@ -137,17 +98,13 @@ def validate_custom_case_archive(
     if not has_mesh and not has_block_mesh:
         raise CustomCaseRejected("case needs constant/polyMesh or system/blockMeshDict")
 
-    # Comments are inert OpenFOAM dictionary text. Each member is scanned
-    # independently so a malformed comment cannot consume a later archive member.
-    stripped_texts = {name: _strip_comments(text) for name, text in texts.items()}
-    all_text = "\n".join(stripped_texts.values()).lower()
-    if any(token in all_text for token in _DYNAMIC_CODE):
-        raise CustomCaseRejected("dynamic code and system calls are forbidden")
-    control_dict = stripped_texts["system/controlDict"]
-    solver_match = _SOLVER.search(control_dict)
-    if solver_match is None or solver_match.group(1) != "incompressibleFluid":
-        found = solver_match.group(1) if solver_match else "missing"
-        raise CustomCaseRejected(f"solver is not allow-listed: {found}")
+    try:
+        scans = {
+            name: validate_dictionary_security(text) for name, text in texts.items()
+        }
+        require_literal_solver(scans["system/controlDict"])
+    except OpenFOAMSecurityRejected as error:
+        raise CustomCaseRejected(str(error)) from error
 
     return CustomCaseManifest(
         archive_sha256="sha256:" + hashlib.sha256(payload).hexdigest(),

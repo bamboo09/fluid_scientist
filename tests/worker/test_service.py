@@ -3,6 +3,9 @@ import json
 import tarfile
 from pathlib import Path
 
+import pytest
+
+from fluid_scientist.adapters.custom_openfoam import CustomCaseRejected
 from fluid_scientist.adapters.openfoam import LaminarPipeCase
 from fluid_scientist.worker.service import (
     CommandResult,
@@ -119,7 +122,7 @@ def pipe_spec(velocity: float = 0.1) -> LaminarPipeCase:
     )
 
 
-def custom_archive() -> bytes:
+def custom_archive(overrides: dict[str, str] | None = None) -> bytes:
     files = {
         "0/U": "internalField uniform (0 0 0);",
         "0/p": "internalField uniform 0;",
@@ -129,6 +132,7 @@ def custom_archive() -> bytes:
         "system/fvSolution": "solvers {}",
         "system/blockMeshDict": "vertices ();",
     }
+    files.update(overrides or {})
     output = io.BytesIO()
     with tarfile.open(fileobj=output, mode="w:gz") as bundle:
         for name, text in files.items():
@@ -153,6 +157,35 @@ def test_worker_submits_validated_custom_case_and_extracts_it_safely(tmp_path) -
     assert job.spec.needs_block_mesh is True
     assert (tmp_path / "jobs/cylinder-001/case/system/controlDict").is_file()
     assert launcher.job_ids == ["cylinder-001"]
+
+
+@pytest.mark.parametrize(
+    "dangerous",
+    [
+        '# includeIfPresent "outside-digest"',
+        '#calc "1 + 1"',
+        "solver $selected;",
+    ],
+)
+def test_worker_repeats_hardened_custom_case_validation(
+    tmp_path, dangerous: str
+) -> None:
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    override = (
+        {"system/controlDict": dangerous}
+        if dangerous.startswith("solver")
+        else {"system/fvSchemes": dangerous}
+    )
+    (incoming / "unsafe.tar.gz").write_bytes(custom_archive(override))
+    launcher = FakeLauncher()
+
+    with pytest.raises(CustomCaseRejected):
+        WorkerJobService(tmp_path, launcher=launcher).submit_custom(
+            "unsafe-001", "unsafe.tar.gz"
+        )
+
+    assert launcher.job_ids == []
 
 
 def test_custom_runner_uses_fixed_commands_and_optional_block_mesh(tmp_path) -> None:

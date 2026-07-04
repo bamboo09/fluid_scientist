@@ -188,8 +188,8 @@ def test_scanner_ignores_forbidden_words_in_ordinary_comments() -> None:
     content = (
         _foam_header("dictionary", "controlDict")
         + "application incompressibleFluid;\n"
-        + "// systemCall and libCustom.so are prohibited examples\n"
-        + "/* #codeStream is forbidden in generated cases */\n"
+        + "// systemCall, #include, and libCustom.so are prohibited examples\n"
+        + "/* #codeStream and #includeEtc are forbidden in generated cases */\n"
     )
     assert validate_generated_case(replace_file(content=content)).manifest.solver == (
         "incompressibleFluid"
@@ -197,14 +197,22 @@ def test_scanner_ignores_forbidden_words_in_ordinary_comments() -> None:
 
 
 @pytest.mark.parametrize(
-    "include_path",
-    ["/etc/passwd", "../../etc/passwd", "relative/$HOME/secret", "relative/*.dict"],
+    "directive",
+    [
+        '#include "fluidScientist/functions"',
+        "#includeEtc <caseDicts/functions>",
+        '#includeIfPresent "optional"',
+        '#includeFunc "functionObject"',
+        '# include "relative/path"',
+        '# InClUdEEtC "relative/path"',
+        'x { #include "/etc/passwd" }',
+    ],
 )
-def test_rejects_unsafe_inline_include(include_path: str) -> None:
+def test_rejects_every_include_family_directive(directive: str) -> None:
     content = (
         _foam_header("dictionary", "controlDict")
         + "application incompressibleFluid;\n"
-        + f'functions {{ #include "{include_path}" }}\n'
+        + f"functions {{ {directive} }}\n"
     )
 
     with pytest.raises(GeneratedCaseRejected, match="include"):
@@ -212,14 +220,29 @@ def test_rejects_unsafe_inline_include(include_path: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "directive",
-    ['#include "fluidScientist/functions"', "#includeEtc <caseDicts/functions>"],
+    "control_body",
+    [
+        'note "application incompressibleFluid;";',
+        "application $selected;",
+        "solver ${selected};",
+        "$solver incompressibleFluid;",
+        "application incompressibleFluid; solver incompressibleFluid;",
+        "application simpleFoam; application incompressibleFluid;",
+        "endTime 1;",
+    ],
 )
-def test_allows_exact_safe_inline_relative_include(directive: str) -> None:
+def test_requires_one_operative_literal_solver(control_body: str) -> None:
+    content = _foam_header("dictionary", "controlDict") + control_body
+
+    with pytest.raises(GeneratedCaseRejected, match="incompressibleFluid"):
+        validate_generated_case(replace_file(content=content))
+
+
+def test_quoted_solver_decoy_does_not_override_one_operative_literal() -> None:
     content = (
         _foam_header("dictionary", "controlDict")
+        + 'note "application simpleFoam;";\n'
         + "application incompressibleFluid;\n"
-        + f"functions {{ {directive} }}\n"
     )
 
     assert validate_generated_case(replace_file(content=content)).manifest.solver == (
@@ -245,7 +268,7 @@ def test_rejects_malformed_or_ambiguous_inline_include(directive: str) -> None:
         + f"functions {{ {directive} }}\n"
     )
 
-    with pytest.raises(GeneratedCaseRejected, match="include"):
+    with pytest.raises(GeneratedCaseRejected, match="include|unterminated"):
         validate_generated_case(replace_file(content=content))
 
 
@@ -258,6 +281,28 @@ def test_rejects_unterminated_block_comment_in_generated_file() -> None:
 
     with pytest.raises(GeneratedCaseRejected, match="unterminated comment"):
         validate_generated_case(replace_file(content=content))
+
+
+@pytest.mark.parametrize(
+    "suffix", [".tar.gz", ".tar", ".tgz", ".zip", ".7z", ".bz2", ".xz", ".gz"]
+)
+def test_rejects_archive_and_compression_members(suffix: str) -> None:
+    payload = valid_payload()
+    payload["files"].append({"path": f"fluidScientist/input{suffix}", "content": "data"})
+
+    with pytest.raises(GeneratedCaseRejected, match="archive|executable"):
+        validate_generated_case(GeneratedCaseDraft.model_validate(payload))
+
+
+def test_rejects_path_component_over_255_utf8_bytes() -> None:
+    payload = valid_payload()
+    component = "界" * 80 + "a" * 16  # 256 UTF-8 bytes, below the schema char limit.
+    payload["files"].append(
+        {"path": f"fluidScientist/{component}", "content": "bounded"}
+    )
+
+    with pytest.raises(GeneratedCaseRejected, match="path"):
+        validate_generated_case(GeneratedCaseDraft.model_validate(payload))
 
 
 @pytest.mark.parametrize(

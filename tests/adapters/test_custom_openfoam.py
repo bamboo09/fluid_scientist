@@ -81,8 +81,8 @@ def test_custom_case_rejects_links() -> None:
 def test_custom_case_ignores_forbidden_construct_names_in_comments() -> None:
     files = valid_files()
     files["system/controlDict"] += (
-        "\n// #codeStream and systemCall are forbidden"
-        "\n/* codedFixedValue is also inert in a closed block comment */"
+        "\n// #codeStream, #include, and systemCall are forbidden"
+        "\n/* codedFixedValue and #includeEtc are inert in a closed block comment */"
     )
 
     assert validate_custom_case_archive(archive(files)).solver == "incompressibleFluid"
@@ -96,3 +96,84 @@ def test_unterminated_comment_cannot_hide_later_archive_member(dangerous: str) -
 
     with pytest.raises(CustomCaseRejected, match="unterminated comment"):
         validate_custom_case_archive(archive(files))
+
+
+@pytest.mark.parametrize(
+    "dangerous",
+    [
+        '#include "relative/path"',
+        "#includeEtc <caseDicts/functions>",
+        '#includeIfPresent "optional"',
+        '#includeFunc "functionObject"',
+        '# include "relative/path"',
+        '# InClUdE "relative/path"',
+        '#calc "1 + 1"',
+        "#eval{ 1 + 1 }",
+        'libs ("libCustom.so");',
+        "dlopen libCustom.so;",
+        "command harmless-looking;",
+        'program "/bin/sh";',
+        'value "$(id)";',
+    ],
+)
+def test_custom_case_rejects_shared_forbidden_dictionary_constructs(
+    dangerous: str,
+) -> None:
+    files = valid_files()
+    files["system/fvSchemes"] += "\n" + dangerous
+
+    with pytest.raises(CustomCaseRejected):
+        validate_custom_case_archive(archive(files))
+
+
+@pytest.mark.parametrize(
+    "control_body",
+    [
+        'note "solver incompressibleFluid;";',
+        "solver $selected;",
+        "application ${selected};",
+        "$solver incompressibleFluid;",
+        "solver incompressibleFluid; application incompressibleFluid;",
+        "solver simpleFoam; solver incompressibleFluid;",
+        "endTime 1;",
+    ],
+)
+def test_custom_case_requires_one_operative_literal_solver(control_body: str) -> None:
+    files = valid_files()
+    files["system/controlDict"] = "FoamFile {}\n" + control_body
+
+    with pytest.raises(CustomCaseRejected, match="solver"):
+        validate_custom_case_archive(archive(files))
+
+
+@pytest.mark.parametrize(
+    "suffix", [".tar.gz", ".tar", ".tgz", ".zip", ".7z", ".bz2", ".xz", ".gz"]
+)
+def test_custom_case_rejects_archive_and_compression_members(suffix: str) -> None:
+    files = {**valid_files(), f"fluidScientist/input{suffix}": "data"}
+
+    with pytest.raises(CustomCaseRejected, match="archive"):
+        validate_custom_case_archive(archive(files))
+
+
+def test_custom_case_rejects_oversized_utf8_component_and_total_path() -> None:
+    oversized_component = "界" * 240
+    long_path = "/".join(["segment"] * 600)
+    for unsafe_path in (
+        f"fluidScientist/{oversized_component}",
+        f"fluidScientist/{long_path}",
+    ):
+        files = {**valid_files(), unsafe_path: "data"}
+        with pytest.raises(CustomCaseRejected, match="path"):
+            validate_custom_case_archive(archive(files))
+
+
+def test_custom_case_errors_do_not_leak_authored_content() -> None:
+    secret = "TOP-SECRET-AUTHORED-VALUE"
+    files = valid_files()
+    files["system/fvSchemes"] += f"\n# include \"{secret}\""
+
+    with pytest.raises(CustomCaseRejected) as raised:
+        validate_custom_case_archive(archive(files))
+
+    assert secret not in str(raised.value)

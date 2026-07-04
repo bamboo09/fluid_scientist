@@ -25,6 +25,12 @@ from fluid_scientist.case_generation.rendering import (
     render_defaults,
     render_generated_case,
 )
+from fluid_scientist.openfoam_security import (
+    OpenFOAMSecurityRejected,
+    require_literal_solver,
+    validate_dictionary_security,
+    validate_member_path_policy,
+)
 
 _ALLOWED_ROOTS = frozenset({"0", "constant", "system", "fluidScientist"})
 _MANDATORY_CLASSES = {
@@ -65,27 +71,6 @@ _SCRIPT_SUFFIXES = frozenset(
 _FOAM_HEADER = re.compile(r"\bFoamFile\s*\{(?P<body>.*?)\}", re.DOTALL)
 _CLASS = re.compile(r"\bclass\s+([A-Za-z][A-Za-z0-9_]*)\s*;")
 _OBJECT = re.compile(r"\bobject\s+([A-Za-z][A-Za-z0-9_]*)\s*;")
-_APPLICATION = re.compile(r"\b(?:application|solver)\s+([A-Za-z][A-Za-z0-9_.-]*)\s*;")
-_INCLUDE_TOKEN = re.compile(r"#include(?:Etc)?\b")
-_INCLUDE_OPERAND = re.compile(
-    r'\s+(?:"(?P<quoted>[^"\r\n]+)"|<(?P<angled>[^>\r\n]+)>)'
-)
-_INCLUDE_PATH = re.compile(r"[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*")
-_INCLUDE_INLINE_SUFFIX = re.compile(r"(?:\s*[\]\});])*\s*")
-_FORBIDDEN_CONTENT = (
-    re.compile(r"^\s*#!"),
-    re.compile(r"#\s*codeStream\b", re.IGNORECASE),
-    re.compile(r"#\s*(?:calc|eval)\b", re.IGNORECASE),
-    re.compile(r"\bdynamicCode\b", re.IGNORECASE),
-    re.compile(r"\bcoded[A-Za-z0-9_]*\b", re.IGNORECASE),
-    re.compile(r"\bcode(?:Execute|Write|End)?\s*#\{", re.IGNORECASE),
-    re.compile(r"\bsystemCall\b", re.IGNORECASE),
-    re.compile(r"\b(?:execute|command)\b", re.IGNORECASE),
-    re.compile(r"\b(?:libs|dlopen)\b", re.IGNORECASE),
-    re.compile(r"\$\("),
-    re.compile(r"`"),
-    re.compile(r"(?:^|[\s\"'])/(?:bin|sbin|usr/bin|usr/sbin)/", re.IGNORECASE),
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +107,10 @@ def _normalize_paths(files: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str
     seen: set[str] = set()
     for raw_path, content in files:
         try:
+            validate_member_path_policy(raw_path)
+        except OpenFOAMSecurityRejected as error:
+            raise GeneratedCaseRejected(str(error)) from error
+        try:
             raw_path.encode("utf-8")
         except UnicodeEncodeError as error:
             raise GeneratedCaseRejected("case file path is not valid UTF-8") from error
@@ -157,86 +146,6 @@ def _normalize_paths(files: tuple[tuple[str, str], ...]) -> tuple[tuple[str, str
     return tuple(sorted(normalized))
 
 
-def _without_comments(content: str) -> str:
-    output: list[str] = []
-    index = 0
-    quote: str | None = None
-    while index < len(content):
-        character = content[index]
-        following = content[index + 1] if index + 1 < len(content) else ""
-        if quote is not None:
-            output.append(character)
-            if character == "\\" and following:
-                output.append(following)
-                index += 2
-                continue
-            if character == quote:
-                quote = None
-            index += 1
-            continue
-        if character in {'"', "'"}:
-            quote = character
-            output.append(character)
-            index += 1
-            continue
-        if character == "/" and following == "/":
-            index += 2
-            while index < len(content) and content[index] not in "\r\n":
-                index += 1
-            continue
-        if character == "/" and following == "*":
-            end = content.find("*/", index + 2)
-            if end < 0:
-                raise GeneratedCaseRejected("case dictionary has an unterminated comment")
-            index = end + 2
-            continue
-        output.append(character)
-        index += 1
-    return "".join(output)
-
-
-def _validate_include_path(include_path: str) -> None:
-    if (
-        not include_path
-        or "\\" in include_path
-        or include_path.startswith("/")
-        or include_path.startswith(("~", "$"))
-        or (len(include_path) >= 2 and include_path[1] == ":")
-        or ":" in include_path
-        or any(character.isspace() for character in include_path)
-        or any(character in include_path for character in {'"', "'", "<", ">", "#"})
-        or _has_forbidden_control(include_path, text=False)
-        or _INCLUDE_PATH.fullmatch(include_path) is None
-    ):
-        raise GeneratedCaseRejected("case dictionary has an unsafe include path")
-    path = PurePosixPath(include_path)
-    if (
-        path.as_posix() != include_path
-        or not path.parts
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise GeneratedCaseRejected("case dictionary has an unsafe include path")
-
-
-def _validate_includes(scanned: str) -> None:
-    """Validate every include token, including directives embedded in a line."""
-
-    for line in scanned.splitlines():
-        tokens = tuple(_INCLUDE_TOKEN.finditer(line))
-        if not tokens:
-            continue
-        if len(tokens) != 1:
-            raise GeneratedCaseRejected("case dictionary has multiple includes on one line")
-        token = tokens[0]
-        operand = _INCLUDE_OPERAND.match(line, token.end())
-        if operand is None:
-            raise GeneratedCaseRejected("case dictionary has a malformed include")
-        include_path = operand.group("quoted") or operand.group("angled")
-        _validate_include_path(include_path)
-        if _INCLUDE_INLINE_SUFFIX.fullmatch(line[operand.end() :]) is None:
-            raise GeneratedCaseRejected("case dictionary has a malformed include")
-
-
 def _validate_content(path: str, content: str) -> None:
     try:
         content.encode("utf-8")
@@ -244,15 +153,11 @@ def _validate_content(path: str, content: str) -> None:
         raise GeneratedCaseRejected("case file content is not valid UTF-8") from error
     if _has_forbidden_control(content, text=True):
         raise GeneratedCaseRejected("case file content contains forbidden control characters")
-    scanned = _without_comments(content)
-    if any(pattern.search(scanned) for pattern in _FORBIDDEN_CONTENT):
-        raise GeneratedCaseRejected("case file contains a forbidden directive")
-    applications = re.findall(
-        r"\bapplication\s+([A-Za-z][A-Za-z0-9_.-]*)\s*;", scanned
-    )
-    if any(application != "incompressibleFluid" for application in applications):
-        raise GeneratedCaseRejected("case file selects an unsupported application")
-    _validate_includes(scanned)
+    try:
+        scan = validate_dictionary_security(content)
+    except OpenFOAMSecurityRejected as error:
+        raise GeneratedCaseRejected(str(error)) from error
+    scanned = scan.comment_stripped
 
     expected_class = _MANDATORY_CLASSES.get(path)
     if expected_class is None:
@@ -269,12 +174,11 @@ def _validate_content(path: str, content: str) -> None:
 
 
 def _validate_solver(files_by_path: Mapping[str, str]) -> None:
-    control_dict = _without_comments(files_by_path["system/controlDict"])
-    declarations = _APPLICATION.findall(control_dict)
-    if not declarations or any(value != "incompressibleFluid" for value in declarations):
-        raise GeneratedCaseRejected(
-            "controlDict must select Foundation 13 incompressibleFluid"
-        )
+    try:
+        scan = validate_dictionary_security(files_by_path["system/controlDict"])
+        require_literal_solver(scan)
+    except OpenFOAMSecurityRejected as error:
+        raise GeneratedCaseRejected(str(error)) from error
 
 
 def _package(files: tuple[tuple[str, str], ...]) -> bytes:
