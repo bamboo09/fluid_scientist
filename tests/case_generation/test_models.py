@@ -95,6 +95,59 @@ def test_generated_case_file_fields_require_real_strings(field: str, value: obje
         GeneratedCaseFile.model_validate(payload)
 
 
+@pytest.mark.parametrize("bad_value", [b"text", bytearray(b"text"), 42])
+def test_all_contract_string_fields_reject_non_strings(bad_value: object) -> None:
+    for field in ("name", "unit"):
+        payload = float_parameter()
+        payload[field] = bad_value
+        with pytest.raises(ValidationError):
+            GeneratedCaseParameter.model_validate(payload)
+
+    enum_payload = {
+        "name": "scheme",
+        "kind": "enum",
+        "default": "linear",
+        "regression_values": ["linear", "upwind"],
+        "allowed_values": ["linear", bad_value],
+    }
+    with pytest.raises(ValidationError):
+        GeneratedCaseParameter.model_validate(enum_payload)
+
+    for field in ("experiment_name", "objective"):
+        payload = valid_draft_payload()
+        payload[field] = bad_value
+        with pytest.raises(ValidationError):
+            GeneratedCaseDraft.model_validate(payload)
+    for field in ("requested_outputs", "assumptions", "limitations"):
+        payload = valid_draft_payload()
+        payload[field] = [bad_value]
+        with pytest.raises(ValidationError):
+            GeneratedCaseDraft.model_validate(payload)
+
+    draft = GeneratedCaseDraft.model_validate(valid_draft_payload())
+    view_payload: dict[str, object] = {
+        "draft_id": "draft-1",
+        "project_id": "project-1",
+        "plan_id": "plan-1",
+        "plan_version": 1,
+        "version": 1,
+        "provider": "glm",
+        "model": "glm-5.1",
+        "digest": "sha256:" + "a" * 64,
+        "draft": draft,
+    }
+    for field in ("draft_id", "project_id", "plan_id", "provider", "model", "digest"):
+        with pytest.raises(ValidationError):
+            GeneratedCaseDraftView.model_validate(view_payload | {field: bad_value})
+
+
+def test_preprocessing_rejects_oversized_input_at_field_boundary() -> None:
+    payload = valid_draft_payload()
+    payload["preprocessing"] = ["blockMesh", "checkMesh", *("blockMesh" for _ in range(10_000))]
+    with pytest.raises(ValidationError):
+        GeneratedCaseDraft.model_validate(payload)
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [

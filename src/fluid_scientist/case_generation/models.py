@@ -11,13 +11,14 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    StrictStr,
     StringConstraints,
     field_validator,
     model_validator,
 )
 
 LowerSnakeCase = Annotated[
-    str,
+    StrictStr,
     StringConstraints(
         strip_whitespace=True,
         min_length=1,
@@ -25,8 +26,13 @@ LowerSnakeCase = Annotated[
         pattern=r"^[a-z][a-z0-9]*(?:_[a-z0-9]+)*$",
     ),
 ]
-NonEmptyText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
-Identifier = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+NonEmptyText = Annotated[StrictStr, StringConstraints(strip_whitespace=True, min_length=1)]
+Identifier = Annotated[
+    StrictStr, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)
+]
+EnumValue = Annotated[
+    StrictStr, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)
+]
 JsonScalar = str | int | float
 
 _MAX_FILE_BYTES = 1_000_000
@@ -43,8 +49,10 @@ class GeneratedCaseFile(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    path: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=240)]
-    content: str = Field(max_length=_MAX_FILE_BYTES)
+    path: Annotated[
+        StrictStr, StringConstraints(strip_whitespace=True, min_length=1, max_length=240)
+    ]
+    content: StrictStr = Field(max_length=_MAX_FILE_BYTES)
 
     @field_validator("path", "content", mode="before")
     @classmethod
@@ -83,13 +91,15 @@ class GeneratedCaseParameter(BaseModel):
     name: LowerSnakeCase
     kind: Literal["float", "integer", "enum"]
     unit: Annotated[
-        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)
+        StrictStr, StringConstraints(strip_whitespace=True, min_length=1, max_length=40)
     ] | None = None
     minimum: JsonScalar | None = None
     maximum: JsonScalar | None = None
     default: JsonScalar
     regression_values: tuple[JsonScalar, ...] = Field(min_length=2, max_length=32)
-    allowed_values: tuple[str, ...] | None = Field(default=None, min_length=1, max_length=64)
+    allowed_values: tuple[EnumValue, ...] | None = Field(
+        default=None, min_length=1, max_length=64
+    )
 
     @field_validator("minimum", "maximum", "default", mode="before")
     @classmethod
@@ -173,13 +183,13 @@ class GeneratedCaseDraft(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     experiment_name: Annotated[
-        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)
+        StrictStr, StringConstraints(strip_whitespace=True, min_length=1, max_length=80)
     ]
     objective: Annotated[
-        str, StringConstraints(strip_whitespace=True, min_length=10, max_length=4_000)
+        StrictStr, StringConstraints(strip_whitespace=True, min_length=10, max_length=4_000)
     ]
     solver: Literal["incompressibleFluid"]
-    preprocessing: tuple[Literal["blockMesh", "checkMesh"], ...]
+    preprocessing: tuple[Literal["blockMesh"], Literal["checkMesh"]]
     parameters: tuple[GeneratedCaseParameter, ...] = Field(max_length=64)
     files: tuple[GeneratedCaseFile, ...] = Field(min_length=1, max_length=64)
     requested_outputs: tuple[LowerSnakeCase, ...] = Field(min_length=1, max_length=64)
@@ -229,7 +239,7 @@ class GeneratedCaseDraftView(BaseModel):
     version: int = Field(ge=1, strict=True)
     provider: Identifier
     model: Identifier
-    digest: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    digest: Annotated[StrictStr, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
     draft: GeneratedCaseDraft
 
 
