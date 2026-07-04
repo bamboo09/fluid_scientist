@@ -43,6 +43,45 @@ _DYNAMIC_CODE = (
 _SOLVER = re.compile(r"\b(?:solver|application)\s+([A-Za-z0-9_.-]+)\s*;")
 
 
+def _strip_comments(content: str) -> str:
+    """Remove dictionary comments while respecting quoted strings."""
+    output: list[str] = []
+    index = 0
+    quote: str | None = None
+    while index < len(content):
+        character = content[index]
+        following = content[index + 1] if index + 1 < len(content) else ""
+        if quote is not None:
+            output.append(character)
+            if character == "\\" and following:
+                output.append(following)
+                index += 2
+                continue
+            if character == quote:
+                quote = None
+            index += 1
+            continue
+        if character in {'"', "'"}:
+            quote = character
+            output.append(character)
+            index += 1
+            continue
+        if character == "/" and following == "/":
+            index += 2
+            while index < len(content) and content[index] not in "\r\n":
+                index += 1
+            continue
+        if character == "/" and following == "*":
+            end = content.find("*/", index + 2)
+            if end < 0:
+                return "".join(output)
+            index = end + 2
+            continue
+        output.append(character)
+        index += 1
+    return "".join(output)
+
+
 def validate_custom_case_archive(
     payload: bytes,
     *,
@@ -98,10 +137,12 @@ def validate_custom_case_archive(
     if not has_mesh and not has_block_mesh:
         raise CustomCaseRejected("case needs constant/polyMesh or system/blockMeshDict")
 
-    all_text = "\n".join(texts.values()).lower()
+    # Comments are inert OpenFOAM dictionary text. Stripping them avoids rejecting
+    # a safe case merely because documentation names a forbidden construct.
+    all_text = _strip_comments("\n".join(texts.values())).lower()
     if any(token in all_text for token in _DYNAMIC_CODE):
         raise CustomCaseRejected("dynamic code and system calls are forbidden")
-    control_dict = texts["system/controlDict"]
+    control_dict = _strip_comments(texts["system/controlDict"])
     solver_match = _SOLVER.search(control_dict)
     if solver_match is None or solver_match.group(1) != "incompressibleFluid":
         found = solver_match.group(1) if solver_match else "missing"

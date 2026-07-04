@@ -76,3 +76,10 @@ def test_custom_case_rejects_links() -> None:
         validate_custom_case_archive(
             archive(valid_files(), symlink=("constant/polyMesh", "/etc"))
         )
+
+
+def test_custom_case_ignores_forbidden_construct_names_in_comments() -> None:
+    files = valid_files()
+    files["system/controlDict"] += "\n// #codeStream and systemCall are forbidden"
+
+    assert validate_custom_case_archive(archive(files)).solver == "incompressibleFluid"
