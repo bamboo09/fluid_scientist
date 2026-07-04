@@ -849,3 +849,37 @@ def test_schema_invalid_json_is_retried_with_safe_validation_feedback() -> None:
     retry_messages = json.dumps(client.completions.calls[1]["messages"])
     assert "unexpected" in retry_messages
     assert "never-print-this" not in retry_messages
+
+
+def test_compatible_provider_reports_schema_correction_progress_sequence() -> None:
+    invalid = valid_pipe_plan() | {"unexpected": "value"}
+    client = FakeClient([json.dumps(invalid), json.dumps(valid_pipe_plan())])
+    adapter = OpenAICompatiblePlanProvider(settings(max_retries=1), client=client)
+    stages: list[str] = []
+
+    adapter.design_experiment(
+        "Validate pressure loss",
+        capabilities=("laminar_pipe",),
+        progress=stages.append,
+    )
+
+    assert stages == ["model_planning", "schema_correction", "model_planning"]
+
+
+def test_openai_provider_reports_every_request_attempt() -> None:
+    failure = APIConnectionError(
+        message="offline", request=httpx.Request("POST", "https://api.openai.com/v1/responses")
+    )
+    adapter = OpenAIPlanProvider(
+        settings("openai", max_retries=1),
+        client=FakeResponsesClient([failure, openai_envelope()]),
+    )
+    stages: list[str] = []
+
+    adapter.design_experiment(
+        "Validate pressure loss",
+        capabilities=("laminar_pipe",),
+        progress=stages.append,
+    )
+
+    assert stages == ["model_planning", "model_planning"]

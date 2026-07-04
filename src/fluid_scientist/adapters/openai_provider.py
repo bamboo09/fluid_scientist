@@ -1,5 +1,6 @@
 """OpenAI Responses API provider using strict Pydantic structured outputs."""
 
+from collections.abc import Callable
 from dataclasses import asdict
 from typing import Any, Literal, TypeVar
 
@@ -107,10 +108,16 @@ class OpenAIPlanProvider(plan_providers._PlanProviderSupport):
         return f"OpenAIPlanProvider(model={self._settings.model!r})"
 
     def design_experiment(
-        self, question: str, *, capabilities: tuple[str, ...]
+        self,
+        question: str,
+        *,
+        capabilities: tuple[str, ...],
+        progress: Callable[[str], None] | None = None,
     ) -> ExperimentPlan:
         self._begin_request()
         for attempt in range(self._settings.max_retries + 1):
+            if progress is not None:
+                progress("model_planning")
             request_id: str | None = None
             try:
                 raw_response = self._client.responses.with_raw_response.parse(

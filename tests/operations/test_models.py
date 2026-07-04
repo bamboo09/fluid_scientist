@@ -130,6 +130,7 @@ def test_new_operation_has_safe_defaults_and_utc_timestamps() -> None:
     assert record.state is OperationState.QUEUED
     assert record.stage is OperationStage.QUEUED
     assert record.message == "已进入队列"
+    assert "�" not in record.message
     assert record.result_ref is None
     assert record.safe_error is None
     assert record.cancel_requested is False

@@ -1,6 +1,7 @@
 """Provider adapters that return strict, provider-neutral experiment plans."""
 
 import json
+from collections.abc import Callable
 from contextvars import ContextVar
 from typing import Any, Protocol, runtime_checkable
 
@@ -28,7 +29,11 @@ class ExperimentDesigner(Protocol):
     """Common contract for model-backed experiment planning."""
 
     def design_experiment(
-        self, question: str, *, capabilities: tuple[str, ...]
+        self,
+        question: str,
+        *,
+        capabilities: tuple[str, ...],
+        progress: Callable[[str], None] | None = None,
     ) -> ExperimentPlan: ...
 
 
@@ -195,16 +200,28 @@ class OpenAICompatiblePlanProvider(_PlanProviderSupport):
         )
 
     def design_experiment(
-        self, question: str, *, capabilities: tuple[str, ...]
+        self,
+        question: str,
+        *,
+        capabilities: tuple[str, ...],
+        progress: Callable[[str], None] | None = None,
     ) -> ExperimentPlan:
         self._begin_request()
-        return self._design_experiment(question, capabilities=capabilities)
+        return self._design_experiment(
+            question, capabilities=capabilities, progress=progress
+        )
 
     def _design_experiment(
-        self, question: str, *, capabilities: tuple[str, ...]
+        self,
+        question: str,
+        *,
+        capabilities: tuple[str, ...],
+        progress: Callable[[str], None] | None,
     ) -> ExperimentPlan:
         validation_feedback: tuple[str, ...] = ()
         for attempt in range(self._settings.max_retries + 1):
+            if progress is not None:
+                progress("model_planning")
             request_id: str | None = None
             try:
                 response = self._client.chat.completions.create(
@@ -247,6 +264,8 @@ class OpenAICompatiblePlanProvider(_PlanProviderSupport):
                 if attempt == self._settings.max_retries:
                     raise
                 validation_feedback = error.issues
+                if progress is not None:
+                    progress("schema_correction")
             except AuthenticationError as error:
                 request_id = self._request_id(error)
                 self._last_request_id.set(request_id)
