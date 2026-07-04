@@ -17,6 +17,7 @@ import {
   OperationPoller,
   createResultLoader,
 } from "./operation-lifecycle.js";
+import { revealPostprocess } from "./postprocess.js";
 
 const $ = (selector) => document.querySelector(selector);
 const byId = (id) => document.getElementById(id);
@@ -43,6 +44,7 @@ let currentPlan = null;
 let currentCompilation = null;
 let activeTask = null;
 let latestResults = null;
+let postprocessSessionVersion = 0;
 let validatedCustomCase = null;
 let pollTimer = null;
 let pollDelay = 1500;
@@ -135,6 +137,7 @@ function clearResearchSession() {
   currentCompilation = null;
   activeTask = null;
   latestResults = null;
+  postprocessSessionVersion += 1;
   activeOperation = null;
   activeOperationId = "";
   for (const key of [storageKeys.projectId, storageKeys.planId, storageKeys.caseId, storageKeys.operationId]) {
@@ -858,58 +861,60 @@ function startPolling(callback) {
   return callback();
 }
 
-function formatObject(value) {
-  return Object.entries(value || {}).map(([key, item]) => `${key}: ${text(item)}`).join("；") || "无";
+function postprocessIdentity() {
+  const projectId = currentProject?.project_id || localStorage.getItem(storageKeys.projectId) || "";
+  const planId = currentPlan?.plan_id || localStorage.getItem(storageKeys.planId) || "";
+  const caseId = localStorage.getItem(storageKeys.caseId) || "";
+  const targetId = selectedTarget || localStorage.getItem(storageKeys.targetId) || "";
+  return { projectId, planId, caseId, targetId };
 }
 
-function renderPostprocessResults(results) {
-  const root = byId("postprocess-results") || document.createElement("section");
-  root.id = "postprocess-results";
-  root.hidden = false;
-  root.replaceChildren();
-  const collection = results.collection || results;
-  const mesh = document.createElement("p");
-  mesh.textContent = [
-    `网格：${collection.mesh?.passed ? "通过" : "未通过"}`,
-    `单元数 ${text(collection.mesh?.cells)}`,
-    `最大长宽比 ${text(collection.mesh?.max_aspect_ratio)}`,
-    `最大非正交度 ${text(collection.mesh?.max_non_orthogonality)}`,
-    `平均非正交度 ${text(collection.mesh?.average_non_orthogonality)}`,
-    `最大偏斜度 ${text(collection.mesh?.max_skewness)}`,
-  ].join("；");
-  const solver = document.createElement("p");
-  solver.textContent = `求解器完成标记：${collection.solver?.completed ? "已完成" : "未完成"}`;
-  const conservation = document.createElement("p");
-  conservation.textContent = [
-    `全局连续性误差 ${text(collection.solver?.global_continuity_error)}`,
-    `累计连续性误差 ${text(collection.solver?.cumulative_continuity_error)}`,
-    `入口质量流量 ${text(collection.solver?.inlet_mass_flow)}`,
-    `出口质量流量 ${text(collection.solver?.outlet_mass_flow)}`,
-    `压降 ${text(collection.solver?.pressure_drop_pa)} Pa`,
-  ].join("；");
-  const residuals = document.createElement("p");
-  residuals.textContent = `残差：${formatObject(collection.solver?.final_residuals)}`;
-  const numeric_times = collection.numeric_times || collection.post_processing?.time_directories || [];
-  const times = document.createElement("p");
-  times.textContent = `数值时间：${numeric_times.join("，") || "未提供"}`;
-  const observables = document.createElement("p");
-  observables.textContent = `观测量：${formatObject(collection.observables)}`;
-  const paraviewFile = document.createElement("p");
-  paraviewFile.textContent = `ParaView 标记：${collection.post_processing?.paraview_file || "未提供 .foam 文件"}`;
-  const advanced = document.createElement("details");
-  const advancedTitle = document.createElement("summary");
-  advancedTitle.textContent = "工作站 ParaView 指引";
-  const advancedBody = document.createElement("p");
-  advancedBody.textContent = collection.post_processing?.paraview_file
-    ? "请在可信工作站环境中打开该 .foam 标记；浏览器显示的是结构化采集结果。"
-    : "本次采集未返回 ParaView 标记。";
-  advanced.append(advancedTitle, advancedBody);
-  root.append(mesh, solver, conservation, residuals, times, observables, paraviewFile, advanced);
-  if (!root.isConnected) (stream || document.body).append(root);
+async function fetchCurrentPostprocessResults(expectedSessionKey) {
+  const identity = postprocessIdentity();
+  if (!identity.projectId || !identity.planId || !identity.caseId || !identity.targetId) {
+    throw new Error("missing-result-identity");
+  }
+  const query = new URLSearchParams({
+    target_id: identity.targetId,
+    case_id: identity.caseId,
+  });
+  const results = await requestJson(
+    `/api/projects/${identity.projectId}/experiment-plans/${identity.planId}/results?${query}`,
+  );
+  const current = postprocessIdentity();
+  const identityChanged = Object.keys(identity).some((key) => identity[key] !== current[key]);
+  if (identityChanged || expectedSessionKey !== postprocessSessionKey()) {
+    throw new Error("stale-result-session");
+  }
+  latestResults = results;
+  return results;
+}
+
+function postprocessSessionKey() {
+  const identity = postprocessIdentity();
+  return `${identity.projectId}:${identity.planId}:${identity.caseId}:${identity.targetId}:${postprocessSessionVersion}`;
+}
+
+function showPostprocess(button, root, results = latestResults) {
+  const sessionKey = postprocessSessionKey();
+  return revealPostprocess({
+    root,
+    button,
+    results,
+    fetchResults: () => fetchCurrentPostprocessResults(sessionKey),
+    sessionKey,
+  });
+}
+
+function bindPostprocessButton(button, root, results = () => latestResults) {
+  button.addEventListener("click", () => {
+    void showPostprocess(button, root, results());
+  });
 }
 
 function renderResultsCard(results) {
   latestResults = results;
+  postprocessSessionVersion += 1;
   renderTaskCard({
     ...activeTask,
     phase: "completed",
@@ -929,14 +934,18 @@ function renderResultsCard(results) {
   postButton.type = "button";
   postButton.className = "button button-secondary";
   postButton.textContent = "查看浏览器后处理";
-  postButton.addEventListener("click", () => renderPostprocessResults(results));
+  const postprocessRoot = document.createElement("section");
+  postprocessRoot.className = "postprocess-results";
+  postprocessRoot.hidden = true;
+  postprocessRoot.setAttribute("aria-live", "polite");
+  postprocessRoot.setAttribute("aria-busy", "false");
+  bindPostprocessButton(postButton, postprocessRoot, () => results);
   const analyzeButton = document.createElement("button");
   analyzeButton.type = "button";
   analyzeButton.className = "button button-primary";
-  analyzeButton.textContent = "模型分析结果";
+  analyzeButton.textContent = "实验结果分析与报告";
   analyzeButton.addEventListener("click", analyzeExperimentResults);
-  card.append(body, postButton, analyzeButton);
-  renderPostprocessResults(results);
+  card.append(body, postButton, analyzeButton, postprocessRoot);
 }
 
 async function pollPlannedExperiment(jobId, targetId, projectId, planId, caseId) {
@@ -980,7 +989,7 @@ async function pollPlannedExperiment(jobId, targetId, projectId, planId, caseId)
 function renderExperimentAnalysis(result) {
   let card = byId("experiment-analysis-card");
   if (!card) {
-    card = makeCard("work-card analysis-card", "模型分析结果（证据绑定）");
+    card = makeCard("work-card analysis-card", "实验结果分析与报告（证据绑定）");
     card.id = "experiment-analysis-card";
     (stream || document.body).append(card);
   }
@@ -1261,8 +1270,7 @@ async function pollCustomCase(jobId, targetId) {
     if (phase === "failed" || phase === "cancelled") return;
     if (job.state === "succeeded") {
       const collection = await requestJson(`/api/custom-cases/${jobId}/results?${query}`);
-      renderPostprocessResults(collection);
-      renderTaskCard({ ...activeTask, phase: "completed", lastUpdated: new Date().toLocaleString() });
+      renderResultsCard(collection);
       return;
     }
     schedulePoll(() => pollCustomCase(jobId, targetId));
@@ -1315,6 +1323,10 @@ function bindEvents() {
   byId("open-custom-case")?.addEventListener("click", () => openDialog("custom-case-drawer"));
   byId("cancel-operation")?.addEventListener("click", cancelActiveOperation);
   byId("retry-operation")?.addEventListener("click", retryActiveOperation);
+  byId("view-postprocess")?.addEventListener("click", (event) => {
+    const root = byId("postprocess-results");
+    if (root) void showPostprocess(event.currentTarget, root);
+  });
   startNewExperiment?.addEventListener("click", resetResearchSession);
   document.querySelectorAll("[data-open-dialog]").forEach((button) => {
     button.addEventListener("click", () => openDialog(button.dataset.openDialog));

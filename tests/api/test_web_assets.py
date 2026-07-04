@@ -348,11 +348,12 @@ def test_submitted_question_has_one_top_level_presentation_not_a_second_dialogue
 def test_structured_results_postprocessing_and_analysis_remain_reachable() -> None:
     html = read_asset("apps/web/index.html")
     script = read_asset("apps/web/app.js")
+    controller = read_asset("apps/web/postprocess.js")
 
     assert 'id="postprocess-results"' in html
     assert "/experiment-plans/${planId}/results?" in script
     assert "/experiment-plans/${planId}/analysis?" in script
-    assert "renderPostprocessResults" in script
+    assert "renderPostprocessResults" in controller
     assert "renderExperimentAnalysis" in script
     for result_field in (
         "mesh",
@@ -361,7 +362,30 @@ def test_structured_results_postprocessing_and_analysis_remain_reachable() -> No
         "observables",
         "paraview_file",
     ):
-        assert result_field in script
+        assert result_field in controller
+
+
+def test_both_postprocess_buttons_use_one_reveal_controller() -> None:
+    html = read_asset("apps/web/index.html")
+    app = read_asset("apps/web/app.js")
+    controller = read_asset("apps/web/postprocess.js")
+
+    assert 'id="view-postprocess"' in html
+    assert 'byId("view-postprocess")?.addEventListener' in app
+    assert 'from "./postprocess.js"' in app
+    assert "revealPostprocess" in app
+    assert "bindPostprocessButton" in app
+    assert "postButton.addEventListener" not in app
+    show_source = function_source(app, "showPostprocess")
+    assert "const sessionKey = postprocessSessionKey()" in show_source
+    assert "fetchCurrentPostprocessResults(sessionKey)" in show_source
+    render_source = function_source(app, "renderResultsCard")
+    assert "renderPostprocessResults(results)" not in render_source
+    assert 'analyzeButton.textContent = "实验结果分析与报告"' in render_source
+    for behavior in ("scrollIntoView", "focus", "aria-busy", "fetchResults"):
+        assert behavior in controller
+    assert "renderCavityCenterlineProfile" in controller
+    assert "renderCylinderForceHistory" in controller
 
 
 def test_polling_failures_show_a_visible_chinese_auto_retry_warning() -> None:

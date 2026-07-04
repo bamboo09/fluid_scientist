@@ -381,7 +381,48 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .postprocess-card { margin-top: 24px; padding-top: 20px; border-top: 1px solid var(--line); }
 .postprocess-card code { display: block; margin: 10px 0; padding: 10px; background: var(--paper-deep); overflow-wrap: anywhere; }
 .postprocess-card > small { display: block; margin-bottom: 10px; color: var(--muted); }
-.postprocess-results { margin-top: 18px; padding: 16px; border: 1px solid var(--line); background: #fffdf8; }
+.postprocess-results {
+  min-width: 0;
+  max-width: 100%;
+  margin-top: 18px;
+  padding: clamp(14px, 2.5vw, 22px);
+  border: 1px solid var(--line);
+  background: #fffdf8;
+  overflow: hidden;
+}
+.postprocess-results[hidden] { display: none; }
+.postprocess-results:focus { outline: 2px solid var(--teal); outline-offset: 4px; }
+.postprocess-results[aria-busy="true"] { border-left: 3px solid var(--amber); }
+.postprocess-loading { margin: 0; color: var(--muted); font: 10px/1.6 var(--mono); }
+.postprocess-summary, .curve-note { color: var(--muted); font-size: 11px; }
+.postprocess-section { min-width: 0; margin-top: 18px; }
+.postprocess-section h4, .evidence-chart h4 { margin: 0 0 8px; font: 600 11px/1.4 var(--sans); }
+.evidence-table, .chart-fallback {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font: 9px/1.55 var(--mono);
+}
+.evidence-table th, .evidence-table td, .chart-fallback th, .chart-fallback td {
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: anywhere;
+  text-align: left;
+  vertical-align: top;
+}
+.evidence-table th { width: min(38%, 190px); color: var(--muted); font-weight: 500; }
+.evidence-chart { min-width: 0; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--line); }
+.evidence-chart svg { display: block; width: 100%; height: auto; color: var(--muted); }
+.chart-axis { stroke: currentColor; stroke-width: 1; }
+.chart-label { fill: currentColor; font: 10px var(--mono); }
+.chart-series { stroke: var(--teal); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.chart-series-2 { stroke: var(--amber); }
+.chart-fallback { margin-top: 12px; }
+.evidence-chart-missing { color: var(--muted); }
+.button:focus-visible, .text-button:focus-visible, .rail-link:focus-visible {
+  outline: 2px solid var(--teal);
+  outline-offset: 3px;
+}
 .analysis-block { margin-top: 22px; padding: 18px; border-left: 3px solid var(--amber); background: var(--amber-pale); }
 .analysis-block ol { margin: 0; padding-left: 22px; }
 .result-card footer { margin-top: 20px; color: var(--faint); font: 9px/1.5 var(--mono); }
