@@ -157,6 +157,49 @@ def test_duplicate_post_reuses_operation_and_delete_cancels(tmp_path) -> None:
     assert cancelled.json()["state"] == "cancelled"
 
 
+def test_same_question_on_different_targets_schedules_distinct_operations(tmp_path) -> None:
+    class HPCTarget(OnlineTarget):
+        target_id = "hpc-login"
+        kind = "hpc_slurm"
+        declared_capabilities = ("OpenFOAM-13", "slurm")
+
+    executor = ControlledExecutor()
+    planner = Planner()
+    repository = SQLWorkflowRepository(f"sqlite:///{tmp_path / 'targets.db'}")
+    workstation = OnlineTarget()
+    hpc = HPCTarget()
+    client = TestClient(
+        create_app(
+            repository=repository,
+            execution_targets=(workstation, hpc),
+            plan_designer=planner,
+            plan_provider_name="glm",
+            plan_model_name="glm-5.1",
+            planning_executor=executor,
+        )
+    )
+    project_id = client.post(
+        "/api/projects", json={"question": "Measure pressure loss in a laminar pipe."}
+    ).json()["project_id"]
+    payload = {
+        "project_id": project_id,
+        "question": "Design a laminar pressure-loss benchmark.",
+        "target_id": workstation.target_id,
+    }
+
+    first = client.post("/api/plan-operations", json=payload)
+    duplicate = client.post("/api/plan-operations", json=payload)
+    payload["target_id"] = hpc.target_id
+    second_target = client.post("/api/plan-operations", json=payload)
+
+    assert duplicate.json()["operation_id"] == first.json()["operation_id"]
+    assert second_target.json()["operation_id"] != first.json()["operation_id"]
+    assert len(executor.pending) == 2
+    executor.run_next()
+    executor.run_next()
+    assert planner.calls == 2
+
+
 def test_offline_target_does_not_block_or_run_doctor_during_planning(tmp_path) -> None:
     target = OfflineTarget()
     client, executor, planner, project_id, _target = configured_client(tmp_path, target=target)

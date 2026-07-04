@@ -72,6 +72,39 @@ def test_execution_targets_api_reuses_cached_doctor_result() -> None:
     assert second.json()[0]["checked_at"] == first.json()[0]["checked_at"]
 
 
+def test_execution_targets_api_sanitizes_successful_doctor_payload() -> None:
+    class SecretTarget(StaticTarget):
+        def __init__(self, available: bool) -> None:
+            self.available = available
+
+        def doctor(self):
+            return ExecutionTargetCapability(
+                target_id=self.target_id,
+                kind=self.kind,
+                available=self.available,
+                selected_candidate="secret-host:/private/key",
+                commands=("/private/bin/secret-command",),
+                reason="secret diagnostic /private/key",
+                foam_version="OpenFOAM-13",
+            )
+
+    for available in (True, False):
+        response = TestClient(
+            create_app(execution_targets=(SecretTarget(available),))
+        ).get("/api/execution-targets")
+
+        assert response.status_code == 200
+        body = response.json()[0]
+        assert body["selected_candidate"] is None
+        assert body["commands"] == []
+        assert body["reason"] == (
+            None if available else "execution target is unavailable"
+        )
+        assert body["foam_version"] == "OpenFOAM-13"
+        assert "secret-host" not in response.text
+        assert "/private" not in response.text
+
+
 def test_app_builds_workstation_candidates_from_runtime_settings_only() -> None:
     created_nodes = []
 

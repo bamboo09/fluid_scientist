@@ -214,6 +214,36 @@ def test_submit_returns_queued_before_designer_runs_and_duplicate_schedules_once
     assert "test pipe" not in first.model_dump_json()
 
 
+def test_idempotency_digest_includes_canonical_capability_profile() -> None:
+    executor = ControlledExecutor()
+    designer = FakeDesigner(valid_plan())
+    service = PlanningOperationService(repository(), executor=executor)
+    common = {
+        "project_id": "project-1",
+        "question": "test pipe",
+        "provider": "glm",
+        "model": "glm-5.1",
+        "designer": designer,
+    }
+
+    workstation = service.submit(
+        **common,
+        capabilities=("laminar_pipe", "workstation_openfoam", "target-a"),
+    )
+    same_profile_reordered = service.submit(
+        **common,
+        capabilities=("target-a", "laminar_pipe", "workstation_openfoam"),
+    )
+    hpc = service.submit(
+        **common,
+        capabilities=("laminar_pipe", "hpc_slurm", "target-b"),
+    )
+
+    assert same_profile_reordered.operation_id == workstation.operation_id
+    assert hpc.operation_id != workstation.operation_id
+    assert len(executor.pending) == 2
+
+
 def test_success_persists_only_accepted_plan_and_progress_sequence() -> None:
     repo = RecordingRepository()
     repo.save_snapshot("project-1", "{}", expected_version=0)

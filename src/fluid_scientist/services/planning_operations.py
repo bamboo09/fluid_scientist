@@ -447,7 +447,7 @@ class PlanningOperationService:
         normalized = tuple(cls._required("capabilities", item) for item in capabilities)
         if len(set(normalized)) != len(normalized):
             raise ValueError("capabilities must be unique")
-        return normalized
+        return tuple(sorted(normalized))
 
     @staticmethod
     def _digest(question: str, snapshot: PlanningModelSnapshot) -> str:
@@ -456,6 +456,7 @@ class PlanningOperationService:
                 "question": question,
                 "provider": snapshot.provider,
                 "model": snapshot.model,
+                "capabilities": snapshot.capabilities,
             },
             ensure_ascii=False,
             sort_keys=True,
