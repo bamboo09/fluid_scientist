@@ -25,7 +25,7 @@ def _utc_now() -> datetime:
 def _public_version(value: str | None) -> str | None:
     if value is None:
         return None
-    return value if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+ -]{0,63}", value) else None
+    return value if re.fullmatch(r"OpenFOAM-(?:v)?[0-9]+(?:\.[0-9]+)*", value) else None
 
 
 class TargetCapabilityStatus(ExecutionTargetCapability):

@@ -125,20 +125,33 @@ def test_successful_doctor_results_are_sanitized_for_both_health_states() -> Non
         assert "/private" not in encoded
 
 
-def test_non_public_version_string_is_not_exposed() -> None:
-    class SecretVersionTarget(CountingTarget):
+def test_only_recognized_openfoam_version_formats_are_exposed() -> None:
+    class VersionTarget(CountingTarget):
+        def __init__(self, version: str) -> None:
+            super().__init__(available=True)
+            self.version = version
+
         def doctor(self):
             return ExecutionTargetCapability(
                 target_id=self.target_id,
                 kind=self.kind,
                 available=True,
-                foam_version="ssh://secret-host/private/OpenFOAM-13",
+                foam_version=self.version,
             )
 
-    status = TargetCapabilityCache().get(SecretVersionTarget(available=True))
+    for version in ("OpenFOAM-13", "OpenFOAM-v2312", "OpenFOAM-12.1"):
+        status = TargetCapabilityCache().get(VersionTarget(version))
+        assert status.foam_version == version
 
-    assert status.foam_version is None
-    assert "secret-host" not in status.model_dump_json()
+    for private_value in (
+        "secret-host.internal",
+        "node01 private key",
+        "ssh://secret-host/private/OpenFOAM-13",
+        "/opt/openfoam13",
+    ):
+        status = TargetCapabilityCache().get(VersionTarget(private_value))
+        assert status.foam_version is None
+        assert private_value not in status.model_dump_json()
 
 
 def test_slow_target_does_not_block_another_target_refresh() -> None:
