@@ -166,8 +166,29 @@ def test_builtin_archives_have_no_runtime_dictionary_directives(plan: object) ->
     files = archive_files(compile_plan(plan).archive)
 
     combined = "\n".join(files.values())
-    for forbidden in ("#includeEtc", "#include", "#calc", "#neg", "libs ("):
+    for forbidden in ("#includeEtc", "#include", "#calc", "#neg"):
         assert forbidden not in combined
+
+
+@pytest.mark.parametrize(
+    ("plan", "expected_libraries"),
+    [
+        (
+            pipe_plan(),
+            {"libfieldFunctionObjects.so", "libutilityFunctionObjects.so"},
+        ),
+        (cylinder_plan(), {"libforces.so", "libutilityFunctionObjects.so"}),
+        (cavity_plan(), {"libsampling.so", "libutilityFunctionObjects.so"}),
+    ],
+)
+def test_builtin_archives_retain_trusted_foundation_libraries_and_revalidate(
+    plan: object, expected_libraries: set[str]
+) -> None:
+    compiled = compile_plan(plan)
+    combined = "\n".join(archive_files(compiled.archive).values())
+
+    assert all(f'libs ("{library}");' in combined for library in expected_libraries)
+    assert validate_custom_case_archive(compiled.archive).archive_sha256 == compiled.digest
 
 
 def test_pipe_inlet_is_face_matched_area_averaged_parabolic_profile() -> None:

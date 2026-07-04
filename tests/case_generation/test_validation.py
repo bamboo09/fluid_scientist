@@ -167,6 +167,7 @@ def test_manifest_cannot_express_archive_links() -> None:
         "systemCall touch_owned;",
         "execute /bin/sh;",
         'libs ("libCustom.so");',
+        'libs ("libforces.so");',
         'dlopen("libCustom.so");',
         '#include "/etc/passwd"',
         '#includeEtc "../../etc/passwd"',
@@ -284,7 +285,27 @@ def test_rejects_unterminated_block_comment_in_generated_file() -> None:
 
 
 @pytest.mark.parametrize(
-    "suffix", [".tar.gz", ".tar", ".tgz", ".zip", ".7z", ".bz2", ".xz", ".gz"]
+    "suffix",
+    [
+        ".tar.gz",
+        ".tar.zst",
+        ".tar.lz4",
+        ".tar",
+        ".tgz",
+        ".tbz2",
+        ".txz",
+        ".zip",
+        ".7z",
+        ".bz2",
+        ".xz",
+        ".gz",
+        ".zst",
+        ".rar",
+        ".lz4",
+        ".cpio",
+        ".cab",
+        ".iso",
+    ],
 )
 def test_rejects_archive_and_compression_members(suffix: str) -> None:
     payload = valid_payload()

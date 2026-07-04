@@ -188,6 +188,42 @@ def test_worker_repeats_hardened_custom_case_validation(
     assert launcher.job_ids == []
 
 
+def test_worker_rejects_compressed_large_text_before_launch(tmp_path) -> None:
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    (incoming / "oversized.tar.gz").write_bytes(
+        custom_archive({"fluidScientist/oversized": "x" * (4 * 1024 * 1024 + 1)})
+    )
+    launcher = FakeLauncher()
+
+    with pytest.raises(CustomCaseRejected, match="text member"):
+        WorkerJobService(tmp_path, launcher=launcher).submit_custom(
+            "oversized-001", "oversized.tar.gz"
+        )
+
+    assert launcher.job_ids == []
+
+
+def test_worker_accepts_exact_trusted_foundation_runtime_library(tmp_path) -> None:
+    incoming = tmp_path / "incoming"
+    incoming.mkdir()
+    control_dict = (
+        "solver incompressibleFluid;\n"
+        'functions { coefficients { libs ("libforces.so"); } }'
+    )
+    (incoming / "trusted-libs.tar.gz").write_bytes(
+        custom_archive({"system/controlDict": control_dict})
+    )
+    launcher = FakeLauncher()
+
+    result = WorkerJobService(tmp_path, launcher=launcher).submit_custom(
+        "trusted-libs-001", "trusted-libs.tar.gz"
+    )
+
+    assert result.state == JobState.RUNNING
+    assert launcher.job_ids == ["trusted-libs-001"]
+
+
 def test_custom_runner_uses_fixed_commands_and_optional_block_mesh(tmp_path) -> None:
     runner = RecordingRunner()
     job = OpenFOAM13JobRunner(runner=runner)

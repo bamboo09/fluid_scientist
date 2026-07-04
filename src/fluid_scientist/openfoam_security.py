@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import re
 from dataclasses import dataclass
 
@@ -18,13 +19,35 @@ class DictionaryScan:
 
 _ARCHIVE_SUFFIXES = (
     ".tar.gz",
+    ".tar.zst",
+    ".tar.lz4",
+    ".tar.bz2",
+    ".tar.xz",
     ".tar",
     ".tgz",
+    ".tbz",
+    ".tbz2",
+    ".txz",
     ".zip",
     ".7z",
     ".bz2",
     ".xz",
     ".gz",
+    ".zst",
+    ".rar",
+    ".lz4",
+    ".lzma",
+    ".cpio",
+    ".cab",
+    ".iso",
+)
+TRUSTED_RUNTIME_LIBRARIES = frozenset(
+    {
+        "libfieldFunctionObjects.so",
+        "libutilityFunctionObjects.so",
+        "libforces.so",
+        "libsampling.so",
+    }
 )
 _INCLUDE_FAMILY = re.compile(r"#\s*include[A-Za-z0-9_]*", re.IGNORECASE)
 _FORBIDDEN_OPERATIVE = (
@@ -35,7 +58,7 @@ _FORBIDDEN_OPERATIVE = (
     re.compile(r"\bcode(?:Execute|Write|End)?\s*#\{", re.IGNORECASE),
     re.compile(r"\bsystemCall\b", re.IGNORECASE),
     re.compile(r"\b(?:execute|command)\b", re.IGNORECASE),
-    re.compile(r"\b(?:libs|dlopen)\b", re.IGNORECASE),
+    re.compile(r"\bdlopen\b", re.IGNORECASE),
     re.compile(r"\$\("),
     re.compile(r"`"),
     re.compile(r"(?:^|[\s\"'])/(?:bin|sbin|usr/bin|usr/sbin)/", re.IGNORECASE),
@@ -44,24 +67,28 @@ _SOLVER_KEYWORD = re.compile(r"\b(?:application|solver)\b")
 _LITERAL_SOLVER = re.compile(
     r"\b(?:application|solver)\s+incompressibleFluid\s*;"
 )
+_LIBS_KEYWORD = re.compile(r"\blibs\b")
+_LIBS_DECLARATION = re.compile(
+    r'libs\s*\(\s*"(?P<library>[A-Za-z][A-Za-z0-9]*\.so)"\s*\)\s*;'
+)
 
 
 def scan_dictionary(content: str) -> DictionaryScan:
     """Remove comments and mask quoted strings without joining file boundaries."""
 
-    stripped: list[str] = []
-    operative: list[str] = []
+    stripped = io.StringIO()
+    operative = io.StringIO()
     index = 0
     quote: str | None = None
     while index < len(content):
         character = content[index]
         following = content[index + 1] if index + 1 < len(content) else ""
         if quote is not None:
-            stripped.append(character)
-            operative.append("\n" if character in "\r\n" else " ")
+            stripped.write(character)
+            operative.write("\n" if character in "\r\n" else " ")
             if character == "\\" and following:
-                stripped.append(following)
-                operative.append("\n" if following in "\r\n" else " ")
+                stripped.write(following)
+                operative.write("\n" if following in "\r\n" else " ")
                 index += 2
                 continue
             if character == quote:
@@ -70,49 +97,51 @@ def scan_dictionary(content: str) -> DictionaryScan:
             continue
         if character in {'"', "'"}:
             quote = character
-            stripped.append(character)
-            operative.append(" ")
+            stripped.write(character)
+            operative.write(" ")
             index += 1
             continue
         if character == "/" and following == "/":
-            stripped.extend("  ")
-            operative.extend("  ")
+            stripped.write("  ")
+            operative.write("  ")
             index += 2
             while index < len(content) and content[index] not in "\r\n":
-                stripped.append(" ")
-                operative.append(" ")
+                stripped.write(" ")
+                operative.write(" ")
                 index += 1
             continue
         if character == "/" and following == "*":
-            stripped.extend("  ")
-            operative.extend("  ")
+            stripped.write("  ")
+            operative.write("  ")
             index += 2
             while index < len(content):
                 character = content[index]
                 following = content[index + 1] if index + 1 < len(content) else ""
                 if character == "*" and following == "/":
-                    stripped.extend("  ")
-                    operative.extend("  ")
+                    stripped.write("  ")
+                    operative.write("  ")
                     index += 2
                     break
                 replacement = "\n" if character in "\r\n" else " "
-                stripped.append(replacement)
-                operative.append(replacement)
+                stripped.write(replacement)
+                operative.write(replacement)
                 index += 1
             else:
                 raise OpenFOAMSecurityRejected(
                     "case dictionary has an unterminated comment"
                 )
             continue
-        stripped.append(character)
-        operative.append(character)
+        stripped.write(character)
+        operative.write(character)
         index += 1
     if quote is not None:
         raise OpenFOAMSecurityRejected("case dictionary has an unterminated quote")
-    return DictionaryScan("".join(stripped), "".join(operative))
+    return DictionaryScan(stripped.getvalue(), operative.getvalue())
 
 
-def validate_dictionary_security(content: str) -> DictionaryScan:
+def validate_dictionary_security(
+    content: str, *, allowed_libraries: frozenset[str] = frozenset()
+) -> DictionaryScan:
     scan = scan_dictionary(content)
     if _INCLUDE_FAMILY.search(scan.comment_stripped):
         raise OpenFOAMSecurityRejected("case dictionary include directives are forbidden")
@@ -120,6 +149,15 @@ def validate_dictionary_security(content: str) -> DictionaryScan:
         raise OpenFOAMSecurityRejected(
             "dynamic code, system calls, and forbidden directives are forbidden"
         )
+    for keyword in _LIBS_KEYWORD.finditer(scan.operative):
+        declaration = _LIBS_DECLARATION.match(scan.comment_stripped, keyword.start())
+        if (
+            declaration is None
+            or declaration.group("library") not in allowed_libraries
+        ):
+            raise OpenFOAMSecurityRejected(
+                "case dictionary runtime library declaration is forbidden"
+            )
     return scan
 
 
@@ -148,6 +186,7 @@ def validate_member_path_policy(path: str) -> None:
 __all__ = [
     "DictionaryScan",
     "OpenFOAMSecurityRejected",
+    "TRUSTED_RUNTIME_LIBRARIES",
     "require_literal_solver",
     "scan_dictionary",
     "validate_dictionary_security",

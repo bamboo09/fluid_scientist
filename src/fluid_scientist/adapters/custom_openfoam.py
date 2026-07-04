@@ -9,6 +9,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from fluid_scientist.openfoam_security import (
+    TRUSTED_RUNTIME_LIBRARIES,
     OpenFOAMSecurityRejected,
     require_literal_solver,
     validate_dictionary_security,
@@ -43,6 +44,8 @@ def validate_custom_case_archive(
     max_archive_bytes: int = 50 * 1024 * 1024,
     max_uncompressed_bytes: int = 500 * 1024 * 1024,
     max_members: int = 5_000,
+    max_text_member_bytes: int = 4 * 1024 * 1024,
+    max_total_text_bytes: int = 32 * 1024 * 1024,
 ) -> CustomCaseManifest:
     if not payload or len(payload) > max_archive_bytes:
         raise CustomCaseRejected("archive size exceeds the allowed limit")
@@ -56,8 +59,9 @@ def validate_custom_case_archive(
         if len(members) > max_members:
             raise CustomCaseRejected("archive contains too many members")
         names: list[str] = []
-        texts: dict[str, str] = {}
         total_size = 0
+        total_text_size = 0
+        control_scan = None
         for member in members:
             path = PurePosixPath(member.name)
             if path.is_absolute() or any(part in {"", ".", ".."} for part in path.parts):
@@ -76,16 +80,29 @@ def validate_custom_case_archive(
             normalized = path.as_posix()
             names.append(normalized)
             if member.isfile():
+                if member.size > max_text_member_bytes:
+                    raise CustomCaseRejected("case text member exceeds the allowed limit")
+                total_text_size += member.size
+                if total_text_size > max_total_text_bytes:
+                    raise CustomCaseRejected("case text content exceeds the allowed limit")
                 handle = bundle.extractfile(member)
                 if handle is None:
                     raise CustomCaseRejected("archive member could not be read")
                 raw = handle.read()
                 try:
-                    texts[normalized] = raw.decode("utf-8")
+                    text = raw.decode("utf-8")
                 except UnicodeDecodeError as error:
                     raise CustomCaseRejected(
                         "case file content is not valid UTF-8"
                     ) from error
+                try:
+                    scan = validate_dictionary_security(
+                        text, allowed_libraries=TRUSTED_RUNTIME_LIBRARIES
+                    )
+                except OpenFOAMSecurityRejected as error:
+                    raise CustomCaseRejected(str(error)) from error
+                if normalized == "system/controlDict":
+                    control_scan = scan
 
     name_set = set(names)
     missing = sorted(_REQUIRED - name_set)
@@ -98,11 +115,10 @@ def validate_custom_case_archive(
     if not has_mesh and not has_block_mesh:
         raise CustomCaseRejected("case needs constant/polyMesh or system/blockMeshDict")
 
+    if control_scan is None:
+        raise CustomCaseRejected("required controlDict content is missing")
     try:
-        scans = {
-            name: validate_dictionary_security(text) for name, text in texts.items()
-        }
-        require_literal_solver(scans["system/controlDict"])
+        require_literal_solver(control_scan)
     except OpenFOAMSecurityRejected as error:
         raise CustomCaseRejected(str(error)) from error
 

@@ -416,12 +416,14 @@ functions
     pressureDrop
     {
         type fieldValueDelta;
+        libs ("libfieldFunctionObjects.so");
         writeControl timeStep;
         writeInterval 1;
         operation subtract;
         region1
         {
             type surfaceFieldValue;
+            libs ("libfieldFunctionObjects.so");
             writeControl timeStep;
             writeInterval 1;
             writeFields false;
@@ -432,6 +434,7 @@ functions
         region2
         {
             type surfaceFieldValue;
+            libs ("libfieldFunctionObjects.so");
             writeControl timeStep;
             writeInterval 1;
             writeFields false;
@@ -443,6 +446,7 @@ functions
     inletFlow
     {
         type surfaceFieldValue;
+        libs ("libfieldFunctionObjects.so");
         writeControl timeStep;
         writeInterval 1;
         writeFields false;
@@ -453,6 +457,7 @@ functions
     outletFlow
     {
         type surfaceFieldValue;
+        libs ("libfieldFunctionObjects.so");
         writeControl timeStep;
         writeInterval 1;
         writeFields false;
@@ -463,6 +468,7 @@ functions
     residuals
     {
         type residuals;
+        libs ("libutilityFunctionObjects.so");
         fields (U p);
         writeControl timeStep;
         writeInterval 1;
@@ -753,6 +759,7 @@ functions
     forces
     {{
         type forces;
+        libs ("libforces.so");
         patches (cylinder);
         rho rhoInf;
         rhoInf {_number(density)};
@@ -763,6 +770,7 @@ functions
     forceCoeffs
     {{
         type forceCoeffs;
+        libs ("libforces.so");
         patches (cylinder);
         rho rhoInf;
         rhoInf {_number(density)};
@@ -779,6 +787,7 @@ functions
     residuals
     {{
         type residuals;
+        libs ("libutilityFunctionObjects.so");
         fields (U p);
         writeControl timeStep;
         writeInterval 1;
@@ -929,6 +938,7 @@ functions
     velocityProbes
     {{
         type probes;
+        libs ("libsampling.so");
         fields (U p);
         probeLocations
         (
@@ -942,6 +952,7 @@ functions
     residuals
     {{
         type residuals;
+        libs ("libutilityFunctionObjects.so");
         fields (U p);
         writeControl timeStep;
         writeInterval 1;

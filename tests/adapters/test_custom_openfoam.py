@@ -56,6 +56,22 @@ def test_custom_case_detects_fixed_mirror_mesh_preprocessing() -> None:
 
 
 @pytest.mark.parametrize(
+    "library",
+    [
+        "libfieldFunctionObjects.so",
+        "libutilityFunctionObjects.so",
+        "libforces.so",
+        "libsampling.so",
+    ],
+)
+def test_custom_case_accepts_only_exact_trusted_runtime_library(library: str) -> None:
+    files = valid_files()
+    files["system/controlDict"] += f'\nfunctions {{ f {{ libs ("{library}"); }} }}'
+
+    assert validate_custom_case_archive(archive(files)).solver == "incompressibleFluid"
+
+
+@pytest.mark.parametrize(
     "files, message",
     [
         ({"../system/controlDict": "solver incompressibleFluid;"}, "path"),
@@ -110,6 +126,10 @@ def test_unterminated_comment_cannot_hide_later_archive_member(dangerous: str) -
         '#calc "1 + 1"',
         "#eval{ 1 + 1 }",
         'libs ("libCustom.so");',
+        'libs ("/opt/openfoam/lib/libforces.so");',
+        'libs ("$FOAM_LIBBIN/libforces.so");',
+        'libs ("libforces.so" "libsampling.so");',
+        'libs (libforces.so);',
         "dlopen libCustom.so;",
         "command harmless-looking;",
         'program "/bin/sh";',
@@ -147,7 +167,27 @@ def test_custom_case_requires_one_operative_literal_solver(control_body: str) ->
 
 
 @pytest.mark.parametrize(
-    "suffix", [".tar.gz", ".tar", ".tgz", ".zip", ".7z", ".bz2", ".xz", ".gz"]
+    "suffix",
+    [
+        ".tar.gz",
+        ".tar.zst",
+        ".tar.lz4",
+        ".tar",
+        ".tgz",
+        ".tbz2",
+        ".txz",
+        ".zip",
+        ".7z",
+        ".bz2",
+        ".xz",
+        ".gz",
+        ".zst",
+        ".rar",
+        ".lz4",
+        ".cpio",
+        ".cab",
+        ".iso",
+    ],
 )
 def test_custom_case_rejects_archive_and_compression_members(suffix: str) -> None:
     files = {**valid_files(), f"fluidScientist/input{suffix}": "data"}
@@ -177,3 +217,41 @@ def test_custom_case_errors_do_not_leak_authored_content() -> None:
         validate_custom_case_archive(archive(files))
 
     assert secret not in str(raised.value)
+
+
+def test_custom_case_rejects_large_text_before_decode_or_scan(monkeypatch) -> None:
+    files = {"fluidScientist/oversized": "x" * (4 * 1024 * 1024 + 1), **valid_files()}
+    monkeypatch.setattr(
+        "fluid_scientist.adapters.custom_openfoam.validate_dictionary_security",
+        lambda _text, **_kwargs: pytest.fail("scanner must not run for oversized text"),
+    )
+
+    with pytest.raises(CustomCaseRejected, match="text member"):
+        validate_custom_case_archive(archive(files))
+
+
+def test_custom_case_enforces_separate_total_text_limit() -> None:
+    with pytest.raises(CustomCaseRejected, match="text content"):
+        validate_custom_case_archive(
+            archive(valid_files()),
+            max_text_member_bytes=1024,
+            max_total_text_bytes=64,
+        )
+
+
+def test_custom_case_accepts_text_mesh_within_limits() -> None:
+    files = valid_files()
+    del files["system/blockMeshDict"]
+    files.update(
+        {
+            "constant/polyMesh/points": "FoamFile {}\n0()",
+            "constant/polyMesh/faces": "FoamFile {}\n0()",
+            "constant/polyMesh/owner": "FoamFile {}\n0()",
+            "constant/polyMesh/boundary": "FoamFile {}\n0()",
+        }
+    )
+
+    result = validate_custom_case_archive(archive(files))
+
+    assert result.has_mesh is True
+    assert result.needs_block_mesh is False
