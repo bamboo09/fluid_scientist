@@ -74,7 +74,7 @@ def _strip_comments(content: str) -> str:
         if character == "/" and following == "*":
             end = content.find("*/", index + 2)
             if end < 0:
-                return "".join(output)
+                raise CustomCaseRejected("case dictionary has an unterminated comment")
             index = end + 2
             continue
         output.append(character)
@@ -137,12 +137,13 @@ def validate_custom_case_archive(
     if not has_mesh and not has_block_mesh:
         raise CustomCaseRejected("case needs constant/polyMesh or system/blockMeshDict")
 
-    # Comments are inert OpenFOAM dictionary text. Stripping them avoids rejecting
-    # a safe case merely because documentation names a forbidden construct.
-    all_text = _strip_comments("\n".join(texts.values())).lower()
+    # Comments are inert OpenFOAM dictionary text. Each member is scanned
+    # independently so a malformed comment cannot consume a later archive member.
+    stripped_texts = {name: _strip_comments(text) for name, text in texts.items()}
+    all_text = "\n".join(stripped_texts.values()).lower()
     if any(token in all_text for token in _DYNAMIC_CODE):
         raise CustomCaseRejected("dynamic code and system calls are forbidden")
-    control_dict = _strip_comments(texts["system/controlDict"])
+    control_dict = stripped_texts["system/controlDict"]
     solver_match = _SOLVER.search(control_dict)
     if solver_match is None or solver_match.group(1) != "incompressibleFluid":
         found = solver_match.group(1) if solver_match else "missing"

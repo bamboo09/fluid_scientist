@@ -80,6 +80,19 @@ def test_custom_case_rejects_links() -> None:
 
 def test_custom_case_ignores_forbidden_construct_names_in_comments() -> None:
     files = valid_files()
-    files["system/controlDict"] += "\n// #codeStream and systemCall are forbidden"
+    files["system/controlDict"] += (
+        "\n// #codeStream and systemCall are forbidden"
+        "\n/* codedFixedValue is also inert in a closed block comment */"
+    )
 
     assert validate_custom_case_archive(archive(files)).solver == "incompressibleFluid"
+
+
+@pytest.mark.parametrize("dangerous", ["systemCall touch_owned;", "type codedFixedValue;"])
+def test_unterminated_comment_cannot_hide_later_archive_member(dangerous: str) -> None:
+    files = valid_files()
+    files["system/controlDict"] += "\n/* comment never closes"
+    files["system/fvSchemes"] += f"\n{dangerous}"
+
+    with pytest.raises(CustomCaseRejected, match="unterminated comment"):
+        validate_custom_case_archive(archive(files))

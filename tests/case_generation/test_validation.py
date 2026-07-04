@@ -197,6 +197,70 @@ def test_scanner_ignores_forbidden_words_in_ordinary_comments() -> None:
 
 
 @pytest.mark.parametrize(
+    "include_path",
+    ["/etc/passwd", "../../etc/passwd", "relative/$HOME/secret", "relative/*.dict"],
+)
+def test_rejects_unsafe_inline_include(include_path: str) -> None:
+    content = (
+        _foam_header("dictionary", "controlDict")
+        + "application incompressibleFluid;\n"
+        + f'functions {{ #include "{include_path}" }}\n'
+    )
+
+    with pytest.raises(GeneratedCaseRejected, match="include"):
+        validate_generated_case(replace_file(content=content))
+
+
+@pytest.mark.parametrize(
+    "directive",
+    ['#include "fluidScientist/functions"', "#includeEtc <caseDicts/functions>"],
+)
+def test_allows_exact_safe_inline_relative_include(directive: str) -> None:
+    content = (
+        _foam_header("dictionary", "controlDict")
+        + "application incompressibleFluid;\n"
+        + f"functions {{ {directive} }}\n"
+    )
+
+    assert validate_generated_case(replace_file(content=content)).manifest.solver == (
+        "incompressibleFluid"
+    )
+
+
+@pytest.mark.parametrize(
+    "directive",
+    [
+        "#include relative/path",
+        '#include "relative/path" trailingInjection',
+        '#include "relative/path" "second/path"',
+        '#include "relative/path" #include "second/path"',
+        '#include "relative/path"junk',
+        '#include <relative/path"',
+    ],
+)
+def test_rejects_malformed_or_ambiguous_inline_include(directive: str) -> None:
+    content = (
+        _foam_header("dictionary", "controlDict")
+        + "application incompressibleFluid;\n"
+        + f"functions {{ {directive} }}\n"
+    )
+
+    with pytest.raises(GeneratedCaseRejected, match="include"):
+        validate_generated_case(replace_file(content=content))
+
+
+def test_rejects_unterminated_block_comment_in_generated_file() -> None:
+    content = (
+        _foam_header("dictionary", "controlDict")
+        + "application incompressibleFluid;\n"
+        + "/* comment never closes"
+    )
+
+    with pytest.raises(GeneratedCaseRejected, match="unterminated comment"):
+        validate_generated_case(replace_file(content=content))
+
+
+@pytest.mark.parametrize(
     ("template", "values"),
     [
         ("{{ unknown_name }}", None),

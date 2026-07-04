@@ -66,7 +66,12 @@ _FOAM_HEADER = re.compile(r"\bFoamFile\s*\{(?P<body>.*?)\}", re.DOTALL)
 _CLASS = re.compile(r"\bclass\s+([A-Za-z][A-Za-z0-9_]*)\s*;")
 _OBJECT = re.compile(r"\bobject\s+([A-Za-z][A-Za-z0-9_]*)\s*;")
 _APPLICATION = re.compile(r"\b(?:application|solver)\s+([A-Za-z][A-Za-z0-9_.-]*)\s*;")
-_INCLUDE_LINE = re.compile(r"\s*#include(?:Etc)?\s+[\"<]([^\">]+)[\">]\s*")
+_INCLUDE_TOKEN = re.compile(r"#include(?:Etc)?\b")
+_INCLUDE_OPERAND = re.compile(
+    r'\s+(?:"(?P<quoted>[^"\r\n]+)"|<(?P<angled>[^>\r\n]+)>)'
+)
+_INCLUDE_PATH = re.compile(r"[A-Za-z0-9_.+-]+(?:/[A-Za-z0-9_.+-]+)*")
+_INCLUDE_INLINE_SUFFIX = re.compile(r"(?:\s*[\]\});])*\s*")
 _FORBIDDEN_CONTENT = (
     re.compile(r"^\s*#!"),
     re.compile(r"#\s*codeStream\b", re.IGNORECASE),
@@ -198,11 +203,38 @@ def _validate_include_path(include_path: str) -> None:
         or include_path.startswith(("~", "$"))
         or (len(include_path) >= 2 and include_path[1] == ":")
         or ":" in include_path
+        or any(character.isspace() for character in include_path)
+        or any(character in include_path for character in {'"', "'", "<", ">", "#"})
+        or _has_forbidden_control(include_path, text=False)
+        or _INCLUDE_PATH.fullmatch(include_path) is None
     ):
         raise GeneratedCaseRejected("case dictionary has an unsafe include path")
     path = PurePosixPath(include_path)
-    if any(part in {"", ".", ".."} for part in path.parts):
+    if (
+        path.as_posix() != include_path
+        or not path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
         raise GeneratedCaseRejected("case dictionary has an unsafe include path")
+
+
+def _validate_includes(scanned: str) -> None:
+    """Validate every include token, including directives embedded in a line."""
+
+    for line in scanned.splitlines():
+        tokens = tuple(_INCLUDE_TOKEN.finditer(line))
+        if not tokens:
+            continue
+        if len(tokens) != 1:
+            raise GeneratedCaseRejected("case dictionary has multiple includes on one line")
+        token = tokens[0]
+        operand = _INCLUDE_OPERAND.match(line, token.end())
+        if operand is None:
+            raise GeneratedCaseRejected("case dictionary has a malformed include")
+        include_path = operand.group("quoted") or operand.group("angled")
+        _validate_include_path(include_path)
+        if _INCLUDE_INLINE_SUFFIX.fullmatch(line[operand.end() :]) is None:
+            raise GeneratedCaseRejected("case dictionary has a malformed include")
 
 
 def _validate_content(path: str, content: str) -> None:
@@ -220,12 +252,7 @@ def _validate_content(path: str, content: str) -> None:
     )
     if any(application != "incompressibleFluid" for application in applications):
         raise GeneratedCaseRejected("case file selects an unsupported application")
-    for line in scanned.splitlines():
-        if re.match(r"\s*#include(?:Etc)?\b", line):
-            match = _INCLUDE_LINE.fullmatch(line)
-            if match is None:
-                raise GeneratedCaseRejected("case dictionary has a malformed include")
-            _validate_include_path(match.group(1))
+    _validate_includes(scanned)
 
     expected_class = _MANDATORY_CLASSES.get(path)
     if expected_class is None:
