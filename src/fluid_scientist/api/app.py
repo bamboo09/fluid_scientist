@@ -2,6 +2,8 @@
 
 import re
 from collections.abc import Callable
+from concurrent.futures import Executor
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Literal
@@ -72,6 +74,12 @@ from fluid_scientist.experiment_planning.result_analysis import (
     ResultAnalyst,
     create_result_analyst,
 )
+from fluid_scientist.operations import (
+    OperationKind,
+    OperationRecord,
+    OperationStage,
+    OperationState,
+)
 from fluid_scientist.orchestration.workflow import TransitionError
 from fluid_scientist.ports import (
     StoredCompiledExperiment,
@@ -83,8 +91,13 @@ from fluid_scientist.services.model_configuration import (
     ModelConfiguration,
     ProviderName,
 )
+from fluid_scientist.services.planning_operations import PlanningOperationService
 from fluid_scientist.services.projects import ProjectService, ProjectView
 from fluid_scientist.services.research import DemoResearchResult
+from fluid_scientist.services.target_capabilities import (
+    TargetCapabilityCache,
+    TargetCapabilityStatus,
+)
 from fluid_scientist.settings import (
     AppSettings,
     NodeSettings,
@@ -168,6 +181,29 @@ class ExperimentPlanRequest(StrictRequest):
     question: str = Field(min_length=10, max_length=2_000)
     project_id: str | None = Field(default=None, min_length=1, max_length=128)
     target_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class PlanOperationRequest(StrictRequest):
+    project_id: str = Field(min_length=1, max_length=128)
+    question: str = Field(min_length=10, max_length=2_000)
+    target_id: str = Field(min_length=1, max_length=128)
+
+
+class OperationView(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    operation_id: str
+    kind: OperationKind
+    state: OperationState
+    stage: OperationStage
+    message: str
+    result_ref: str | None
+    safe_error: str | None
+    cancel_requested: bool
+    attempt: int
+    created_at: datetime
+    updated_at: datetime
+    terminal: bool
 
 
 class ExperimentPlanView(BaseModel):
@@ -380,6 +416,8 @@ def create_app(
     result_analyst_factory: ResultAnalystFactory = create_result_analyst,
     legacy_provider_factory: LegacyProviderFactory = OpenAIResponsesProvider,
     model_configuration: ModelConfiguration | None = None,
+    planning_executor: Executor | None = None,
+    target_capability_cache: TargetCapabilityCache | None = None,
 ) -> FastAPI:
     runtime_settings = settings or AppSettings()
     configured_targets = execution_targets
@@ -421,18 +459,34 @@ def create_app(
         )
     else:
         configured_models = ModelConfiguration(legacy_designer=experiment_designer)
+    workflow_repository = repository or SQLWorkflowRepository(runtime_settings.database.url)
+    planning_service = PlanningOperationService(
+        workflow_repository,
+        executor=planning_executor,
+    )
+
+    @asynccontextmanager
+    async def lifespan(_application: FastAPI):
+        planning_service.recover_interrupted()
+        try:
+            yield
+        finally:
+            planning_service.shutdown(wait=False, cancel_futures=True)
+
     application = FastAPI(
         title="Fluid Scientist",
         version="0.2.0",
         description="Evidence-grounded fluid mechanics research workflow",
+        lifespan=lifespan,
     )
     application.mount("/assets", StaticFiles(directory=WEB_ROOT), name="assets")
     application.state.execution_targets = configured_targets
     application.state.model_configuration = configured_models
+    application.state.planning_operation_service = planning_service
     target_registry = {target.target_id: target for target in configured_targets}
-    project_service = ProjectService(
-        repository or SQLWorkflowRepository(runtime_settings.database.url)
-    )
+    capability_cache = target_capability_cache or TargetCapabilityCache()
+    application.state.target_capability_cache = capability_cache
+    project_service = ProjectService(workflow_repository)
     demo_projects: dict[str, DemoResearchResult] = {}
 
     @application.get("/", include_in_schema=False)
@@ -556,7 +610,59 @@ def create_app(
     def list_experiment_capabilities() -> tuple[ExperimentCapabilityView, ...]:
         return EXPERIMENT_CAPABILITIES
 
-    @application.post("/api/experiment-plans", response_model=ExperimentPlanView)
+    @application.post(
+        "/api/plan-operations",
+        response_model=OperationView,
+        status_code=status.HTTP_202_ACCEPTED,
+    )
+    def create_plan_operation(request: PlanOperationRequest) -> OperationView:
+        try:
+            project_service.get(request.project_id)
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="project not found") from error
+        target = target_registry.get(request.target_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="execution target not found")
+        model_snapshot = application.state.model_configuration
+        designer = model_snapshot.plan_designer
+        provider = model_snapshot.provider
+        model = model_snapshot.model
+        if designer is None or provider is None or model is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Experiment plan provider is not configured",
+            )
+        capabilities = _planning_capabilities(target)
+        operation = planning_service.submit(
+            project_id=request.project_id,
+            question=request.question,
+            provider=provider,
+            model=model,
+            designer=designer,
+            capabilities=capabilities,
+        )
+        return _operation_view(operation)
+
+    @application.get("/api/operations/{operation_id}", response_model=OperationView)
+    def get_operation(operation_id: str) -> OperationView:
+        try:
+            return _operation_view(planning_service.get(operation_id))
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="operation not found") from error
+
+    @application.delete("/api/operations/{operation_id}", response_model=OperationView)
+    def cancel_operation(operation_id: str) -> OperationView:
+        try:
+            return _operation_view(planning_service.cancel(operation_id))
+        except KeyError as error:
+            raise HTTPException(status_code=404, detail="operation not found") from error
+
+    @application.post(
+        "/api/experiment-plans",
+        response_model=ExperimentPlanView,
+        deprecated=True,
+        description="Internal compatibility endpoint; use /api/plan-operations.",
+    )
     def create_experiment_plan(request: ExperimentPlanRequest) -> ExperimentPlanView:
         model_snapshot = application.state.model_configuration
         designer = model_snapshot.plan_designer
@@ -576,21 +682,7 @@ def create_app(
                 raise HTTPException(
                     status_code=404, detail="execution target not found"
                 )
-            try:
-                target_capability = target.doctor()
-            except (RemoteExecutionError, OSError) as error:
-                raise HTTPException(
-                    status_code=503,
-                    detail="execution target capability check failed",
-                ) from error
-            if not target_capability.available:
-                raise HTTPException(
-                    status_code=503, detail="execution target is unavailable"
-                )
-            capabilities += (
-                target_capability.kind,
-                target_capability.target_id,
-            )
+            capabilities = _planning_capabilities(target)
         try:
             designed_plan = designer.design_experiment(
                 request.question,
@@ -827,7 +919,11 @@ def create_app(
             if not callable(submit) or not callable(status_method):
                 raise ValueError("execution target does not support benchmark jobs")
             job_id = existing or _experiment_job_id(project_id, request.experiment_name)
-            job = status_method(job_id) if existing else submit(job_id, request.case)
+            if existing:
+                job = status_method(job_id)
+            else:
+                _require_fresh_target(target)
+                job = submit(job_id, request.case)
             project = project_service.record_pilot_submission(
                 project_id,
                 case_id=request.case_id,
@@ -889,7 +985,7 @@ def create_app(
             job = (
                 status_method(job_id)
                 if existing
-                else submit_custom(job_id, compiled.archive)
+                else _submit_custom_fresh(target, submit_custom, job_id, compiled.archive)
             )
             project = project_service.record_pilot_submission(
                 project_id,
@@ -1079,9 +1175,12 @@ def create_app(
         except ValueError as error:
             raise HTTPException(status_code=422, detail=str(error)) from error
 
-    @application.get("/api/execution-targets", response_model=tuple[ExecutionTargetCapability, ...])
-    def list_execution_targets() -> tuple[ExecutionTargetCapability, ...]:
-        return tuple(target.doctor() for target in configured_targets)
+    @application.get(
+        "/api/execution-targets",
+        response_model=tuple[TargetCapabilityStatus, ...],
+    )
+    def list_execution_targets() -> tuple[TargetCapabilityStatus, ...]:
+        return tuple(capability_cache.get(target) for target in configured_targets)
 
     return application
 
@@ -1114,6 +1213,60 @@ def build_execution_targets(
             candidates=candidates,
         ),
     )
+
+
+def _operation_view(record: OperationRecord) -> OperationView:
+    return OperationView(
+        operation_id=record.operation_id,
+        kind=record.kind,
+        state=record.state,
+        stage=record.stage,
+        message=record.message,
+        result_ref=record.result_ref,
+        safe_error=record.safe_error,
+        cancel_requested=record.cancel_requested,
+        attempt=record.attempt,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        terminal=record.terminal,
+    )
+
+
+def _planning_capabilities(target: ExecutionTargetAdapter) -> tuple[str, ...]:
+    """Use declared software/type support without contacting the remote host."""
+
+    experiment_types = tuple(
+        capability.experiment_type for capability in EXPERIMENT_CAPABILITIES
+    )
+    declared = tuple(getattr(target, "declared_capabilities", ()))
+    kind = getattr(target, "kind", None)
+    target_markers = (target.target_id,) if kind is None else (kind, target.target_id)
+    return tuple(dict.fromkeys(experiment_types + declared + target_markers))
+
+
+def _require_fresh_target(target: ExecutionTargetAdapter) -> ExecutionTargetCapability:
+    """Gate a remote mutation on a non-cached doctor result."""
+
+    try:
+        capability = target.doctor()
+    except Exception as error:
+        raise HTTPException(
+            status_code=503,
+            detail="execution target capability check failed",
+        ) from error
+    if not capability.available:
+        raise HTTPException(status_code=503, detail="execution target is unavailable")
+    return capability
+
+
+def _submit_custom_fresh(
+    target: ExecutionTargetAdapter,
+    submit: Callable[[str, bytes], JobRecord],
+    job_id: str,
+    archive: bytes,
+) -> JobRecord:
+    _require_fresh_target(target)
+    return submit(job_id, archive)
 
 
 def _bound_benchmark(

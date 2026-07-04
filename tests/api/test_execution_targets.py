@@ -22,6 +22,8 @@ from fluid_scientist.worker.service import CustomCaseSpec, JobRecord, JobState
 
 class StaticTarget:
     target_id = "workstation-openfoam"
+    kind = "workstation_openfoam"
+    declared_capabilities = ("OpenFOAM-13",)
 
     def doctor(self):
         return ExecutionTargetCapability(
@@ -47,6 +49,27 @@ def test_execution_targets_api_lists_capabilities() -> None:
     assert response.json()[0]["kind"] == "workstation_openfoam"
     assert response.json()[0]["available"] is True
     assert 'id="execution-target"' in client.get("/").text
+
+
+def test_execution_targets_api_reuses_cached_doctor_result() -> None:
+    class CountingTarget(StaticTarget):
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def doctor(self):
+            self.calls += 1
+            return super().doctor()
+
+    target = CountingTarget()
+    client = TestClient(create_app(execution_targets=(target,)))
+
+    first = client.get("/api/execution-targets")
+    second = client.get("/api/execution-targets")
+
+    assert target.calls == 1
+    assert first.json()[0]["cached"] is False
+    assert second.json()[0]["cached"] is True
+    assert second.json()[0]["checked_at"] == first.json()[0]["checked_at"]
 
 
 def test_app_builds_workstation_candidates_from_runtime_settings_only() -> None:
@@ -205,6 +228,60 @@ def test_gate_two_submission_calls_selected_target_and_persists_job(tmp_path) ->
         r"\d{8}-\d{6}-laminar-pipe-pressure-loss-[0-9a-f]{8}",
         target.submissions[0][0],
     )
+
+
+def test_submission_uses_fresh_doctor_and_blocks_unavailable_target(tmp_path) -> None:
+    class OfflineBenchmarkTarget(BenchmarkTarget):
+        def __init__(self) -> None:
+            super().__init__()
+            self.doctor_calls = 0
+            self.available = True
+
+        def doctor(self):
+            self.doctor_calls += 1
+            return ExecutionTargetCapability(
+                target_id=self.target_id,
+                kind="workstation_openfoam",
+                available=self.available,
+                reason=None if self.available else "offline",
+            )
+
+    target = OfflineBenchmarkTarget()
+    client = TestClient(
+        create_app(
+            repository=SQLWorkflowRepository(f"sqlite:///{tmp_path / 'offline.db'}"),
+            execution_targets=(target,),
+        )
+    )
+    project = advance_to_pilot_ready(client)
+    project = client.post(
+        f"/api/projects/{project['project_id']}/approvals",
+        json={
+            "gate": "GATE_2",
+            "decision": "approve",
+            "actor": "researcher",
+            "subject_version": project["version"],
+        },
+    ).json()
+    cached = client.get("/api/execution-targets")
+    assert cached.json()[0]["available"] is True
+    target.available = False
+
+    response = client.post(
+        f"/api/projects/{project['project_id']}/benchmarks",
+        json={
+            "target_id": target.target_id,
+            "case_id": "pilot-pipe",
+            "experiment_name": "Laminar Pipe Pressure Loss",
+            "case": pipe_spec().model_dump(),
+            "actor": "researcher",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "execution target is unavailable"}
+    assert target.doctor_calls == 2
+    assert target.submissions == []
 
 
 def test_benchmark_submission_is_blocked_until_gate_two(tmp_path) -> None:

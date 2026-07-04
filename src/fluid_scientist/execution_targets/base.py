@@ -23,6 +23,7 @@ class ExecutionTargetCapability(BaseModel):
 
 class ExecutionTargetAdapter(Protocol):
     target_id: str
+    kind: Literal["workstation_openfoam", "hpc_slurm"]
+    declared_capabilities: tuple[str, ...]
 
     def doctor(self) -> ExecutionTargetCapability: ...
-

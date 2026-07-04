@@ -548,13 +548,11 @@ def test_experiment_plan_returns_provider_neutral_typed_response() -> None:
 def test_experiment_plan_uses_the_selected_execution_target_capability() -> None:
     class KnownTarget:
         target_id = "known-target"
+        kind = "hpc_slurm"
+        declared_capabilities = ("OpenFOAM-13", "slurm")
 
         def doctor(self) -> ExecutionTargetCapability:
-            return ExecutionTargetCapability(
-                target_id=self.target_id,
-                kind="hpc_slurm",
-                available=True,
-            )
+            raise AssertionError("planning must not call doctor")
 
     designer = FakePlanDesigner()
     api = TestClient(
@@ -576,7 +574,9 @@ def test_experiment_plan_uses_the_selected_execution_target_capability() -> None
 
     assert response.status_code == 200
     capabilities = designer.calls[0][1]
-    assert "hpc_slurm" in capabilities or "known-target" in capabilities
+    assert "hpc_slurm" in capabilities
+    assert "known-target" in capabilities
+    assert "slurm" in capabilities
 
     unknown = api.post(
         "/api/experiment-plans",

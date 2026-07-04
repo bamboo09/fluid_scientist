@@ -84,6 +84,8 @@ class WorkerCollection(BaseModel):
 
 class WorkstationOpenFOAMTarget:
     protocol_version = 1
+    kind = "workstation_openfoam"
+    declared_capabilities = ("OpenFOAM-13",)
 
     def __init__(
         self,
