@@ -34,6 +34,12 @@ for (const [stage, stageLabel, percent] of [
 assert.equal(operationView({ state: "succeeded", stage: "complete" }).percent, 100);
 assert.equal(operationView({ state: "failed", stage: "model_planning" }).canRetry, true);
 assert.equal(operationView({ state: "cancelled", stage: "queued" }).canRetry, true);
+assert.equal(operationView({ state: "succeeded", stage: "complete" }).stageLabel,
+  "实验计划已保存");
+assert.equal(operationView({ state: "failed", stage: "complete" }).stageLabel,
+  "实验设计未完成");
+assert.equal(operationView({ state: "cancelled", stage: "complete" }).stageLabel,
+  "实验设计已取消");
 
 const unknown = operationView({ state: "future", stage: "future_stage" });
 assert.equal(unknown.label, "状态更新中");
@@ -72,3 +78,9 @@ assert.equal(operationAnnouncement({ state: "running", stage: "model_planning" }
 assert.equal(operationAnnouncement(
   { state: "failed", stage: "model_planning", safe_error: "模型暂时不可用" },
 ), "规划未完成。模型正在设计实验。模型暂时不可用");
+assert.equal(operationAnnouncement({ state: "succeeded", stage: "complete" }),
+  "规划完成。实验计划已保存");
+assert.equal(operationAnnouncement({ state: "failed", stage: "complete" }),
+  "规划未完成。实验设计未完成");
+assert.equal(operationAnnouncement({ state: "cancelled", stage: "complete" }),
+  "已取消规划。实验设计已取消");

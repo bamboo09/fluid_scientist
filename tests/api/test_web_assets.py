@@ -230,6 +230,15 @@ def test_operation_progress_accessibility_avoids_elapsed_chatter() -> None:
     assert "lastOperationAnnouncement" in announce_source
     assert "operation-elapsed" not in announce_source
 
+    stream_tag = re.search(r'<section id="conversation-stream"[^>]*>', html)
+    assert stream_tag is not None
+    assert 'aria-live=' not in stream_tag.group(0)
+    stream_start = html.index(stream_tag.group(0))
+    stream_end = html.index("</section>", stream_start)
+    operation_position = html.index('id="active-operation"')
+    assert stream_start < operation_position < stream_end
+    assert 'aria-live=' not in html[stream_start:html.index('id="operation-announcement"')]
+
 
 def test_operation_recovery_starts_independently_from_target_discovery() -> None:
     script = read_asset("apps/web/app.js")
@@ -296,18 +305,20 @@ def test_edit_mode_hides_the_top_question_to_avoid_duplicate_presentation() -> N
 
 def test_new_research_cancels_active_planning_before_clearing_identity() -> None:
     script = read_asset("apps/web/app.js")
+    lifecycle = read_asset("apps/web/operation-lifecycle.js")
     reset_source = function_source(script, "resetResearchSession")
+    clear_source = function_source(script, "clearResearchSession")
 
     assert "async function resetResearchSession()" in script
-    delete = reset_source.index('method: "DELETE"')
-    clear = reset_source.index("localStorage.removeItem(key)")
-    assert delete < clear
-    assert "operationRequestActive = true" in reset_source[:delete]
-    assert "startNewExperiment.disabled = true" in reset_source[:delete]
-    catch_source = reset_source[reset_source.index("catch (error)") : clear]
-    assert "startOperationPolling(operationId)" in catch_source
-    assert "localStorage.removeItem" not in catch_source
-    assert "return" in catch_source
+    assert "await cancelPlanningBeforeReset" in reset_source
+    assert 'method: "DELETE"' in reset_source
+    assert "resumePolling: startOperationPolling" in reset_source
+    assert "clearSession: clearResearchSession" in reset_source
+    assert "localStorage.removeItem" not in reset_source
+    assert "localStorage.removeItem(key)" in clear_source
+    cancel = lifecycle.index("await cancelOperation(operationId)")
+    clear = lifecycle.index("clearSession();", cancel)
+    assert cancel < clear
 
 
 def test_question_and_provider_data_are_never_persisted_during_planning() -> None:

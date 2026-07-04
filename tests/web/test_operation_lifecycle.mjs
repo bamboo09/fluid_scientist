@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  cancelPlanningBeforeReset,
   OperationPoller,
   createResultLoader,
 } from "../../apps/web/operation-lifecycle.js";
@@ -222,4 +223,48 @@ test("retrying a paused succeeded operation reloads its existing result", async 
   assert.equal(operationGets, 6);
   assert.equal(planGets, 6);
   assert.deepEqual(rendered, ["existing-plan"]);
+});
+
+test("new-session cancellation clears exactly once after DELETE succeeds", async () => {
+  const events = [];
+  let clears = 0;
+  const result = await cancelPlanningBeforeReset({
+    operationId: "active-op",
+    operationActive: true,
+    cancelOperation: async (id) => events.push(`delete:${id}`),
+    resumePolling: () => events.push("resume"),
+    clearSession: () => { clears += 1; events.push("clear"); },
+    setRequestActive: (active) => events.push(`busy:${active}`),
+    setActionDisabled: (disabled) => events.push(`disabled:${disabled}`),
+  });
+
+  assert.deepEqual(result, { cleared: true });
+  assert.equal(clears, 1);
+  assert.ok(events.indexOf("delete:active-op") < events.indexOf("clear"));
+  assert.equal(events.includes("resume"), false);
+  assert.deepEqual(events.slice(0, 2), ["busy:true", "disabled:true"]);
+  assert.deepEqual(events.slice(-2), ["disabled:false", "clear"]);
+});
+
+test("new-session cancellation failure preserves state and resumes polling", async () => {
+  const events = [];
+  let clears = 0;
+  const failure = new Error("cancel unavailable");
+  const result = await cancelPlanningBeforeReset({
+    operationId: "active-op",
+    operationActive: true,
+    cancelOperation: async () => { throw failure; },
+    resumePolling: (id) => events.push(`resume:${id}`),
+    clearSession: () => { clears += 1; },
+    setRequestActive: (active) => events.push(`busy:${active}`),
+    setActionDisabled: (disabled) => events.push(`disabled:${disabled}`),
+    onError: (error) => events.push(`error:${error.message}`),
+  });
+
+  assert.equal(result.cleared, false);
+  assert.equal(result.error, failure);
+  assert.equal(clears, 0);
+  assert.ok(events.includes("resume:active-op"));
+  assert.ok(events.includes("error:cancel unavailable"));
+  assert.deepEqual(events.slice(-2), ["busy:false", "disabled:false"]);
 });

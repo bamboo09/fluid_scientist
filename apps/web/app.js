@@ -12,7 +12,11 @@ import {
   operationView,
   planningComposerView,
 } from "./operation-state.js";
-import { OperationPoller, createResultLoader } from "./operation-lifecycle.js";
+import {
+  cancelPlanningBeforeReset,
+  OperationPoller,
+  createResultLoader,
+} from "./operation-lifecycle.js";
 
 const $ = (selector) => document.querySelector(selector);
 const byId = (id) => document.getElementById(id);
@@ -122,27 +126,7 @@ function restoreResearchComposer(question) {
   refreshComposer();
 }
 
-async function resetResearchSession() {
-  if (!canStartExperiment(activeTask)) return;
-  if (operationRequestActive) return;
-  const operationId = activeOperationId;
-  const operationIsActive = Boolean(operationId) && !operationView(activeOperation || {}).terminal;
-  if (operationIsActive) {
-    operationRequestActive = true;
-    if (startNewExperiment) startNewExperiment.disabled = true;
-    stopOperationPolling();
-    try {
-      await requestJson(`/api/operations/${operationId}`, { method: "DELETE" });
-    } catch (error) {
-      renderError("取消实验设计", error);
-      startOperationPolling(operationId);
-      return;
-    } finally {
-      operationRequestActive = false;
-      if (startNewExperiment) startNewExperiment.disabled = false;
-      if (activeOperation) renderOperation(activeOperation);
-    }
-  }
+function clearResearchSession() {
   stopOperationPolling();
   window.clearTimeout(pollTimer);
   pollTimer = null;
@@ -173,6 +157,30 @@ async function resetResearchSession() {
   updateContext();
   refreshComposer();
   promptInput?.focus();
+}
+
+async function resetResearchSession() {
+  if (!canStartExperiment(activeTask) || operationRequestActive) return;
+  const operationId = activeOperationId;
+  const operationActive = Boolean(operationId) && !operationView(activeOperation || {}).terminal;
+  await cancelPlanningBeforeReset({
+    operationId,
+    operationActive,
+    cancelOperation: async (id) => {
+      stopOperationPolling();
+      return requestJson(`/api/operations/${id}`, { method: "DELETE" });
+    },
+    resumePolling: startOperationPolling,
+    clearSession: clearResearchSession,
+    setRequestActive: (active) => {
+      operationRequestActive = active;
+      if (activeOperation) renderOperation(activeOperation);
+    },
+    setActionDisabled: (disabled) => {
+      if (startNewExperiment) startNewExperiment.disabled = disabled;
+    },
+    onError: (error) => renderError("取消实验设计", error),
+  });
 }
 
 function makeCard(className, title) {

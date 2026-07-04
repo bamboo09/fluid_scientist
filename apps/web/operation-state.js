@@ -15,6 +15,11 @@ const stateViews = Object.freeze({
 });
 
 const terminalStates = new Set(["succeeded", "failed", "cancelled"]);
+const terminalStageViews = Object.freeze({
+  succeeded: Object.freeze({ label: "实验计划已保存", percent: 100 }),
+  failed: Object.freeze({ label: "实验设计未完成", percent: 100 }),
+  cancelled: Object.freeze({ label: "实验设计已取消", percent: 100 }),
+});
 
 export function operationView(operation = {}) {
   const state = stateViews[operation.state];
@@ -32,10 +37,12 @@ export function operationView(operation = {}) {
   }
 
   const terminal = terminalStates.has(operation.state);
-  const stage = stageViews[operation.stage] || {
-    label: terminal ? "操作已结束" : "正在处理",
-    percent: terminal ? 100 : 18,
-  };
+  const stage = terminal && operation.stage === "complete"
+    ? terminalStageViews[operation.state]
+    : stageViews[operation.stage] || {
+      label: terminal ? "操作已结束" : "正在处理",
+      percent: terminal ? 100 : 18,
+    };
   return {
     ...state,
     stageLabel: stage.label,

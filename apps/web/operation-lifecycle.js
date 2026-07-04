@@ -1,5 +1,35 @@
 const terminalStates = new Set(["succeeded", "failed", "cancelled"]);
 
+export async function cancelPlanningBeforeReset({
+  operationId,
+  operationActive,
+  cancelOperation,
+  resumePolling,
+  clearSession,
+  setRequestActive = () => {},
+  setActionDisabled = () => {},
+  onError = () => {},
+}) {
+  if (!operationActive) {
+    clearSession();
+    return { cleared: true };
+  }
+  setRequestActive(true);
+  setActionDisabled(true);
+  try {
+    await cancelOperation(operationId);
+  } catch (error) {
+    onError(error);
+    resumePolling(operationId);
+    return { cleared: false, error };
+  } finally {
+    setRequestActive(false);
+    setActionDisabled(false);
+  }
+  clearSession();
+  return { cleared: true };
+}
+
 export class OperationPoller {
   constructor({
     fetchOperation,
