@@ -1,6 +1,7 @@
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from inspect import Parameter, signature
 from threading import Barrier
@@ -11,11 +12,15 @@ from sqlalchemy import event
 
 from fluid_scientist.adapters.sql_repository import (
     ConcurrentUpdateError,
+    ExperimentArtifactConflict,
     ExternalJobConflict,
+    GeneratedCaseDraftIntegrityError,
     OperationConflict,
     OperationIntegrityError,
     SQLWorkflowRepository,
 )
+from fluid_scientist.case_generation.models import GeneratedCaseDraft
+from fluid_scientist.case_generation.validation import validate_generated_case
 from fluid_scientist.domain.models import Approval, AuditEvent
 from fluid_scientist.operations.models import (
     OperationKind,
@@ -23,7 +28,11 @@ from fluid_scientist.operations.models import (
     OperationStage,
     OperationState,
 )
-from fluid_scientist.ports import StoredExperimentPlan, WorkflowRepository
+from fluid_scientist.ports import (
+    StoredExperimentPlan,
+    StoredGeneratedCaseDraft,
+    WorkflowRepository,
+)
 
 
 def repository(tmp_path) -> SQLWorkflowRepository:
@@ -48,6 +57,84 @@ def operation(
         stage=OperationStage.QUEUED,
         created_at=created_at,
         updated_at=created_at,
+    )
+
+
+def generated_case_draft() -> GeneratedCaseDraft:
+    def header(class_name: str, object_name: str) -> str:
+        return (
+            "FoamFile\n{\n    version 2.0;\n    format ascii;\n"
+            f"    class {class_name};\n    object {object_name};\n}}\n"
+        )
+
+    return GeneratedCaseDraft.model_validate(
+        {
+            "experiment_name": "Generated cavity pilot",
+            "objective": "Build a bounded generated OpenFOAM case for isolated validation.",
+            "solver": "incompressibleFluid",
+            "preprocessing": ["blockMesh", "checkMesh"],
+            "parameters": [],
+            "files": [
+                {"path": "0/U", "content": header("volVectorField", "U")},
+                {"path": "0/p", "content": header("volScalarField", "p")},
+                {
+                    "path": "constant/physicalProperties",
+                    "content": header("dictionary", "physicalProperties")
+                    + "nu [0 2 -1 0 0 0 0] 1e-5;\n",
+                },
+                {
+                    "path": "system/controlDict",
+                    "content": header("dictionary", "controlDict")
+                    + "application incompressibleFluid;\nendTime 1;\n",
+                },
+                {
+                    "path": "system/fvSchemes",
+                    "content": header("dictionary", "fvSchemes")
+                    + "ddtSchemes { default steadyState; }\n",
+                },
+                {
+                    "path": "system/fvSolution",
+                    "content": header("dictionary", "fvSolution") + "solvers {}\n",
+                },
+                {
+                    "path": "system/blockMeshDict",
+                    "content": header("dictionary", "blockMeshDict")
+                    + "convertToMeters 1;\nvertices ();\n",
+                },
+            ],
+            "requested_outputs": ["velocity_probes"],
+            "assumptions": ["Two-dimensional incompressible pilot"],
+            "limitations": ["Requires isolated pilot validation"],
+        }
+    )
+
+
+def seed_generated_draft(repo: SQLWorkflowRepository) -> StoredGeneratedCaseDraft:
+    repo.save_snapshot("project-1", "{}", expected_version=0)
+    repo.store_experiment_plan(
+        StoredExperimentPlan(
+            plan_id="plan-1",
+            project_id="project-1",
+            version=2,
+            provider="glm",
+            model="glm-5.1",
+            plan_json='{"experiment_type":"custom_openfoam"}',
+        )
+    )
+    draft = generated_case_draft()
+    validated = validate_generated_case(draft)
+    return StoredGeneratedCaseDraft(
+        draft_id="draft-1",
+        project_id="project-1",
+        plan_id="plan-1",
+        plan_version=2,
+        version=1,
+        provider="deepseek",
+        model="deepseek-chat",
+        draft_json=draft.model_dump_json(),
+        archive_sha256=validated.archive_sha256,
+        archive=validated.archive,
+        preview_json=json.dumps(validated.preview),
     )
 
 
@@ -277,6 +364,116 @@ def test_operation_update_expected_version_is_keyword_only() -> None:
 
     assert implementation_parameter.kind is Parameter.KEYWORD_ONLY
     assert protocol_parameter.kind is Parameter.KEYWORD_ONLY
+
+
+def test_generated_case_draft_round_trip_is_exact_and_secret_free(tmp_path) -> None:
+    repo = repository(tmp_path)
+    draft = seed_generated_draft(repo)
+
+    assert repo.store_generated_case_draft(draft) == draft
+    assert repo.load_generated_case_draft(draft.draft_id) == draft
+    assert repo.find_generated_case_draft("plan-1", 2, 1) == draft
+    assert repo.load_generated_case_draft("missing") is None
+    assert repo.find_generated_case_draft("plan-1", 2, 999) is None
+    assert "api_key" not in {field.name for field in fields(StoredGeneratedCaseDraft)}
+    assert "raw_response" not in {field.name for field in fields(StoredGeneratedCaseDraft)}
+    assert "host_path" not in {field.name for field in fields(StoredGeneratedCaseDraft)}
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"archive": b"changed"},
+        {"provider": "openai"},
+        {"draft_json": "{}"},
+        {"preview_json": "[]"},
+    ],
+)
+def test_generated_case_draft_id_replay_is_idempotent_or_conflicts(
+    tmp_path, change
+) -> None:
+    repo = repository(tmp_path)
+    draft = seed_generated_draft(repo)
+    assert repo.store_generated_case_draft(draft) == draft
+    assert repo.store_generated_case_draft(draft) == draft
+
+    with pytest.raises(ExperimentArtifactConflict):
+        repo.store_generated_case_draft(replace(draft, **change))
+
+
+def test_generated_case_draft_requires_exact_project_and_plan_version(tmp_path) -> None:
+    repo = repository(tmp_path)
+    draft = seed_generated_draft(repo)
+
+    with pytest.raises(KeyError, match="plan"):
+        repo.store_generated_case_draft(replace(draft, plan_id="missing-plan"))
+    with pytest.raises(ExperimentArtifactConflict, match="project"):
+        repo.store_generated_case_draft(replace(draft, project_id="project-2"))
+    with pytest.raises(ExperimentArtifactConflict, match="version"):
+        repo.store_generated_case_draft(replace(draft, plan_version=1))
+
+
+def test_generated_case_draft_rejects_bad_digest_and_unique_tuple_collision(tmp_path) -> None:
+    repo = repository(tmp_path)
+    draft = seed_generated_draft(repo)
+
+    with pytest.raises(GeneratedCaseDraftIntegrityError, match="digest"):
+        repo.store_generated_case_draft(
+            replace(draft, archive_sha256=f"sha256:{'0' * 64}")
+        )
+
+    repo.store_generated_case_draft(draft)
+    with pytest.raises(ExperimentArtifactConflict, match="plan version"):
+        repo.store_generated_case_draft(replace(draft, draft_id="draft-2"))
+
+
+def test_concurrent_identical_generated_case_draft_insert_is_idempotent(tmp_path) -> None:
+    database_url = f"sqlite:///{tmp_path / 'workflow.db'}"
+    seed_repo = SQLWorkflowRepository(database_url)
+    draft = seed_generated_draft(seed_repo)
+    barrier = Barrier(2)
+
+    def write() -> StoredGeneratedCaseDraft:
+        repo = SQLWorkflowRepository(database_url)
+        barrier.wait(timeout=5)
+        return repo.store_generated_case_draft(draft)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: write(), range(2)))
+
+    assert results == [draft, draft]
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    [
+        ("draft_json", "{}", "draft_json"),
+        ("project_id", "wrong-project", "project"),
+        ("plan_version", 1, "version"),
+        ("archive_sha256", f"sha256:{'0' * 64}", "digest"),
+        ("archive", b"corrupt", "digest"),
+        ("preview_json", "NaN", "preview_json"),
+        ("preview_json", "[]", "preview_json"),
+        ("created_at", "not-a-time", "created_at"),
+        ("provider", "", "metadata"),
+    ],
+)
+def test_load_generated_case_draft_rejects_corrupt_rows(
+    tmp_path, column, value, message
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    repo = repository(tmp_path)
+    draft = seed_generated_draft(repo)
+    repo.store_generated_case_draft(draft)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            f"UPDATE generated_case_drafts SET {column} = ? WHERE draft_id = ?",
+            (value, draft.draft_id),
+        )
+
+    with pytest.raises(GeneratedCaseDraftIntegrityError, match=message):
+        repo.load_generated_case_draft(draft.draft_id)
 
 
 def test_complete_planning_operation_atomically_stores_plan_and_success(tmp_path) -> None:

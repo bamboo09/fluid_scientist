@@ -1,5 +1,6 @@
 """SQLAlchemy-backed workflow repository for SQLite and PostgreSQL."""
 
+import hashlib
 import json
 from datetime import datetime
 
@@ -8,6 +9,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from fluid_scientist.adapters.custom_openfoam import (
+    CustomCaseRejected,
+    validate_custom_case_archive,
+)
+from fluid_scientist.case_generation.models import GeneratedCaseDraft
+from fluid_scientist.case_generation.validation import (
+    GeneratedCaseRejected,
+    validate_generated_case,
+)
 from fluid_scientist.compat import UTC
 from fluid_scientist.db import (
     ApprovalRow,
@@ -16,6 +26,7 @@ from fluid_scientist.db import (
     CompiledExperimentRow,
     ExperimentPlanRow,
     ExternalJobRow,
+    GeneratedCaseDraftRow,
     OperationRow,
     ProjectRow,
     WorkflowSnapshotRow,
@@ -30,6 +41,7 @@ from fluid_scientist.operations.models import (
 from fluid_scientist.ports import (
     StoredCompiledExperiment,
     StoredExperimentPlan,
+    StoredGeneratedCaseDraft,
     StoredOperation,
     StoredWorkflow,
 )
@@ -53,6 +65,10 @@ class OperationConflict(RuntimeError):
 
 class OperationIntegrityError(RuntimeError):
     """Raised when an operation row disagrees with its persisted record."""
+
+
+class GeneratedCaseDraftIntegrityError(RuntimeError):
+    """Raised when immutable generated-case persistence fails verification."""
 
 
 class SQLWorkflowRepository:
@@ -354,6 +370,79 @@ class SQLWorkflowRepository:
             )
             return None if row is None else self._stored_compiled(row)
 
+    def store_generated_case_draft(
+        self, draft: StoredGeneratedCaseDraft
+    ) -> StoredGeneratedCaseDraft:
+        try:
+            with self._sessions.begin() as session:
+                row = session.get(GeneratedCaseDraftRow, draft.draft_id)
+                if row is not None:
+                    existing = self._stored_generated_case_draft(session, row)
+                    if existing != draft:
+                        raise ExperimentArtifactConflict(
+                            f"generated case draft {draft.draft_id} is immutable"
+                        )
+                    return existing
+
+                tuple_row = session.scalar(
+                    select(GeneratedCaseDraftRow).where(
+                        GeneratedCaseDraftRow.plan_id == draft.plan_id,
+                        GeneratedCaseDraftRow.plan_version == draft.plan_version,
+                        GeneratedCaseDraftRow.version == draft.version,
+                    )
+                )
+                if tuple_row is not None:
+                    existing = self._stored_generated_case_draft(session, tuple_row)
+                    if existing == draft:
+                        return existing
+                    raise ExperimentArtifactConflict(
+                        "generated case draft plan version already exists"
+                    )
+
+                plan = session.get(ExperimentPlanRow, draft.plan_id)
+                if plan is None:
+                    raise KeyError(f"experiment plan not found: {draft.plan_id}")
+                self._require_generated_draft_plan_match(draft, plan)
+                self._require_project(session, draft.project_id)
+                self._validate_generated_draft_payload(draft)
+                session.add(
+                    GeneratedCaseDraftRow(
+                        draft_id=draft.draft_id,
+                        project_id=draft.project_id,
+                        plan_id=draft.plan_id,
+                        plan_version=draft.plan_version,
+                        version=draft.version,
+                        provider=draft.provider,
+                        model=draft.model,
+                        draft_json=draft.draft_json,
+                        archive_sha256=draft.archive_sha256,
+                        archive=draft.archive,
+                        preview_json=draft.preview_json,
+                        created_at=datetime.now(UTC).isoformat(),
+                    )
+                )
+                return draft
+        except IntegrityError as error:
+            return self._resolve_generated_draft_race(draft, error)
+
+    def load_generated_case_draft(self, draft_id: str) -> StoredGeneratedCaseDraft | None:
+        with self._sessions() as session:
+            row = session.get(GeneratedCaseDraftRow, draft_id)
+            return None if row is None else self._stored_generated_case_draft(session, row)
+
+    def find_generated_case_draft(
+        self, plan_id: str, plan_version: int, version: int
+    ) -> StoredGeneratedCaseDraft | None:
+        with self._sessions() as session:
+            row = session.scalar(
+                select(GeneratedCaseDraftRow).where(
+                    GeneratedCaseDraftRow.plan_id == plan_id,
+                    GeneratedCaseDraftRow.plan_version == plan_version,
+                    GeneratedCaseDraftRow.version == version,
+                )
+            )
+            return None if row is None else self._stored_generated_case_draft(session, row)
+
     def record_approval(self, project_id: str, approval: Approval) -> None:
         with self._sessions.begin() as session:
             self._require_project(session, project_id)
@@ -466,6 +555,159 @@ class SQLWorkflowRepository:
             archive=row.archive,
             preview_json=row.preview_json,
         )
+
+    def _stored_generated_case_draft(
+        self, session: Session, row: GeneratedCaseDraftRow
+    ) -> StoredGeneratedCaseDraft:
+        try:
+            created_at = datetime.fromisoformat(row.created_at)
+        except (TypeError, ValueError) as error:
+            raise GeneratedCaseDraftIntegrityError(
+                f"generated case draft {row.draft_id} has invalid created_at"
+            ) from error
+        if created_at.tzinfo is None or created_at.utcoffset() is None:
+            raise GeneratedCaseDraftIntegrityError(
+                f"generated case draft {row.draft_id} created_at must be timezone-aware"
+            )
+        try:
+            stored = StoredGeneratedCaseDraft(
+                draft_id=row.draft_id,
+                project_id=row.project_id,
+                plan_id=row.plan_id,
+                plan_version=row.plan_version,
+                version=row.version,
+                provider=row.provider,
+                model=row.model,
+                draft_json=row.draft_json,
+                archive_sha256=row.archive_sha256,
+                archive=bytes(row.archive),
+                preview_json=row.preview_json,
+            )
+        except (TypeError, ValueError) as error:
+            raise GeneratedCaseDraftIntegrityError(
+                f"generated case draft {row.draft_id} has invalid row metadata"
+            ) from error
+        plan = session.get(ExperimentPlanRow, stored.plan_id)
+        if plan is None:
+            raise GeneratedCaseDraftIntegrityError(
+                f"generated case draft {row.draft_id} references a missing plan"
+            )
+        try:
+            self._require_generated_draft_plan_match(stored, plan)
+        except ExperimentArtifactConflict as error:
+            raise GeneratedCaseDraftIntegrityError(str(error)) from error
+        self._validate_generated_draft_payload(stored)
+        return stored
+
+    @staticmethod
+    def _require_generated_draft_plan_match(
+        draft: StoredGeneratedCaseDraft, plan: ExperimentPlanRow
+    ) -> None:
+        if plan.project_id is None or draft.project_id != plan.project_id:
+            raise ExperimentArtifactConflict(
+                f"generated case draft project does not own plan {draft.plan_id}"
+            )
+        if draft.plan_version != plan.version:
+            raise ExperimentArtifactConflict(
+                f"generated case draft version does not match plan {draft.plan_id}"
+            )
+
+    @classmethod
+    def _validate_generated_draft_payload(cls, stored: StoredGeneratedCaseDraft) -> None:
+        actual_digest = "sha256:" + hashlib.sha256(stored.archive).hexdigest()
+        if actual_digest != stored.archive_sha256:
+            raise GeneratedCaseDraftIntegrityError(
+                f"generated case draft {stored.draft_id} archive digest mismatch"
+            )
+        draft_payload = cls._load_strict_json(
+            stored.draft_id, stored.draft_json, label="draft_json"
+        )
+        if not isinstance(draft_payload, dict):
+            raise GeneratedCaseDraftIntegrityError(
+                f"generated case draft {stored.draft_id} draft_json must be an object"
+            )
+        try:
+            draft = GeneratedCaseDraft.model_validate(draft_payload)
+        except ValueError as error:
+            raise GeneratedCaseDraftIntegrityError(
+                f"generated case draft {stored.draft_id} has invalid draft_json"
+            ) from error
+        preview = cls._load_strict_json(
+            stored.draft_id, stored.preview_json, label="preview_json"
+        )
+        if not isinstance(preview, (dict, list)):
+            raise GeneratedCaseDraftIntegrityError(
+                f"generated case draft {stored.draft_id} preview_json must be an object or array"
+            )
+        try:
+            manifest = validate_custom_case_archive(stored.archive)
+            validated = validate_generated_case(draft)
+        except (CustomCaseRejected, GeneratedCaseRejected, ValueError) as error:
+            raise GeneratedCaseDraftIntegrityError(
+                f"generated case draft {stored.draft_id} archive validation failed"
+            ) from error
+        if manifest.archive_sha256 != stored.archive_sha256:
+            raise GeneratedCaseDraftIntegrityError(
+                f"generated case draft {stored.draft_id} archive digest mismatch"
+            )
+        if validated.archive != stored.archive or validated.archive_sha256 != stored.archive_sha256:
+            raise GeneratedCaseDraftIntegrityError(
+                f"generated case draft {stored.draft_id} archive does not match draft_json"
+            )
+        expected_preview = [[path, size] for path, size in validated.preview]
+        if preview != expected_preview:
+            raise GeneratedCaseDraftIntegrityError(
+                f"generated case draft {stored.draft_id} preview_json does not match draft_json"
+            )
+
+    @staticmethod
+    def _load_strict_json(draft_id: str, payload: str, *, label: str) -> object:
+        def reject_constant(value: str) -> None:
+            raise ValueError(f"non-finite JSON constant: {value}")
+
+        def reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate JSON object key")
+                result[key] = value
+            return result
+
+        try:
+            value = json.loads(
+                payload,
+                parse_constant=reject_constant,
+                object_pairs_hook=reject_duplicate_keys,
+            )
+        except (TypeError, ValueError) as error:
+            raise GeneratedCaseDraftIntegrityError(
+                f"generated case draft {draft_id} has invalid {label}"
+            ) from error
+        return value
+
+    def _resolve_generated_draft_race(
+        self, draft: StoredGeneratedCaseDraft, error: IntegrityError
+    ) -> StoredGeneratedCaseDraft:
+        with self._sessions() as session:
+            row = session.get(GeneratedCaseDraftRow, draft.draft_id)
+            if row is None:
+                row = session.scalar(
+                    select(GeneratedCaseDraftRow).where(
+                        GeneratedCaseDraftRow.plan_id == draft.plan_id,
+                        GeneratedCaseDraftRow.plan_version == draft.plan_version,
+                        GeneratedCaseDraftRow.version == draft.version,
+                    )
+                )
+            if row is not None:
+                existing = self._stored_generated_case_draft(session, row)
+                if existing == draft:
+                    return existing
+                raise ExperimentArtifactConflict(
+                    "generated case draft plan version already exists with different content"
+                ) from error
+        raise ExperimentArtifactConflict(
+            f"generated case draft {draft.draft_id} insert conflicted without a winner"
+        ) from error
 
     @staticmethod
     def _stored_operation(row: OperationRow) -> StoredOperation:

@@ -1,5 +1,6 @@
 """Dependency-inversion ports for models, evidence, HPC, simulation, and persistence."""
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol
@@ -59,6 +60,43 @@ class StoredCompiledExperiment:
     archive_sha256: str
     archive: bytes
     preview_json: str
+
+
+@dataclass(frozen=True)
+class StoredGeneratedCaseDraft:
+    """Exact immutable result of a separately audited Case Builder call."""
+
+    draft_id: str
+    project_id: str
+    plan_id: str
+    plan_version: int
+    version: int
+    provider: str
+    model: str
+    draft_json: str
+    archive_sha256: str
+    archive: bytes
+    preview_json: str
+
+    def __post_init__(self) -> None:
+        for field_name in ("draft_id", "project_id", "plan_id", "provider", "model"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be a non-empty string")
+        for field_name in ("plan_version", "version"):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{field_name} must be an integer greater than or equal to 1")
+        if not isinstance(self.draft_json, str) or not self.draft_json:
+            raise ValueError("draft_json must be a non-empty string")
+        if not isinstance(self.preview_json, str) or not self.preview_json:
+            raise ValueError("preview_json must be a non-empty string")
+        if not isinstance(self.archive, bytes) or not self.archive:
+            raise ValueError("archive must be non-empty bytes")
+        if not isinstance(self.archive_sha256, str) or re.fullmatch(
+            r"sha256:[0-9a-f]{64}", self.archive_sha256
+        ) is None:
+            raise ValueError("archive_sha256 must be a lowercase sha256 digest")
 
 
 class LLMProvider(Protocol):
@@ -142,3 +180,13 @@ class WorkflowRepository(Protocol):
     def load_compiled_experiment(
         self, plan_id: str, plan_version: int
     ) -> StoredCompiledExperiment | None: ...
+
+    def store_generated_case_draft(
+        self, draft: StoredGeneratedCaseDraft
+    ) -> StoredGeneratedCaseDraft: ...
+
+    def load_generated_case_draft(self, draft_id: str) -> StoredGeneratedCaseDraft | None: ...
+
+    def find_generated_case_draft(
+        self, plan_id: str, plan_version: int, version: int
+    ) -> StoredGeneratedCaseDraft | None: ...

@@ -107,3 +107,25 @@ class CompiledExperimentRow(Base):
     archive: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     preview_json: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
+class GeneratedCaseDraftRow(Base):
+    __tablename__ = "generated_case_drafts"
+    __table_args__ = (UniqueConstraint("plan_id", "plan_version", "version"),)
+
+    draft_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    plan_id: Mapped[str] = mapped_column(
+        ForeignKey("experiment_plans.plan_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    plan_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    draft_json: Mapped[str] = mapped_column(Text, nullable=False)
+    archive_sha256: Mapped[str] = mapped_column(String(71), nullable=False)
+    archive: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    preview_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(String(64), nullable=False)
