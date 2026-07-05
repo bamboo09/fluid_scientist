@@ -26,6 +26,9 @@ PROVIDER_BASE_URLS = {
     "glm": "https://open.bigmodel.cn/api/paas/v4/",
     "deepseek": "https://api.deepseek.com",
 }
+_MAX_CASE_PLAN_BYTES = 64 * 1024
+_MAX_CASE_OUTPUT_TOKENS = 32_768
+_MAX_CASE_RETRIES = 1
 
 
 @runtime_checkable
@@ -91,6 +94,14 @@ class CaseBuilderMalformedOutputError(CaseBuilderOutputError):
     """The provider returned malformed JSON or non-text compatible output."""
 
 
+class CaseBuilderRefusalError(CaseBuilderOutputError):
+    """The provider refused to author the requested case."""
+
+
+class CaseBuilderIncompleteOutputError(CaseBuilderOutputError):
+    """The provider stopped before producing a complete structured draft."""
+
+
 class CaseBuilderSchemaError(CaseBuilderOutputError):
     """The provider output failed strict generated-case schema validation."""
 
@@ -146,6 +157,11 @@ class _CaseBuilderSupport:
         request_id = getattr(value, "_request_id", None) or getattr(value, "request_id", None)
         if isinstance(request_id, str):
             return request_id
+        direct_headers = getattr(value, "headers", None)
+        if direct_headers is not None:
+            header_id = direct_headers.get("x-request-id")
+            if isinstance(header_id, str):
+                return header_id
         response = getattr(value, "response", None)
         headers = getattr(response, "headers", None)
         if headers is not None:
@@ -186,11 +202,28 @@ class _CaseBuilderSupport:
         if "OpenFOAM-13" not in capabilities:
             raise ValueError("Case Builder requires the OpenFOAM-13 capability")
 
+    @staticmethod
+    def _plan_payload(plan: CustomExperimentPlan) -> dict[str, Any]:
+        payload = plan.model_dump(mode="json")
+        serialized = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        if len(serialized) > _MAX_CASE_PLAN_BYTES:
+            raise ValueError("custom_openfoam plan cannot exceed 64 KiB of UTF-8 JSON")
+        return payload
+
+    def _attempts(self) -> range:
+        retries = min(self._settings.max_retries, _MAX_CASE_RETRIES)
+        return range(retries + 1)
+
     def _prompt(
         self,
         plan: CustomExperimentPlan,
         capabilities: tuple[str, ...],
         *,
+        plan_payload: dict[str, Any],
         validation_feedback: tuple[str, ...] = (),
     ) -> tuple[str, str]:
         schema = json.dumps(
@@ -216,7 +249,7 @@ class _CaseBuilderSupport:
             f"Strict GeneratedCaseDraft JSON Schema: {schema}"
         )
         payload: dict[str, object] = {
-            "custom_plan": plan.model_dump(mode="json"),
+            "custom_plan": plan_payload,
             "capabilities": list(capabilities),
             "foundation_version": 13,
             "supported_solver": "incompressibleFluid",
@@ -280,12 +313,17 @@ class OpenAICompatibleCaseBuilder(_CaseBuilderSupport):
         self._begin_request()
         plan = self._custom_plan(custom_plan)
         self._validate_capabilities(capabilities)
+        plan_payload = self._plan_payload(plan)
         feedback: tuple[str, ...] = ()
-        for attempt in range(self._settings.max_retries + 1):
+        attempts = self._attempts()
+        for attempt in attempts:
             if progress is not None:
                 progress("case_model")
             instructions, input_text = self._prompt(
-                plan, capabilities, validation_feedback=feedback
+                plan,
+                capabilities,
+                plan_payload=plan_payload,
+                validation_feedback=feedback,
             )
             request_id: str | None = None
             try:
@@ -298,6 +336,7 @@ class OpenAICompatibleCaseBuilder(_CaseBuilderSupport):
                     response_format={"type": "json_object"},
                     stream=False,
                     timeout=self._settings.timeout_seconds,
+                    max_tokens=_MAX_CASE_OUTPUT_TOKENS,
                 )
                 request_id = self._request_id(response)
                 content = self._content(response)
@@ -309,7 +348,7 @@ class OpenAICompatibleCaseBuilder(_CaseBuilderSupport):
                         request_id=request_id,
                     )
                 if content is None or not content.strip():
-                    if attempt < self._settings.max_retries:
+                    if attempt < attempts.stop - 1:
                         continue
                     self._last_request_id.set(request_id)
                     raise self._error(
@@ -337,7 +376,7 @@ class OpenAICompatibleCaseBuilder(_CaseBuilderSupport):
                 self._last_request_id.set(request_id)
                 return draft
             except CaseBuilderSchemaError as error:
-                if attempt == self._settings.max_retries:
+                if attempt == attempts.stop - 1:
                     raise
                 feedback = error.issues
                 if progress is not None:
@@ -360,7 +399,7 @@ class OpenAICompatibleCaseBuilder(_CaseBuilderSupport):
                 ) from None
             except APIStatusError as error:
                 request_id = self._publish_request_id(error)
-                if self._is_transient_status(error) and attempt < self._settings.max_retries:
+                if self._is_transient_status(error) and attempt < attempts.stop - 1:
                     continue
                 raise self._error(
                     CaseBuilderRequestError,
@@ -368,7 +407,7 @@ class OpenAICompatibleCaseBuilder(_CaseBuilderSupport):
                     request_id=request_id,
                 ) from None
             except (TimeoutError, APITimeoutError) as error:
-                if attempt == self._settings.max_retries:
+                if attempt == attempts.stop - 1:
                     request_id = self._publish_request_id(error)
                     raise self._error(
                         CaseBuilderRequestError,
@@ -376,7 +415,7 @@ class OpenAICompatibleCaseBuilder(_CaseBuilderSupport):
                         request_id=request_id,
                     ) from None
             except (ConnectionError, APIConnectionError) as error:
-                if attempt == self._settings.max_retries:
+                if attempt == attempts.stop - 1:
                     request_id = self._publish_request_id(error)
                     raise self._error(
                         CaseBuilderRequestError,
@@ -419,12 +458,17 @@ class OpenAINativeCaseBuilder(_CaseBuilderSupport):
         self._begin_request()
         plan = self._custom_plan(custom_plan)
         self._validate_capabilities(capabilities)
+        plan_payload = self._plan_payload(plan)
         feedback: tuple[str, ...] = ()
-        for attempt in range(self._settings.max_retries + 1):
+        attempts = self._attempts()
+        for attempt in attempts:
             if progress is not None:
                 progress("case_model")
             instructions, input_text = self._prompt(
-                plan, capabilities, validation_feedback=feedback
+                plan,
+                capabilities,
+                plan_payload=plan_payload,
+                validation_feedback=feedback,
             )
             request_id: str | None = None
             try:
@@ -435,12 +479,33 @@ class OpenAINativeCaseBuilder(_CaseBuilderSupport):
                     text_format=GeneratedCaseDraft,
                     store=False,
                     timeout=self._settings.timeout_seconds,
+                    max_output_tokens=_MAX_CASE_OUTPUT_TOKENS,
                 )
                 request_id = self._publish_request_id(raw_response)
                 response = raw_response.parse()
+                if self._has_refusal(response):
+                    raise self._error(
+                        CaseBuilderRefusalError,
+                        "provider refused to generate the requested case",
+                        request_id=request_id,
+                    )
+                status = self._field(response, "status")
+                incomplete_details = self._field(response, "incomplete_details")
+                if status == "incomplete" or incomplete_details is not None:
+                    raise self._error(
+                        CaseBuilderIncompleteOutputError,
+                        "provider returned an incomplete generated-case response",
+                        request_id=request_id,
+                    )
+                if status is not None and status != "completed":
+                    raise self._error(
+                        CaseBuilderRequestError,
+                        "provider returned a non-completed generated-case response",
+                        request_id=request_id,
+                    )
                 parsed = getattr(response, "output_parsed", None)
                 if parsed is None:
-                    if attempt < self._settings.max_retries:
+                    if attempt < attempts.stop - 1:
                         continue
                     raise self._error(
                         CaseBuilderEmptyOutputError,
@@ -459,7 +524,7 @@ class OpenAINativeCaseBuilder(_CaseBuilderSupport):
                 return parsed
             except CaseBuilderSchemaError as error:
                 self._last_request_id.set(error.request_id)
-                if attempt == self._settings.max_retries:
+                if attempt == attempts.stop - 1:
                     raise
                 feedback = error.issues
                 if progress is not None:
@@ -493,14 +558,14 @@ class OpenAINativeCaseBuilder(_CaseBuilderSupport):
                     request_id=request_id,
                     issues=issues,
                 )
-                if attempt == self._settings.max_retries:
+                if attempt == attempts.stop - 1:
                     raise schema_error from None
                 feedback = issues
                 if progress is not None:
                     progress("schema_correction")
             except APIStatusError as error:
                 request_id = self._publish_request_id(error)
-                if self._is_transient_status(error) and attempt < self._settings.max_retries:
+                if self._is_transient_status(error) and attempt < attempts.stop - 1:
                     continue
                 raise self._error(
                     CaseBuilderRequestError,
@@ -508,7 +573,7 @@ class OpenAINativeCaseBuilder(_CaseBuilderSupport):
                     request_id=request_id,
                 ) from None
             except (TimeoutError, APITimeoutError) as error:
-                if attempt == self._settings.max_retries:
+                if attempt == attempts.stop - 1:
                     request_id = self._publish_request_id(error)
                     raise self._error(
                         CaseBuilderRequestError,
@@ -516,7 +581,7 @@ class OpenAINativeCaseBuilder(_CaseBuilderSupport):
                         request_id=request_id,
                     ) from None
             except (ConnectionError, APIConnectionError) as error:
-                if attempt == self._settings.max_retries:
+                if attempt == attempts.stop - 1:
                     request_id = self._publish_request_id(error)
                     raise self._error(
                         CaseBuilderRequestError,
@@ -524,6 +589,31 @@ class OpenAINativeCaseBuilder(_CaseBuilderSupport):
                         request_id=request_id,
                     ) from None
         raise AssertionError("Case Builder retry loop terminated unexpectedly")
+
+    @staticmethod
+    def _field(value: object, name: str) -> object:
+        if isinstance(value, dict):
+            return value.get(name)
+        return getattr(value, name, None)
+
+    @classmethod
+    def _has_refusal(cls, response: object) -> bool:
+        direct_refusal = cls._field(response, "refusal")
+        if isinstance(direct_refusal, str) and direct_refusal:
+            return True
+        output = cls._field(response, "output")
+        if not isinstance(output, (list, tuple)):
+            return False
+        for item in output:
+            if cls._field(item, "type") == "refusal":
+                return True
+            content = cls._field(item, "content")
+            if not isinstance(content, (list, tuple)):
+                continue
+            for part in content:
+                if cls._field(part, "type") == "refusal":
+                    return True
+        return False
 
 
 def create_case_builder(
@@ -540,11 +630,13 @@ __all__ = [
     "CaseBuilder",
     "CaseBuilderAuthenticationError",
     "CaseBuilderEmptyOutputError",
+    "CaseBuilderIncompleteOutputError",
     "CaseBuilderMalformedOutputError",
     "CaseBuilderModelNotFoundError",
     "CaseBuilderOutputError",
     "CaseBuilderProviderError",
     "CaseBuilderRequestError",
+    "CaseBuilderRefusalError",
     "CaseBuilderSchemaError",
     "OpenAICompatibleCaseBuilder",
     "OpenAINativeCaseBuilder",

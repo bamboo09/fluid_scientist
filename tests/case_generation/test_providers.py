@@ -22,8 +22,10 @@ from fluid_scientist.case_generation.providers import (
     CaseBuilder,
     CaseBuilderAuthenticationError,
     CaseBuilderEmptyOutputError,
+    CaseBuilderIncompleteOutputError,
     CaseBuilderMalformedOutputError,
     CaseBuilderModelNotFoundError,
+    CaseBuilderRefusalError,
     CaseBuilderRequestError,
     CaseBuilderSchemaError,
     OpenAICompatibleCaseBuilder,
@@ -159,6 +161,13 @@ class RawResponse:
         return SimpleNamespace(output_parsed=self.outcome)
 
 
+class RawSDKResponse(RawResponse):
+    """A raw wrapper whose parse result already has the Responses SDK shape."""
+
+    def parse(self) -> object:
+        return self.outcome
+
+
 class NativeResponses:
     def __init__(self, outcomes: list[object]) -> None:
         self.outcomes = list(outcomes)
@@ -216,6 +225,7 @@ def test_compatible_builder_requests_only_a_strict_safe_file_manifest() -> None:
     assert call["response_format"] == {"type": "json_object"}
     assert call["stream"] is False
     assert call["timeout"] == 12.5
+    assert call["max_tokens"] == 32_768
     prompt = json.dumps(call["messages"], ensure_ascii=False)
     for required in (
         "OpenFOAM Foundation 13",
@@ -279,6 +289,37 @@ def test_empty_compatible_output_has_bounded_retries() -> None:
 
     assert len(client.completions.calls) == 2
     assert caught.value.request_id == "req-compatible"
+
+
+def test_case_builder_caps_retries_independently_of_provider_settings() -> None:
+    client = CompatibleClient(["", "", json.dumps(valid_draft_payload())])
+    builder = OpenAICompatibleCaseBuilder(settings(retries=5), client=client)
+
+    with pytest.raises(CaseBuilderEmptyOutputError):
+        builder.generate_case(custom_plan(), capabilities=("OpenFOAM-13",))
+
+    assert len(client.completions.calls) == 2
+
+
+def test_oversized_custom_plan_is_rejected_before_provider_call() -> None:
+    client = CompatibleClient([json.dumps(valid_draft_payload())])
+    builder = OpenAICompatibleCaseBuilder(settings(), client=client)
+    oversized = custom_plan().root.model_copy(update={"objective": "x" * 70_000})
+
+    with pytest.raises(ValueError, match="64 KiB"):
+        builder.generate_case(oversized, capabilities=("OpenFOAM-13",))
+
+    assert client.completions.calls == []
+
+    native_client = NativeClient(
+        [GeneratedCaseDraft.model_validate(valid_draft_payload())]
+    )
+    native_builder = OpenAINativeCaseBuilder(
+        settings("openai"), client=native_client
+    )
+    with pytest.raises(ValueError, match="64 KiB"):
+        native_builder.generate_case(oversized, capabilities=("OpenFOAM-13",))
+    assert native_client.raw.calls == []
 
 
 @pytest.mark.parametrize(
@@ -365,6 +406,7 @@ def test_native_builder_uses_structured_responses_and_preserves_request_id() -> 
     call = client.raw.calls[0]
     assert call["text_format"] is GeneratedCaseDraft
     assert call["store"] is False
+    assert call["max_output_tokens"] == 32_768
     assert "never-print-this" not in str(call)
 
 
@@ -424,6 +466,16 @@ def test_native_empty_output_has_bounded_retries() -> None:
     assert caught.value.request_id == "req-empty-final"
 
 
+def test_native_retry_cap_is_independent_of_provider_settings() -> None:
+    client = NativeClient([None, None, GeneratedCaseDraft.model_validate(valid_draft_payload())])
+    builder = OpenAINativeCaseBuilder(settings("openai", retries=5), client=client)
+
+    with pytest.raises(CaseBuilderEmptyOutputError):
+        builder.generate_case(custom_plan(), capabilities=("OpenFOAM-13",))
+
+    assert len(client.raw.calls) == 2
+
+
 def test_native_wrong_structured_output_gets_bounded_schema_correction() -> None:
     wrong = SimpleNamespace(raw="secret")
     client = NativeClient(
@@ -441,6 +493,48 @@ def test_native_wrong_structured_output_gets_bounded_schema_correction() -> None
     assert stages == ["case_model", "schema_correction", "case_model"]
     assert caught.value.request_id == "req-schema-final"
     assert "secret" not in str(client.raw.calls[1])
+
+
+def test_native_refusal_is_safe_terminal_and_not_retried() -> None:
+    refusal = SimpleNamespace(
+        status="completed",
+        output=[
+            SimpleNamespace(
+                type="message",
+                content=[SimpleNamespace(type="refusal", refusal="raw policy detail")],
+            )
+        ],
+        output_parsed=None,
+    )
+    client = NativeClient([RawSDKResponse(refusal, "req-refusal")])
+    builder = OpenAINativeCaseBuilder(settings("openai", retries=5), client=client)
+
+    with pytest.raises(CaseBuilderRefusalError) as caught:
+        builder.generate_case(custom_plan(), capabilities=("OpenFOAM-13",))
+
+    assert len(client.raw.calls) == 1
+    assert caught.value.request_id == "req-refusal"
+    assert "raw policy detail" not in str(caught.value)
+
+
+def test_native_incomplete_is_typed_terminal_and_preserves_header_request_id() -> None:
+    incomplete = SimpleNamespace(
+        status="incomplete",
+        incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+        output=[],
+        output_parsed=None,
+    )
+    raw = RawSDKResponse(incomplete, request_id=None)
+    raw.headers = {"x-request-id": "req-from-header"}
+    client = NativeClient([raw])
+    builder = OpenAINativeCaseBuilder(settings("openai", retries=5), client=client)
+
+    with pytest.raises(CaseBuilderIncompleteOutputError) as caught:
+        builder.generate_case(custom_plan(), capabilities=("OpenFOAM-13",))
+
+    assert len(client.raw.calls) == 1
+    assert caught.value.request_id == "req-from-header"
+    assert "max_output_tokens" not in str(caught.value)
 
 
 def test_builtin_plan_and_incompatible_target_are_rejected_before_network() -> None:
