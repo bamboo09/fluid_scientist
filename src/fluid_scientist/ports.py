@@ -17,6 +17,10 @@ from fluid_scientist.domain.models import (
 )
 from fluid_scientist.operations.models import OperationKind, OperationRecord
 
+MAX_GENERATED_CASE_ARCHIVE_BYTES = 16 * 1024 * 1024
+MAX_GENERATED_CASE_DRAFT_JSON_BYTES = 9 * 1024 * 1024
+MAX_GENERATED_CASE_PREVIEW_JSON_BYTES = 1024 * 1024
+
 
 @dataclass(frozen=True)
 class SimulationResult:
@@ -79,24 +83,50 @@ class StoredGeneratedCaseDraft:
     preview_json: str
 
     def __post_init__(self) -> None:
-        for field_name in ("draft_id", "project_id", "plan_id", "provider", "model"):
+        text_limits = {
+            "draft_id": 128,
+            "project_id": 128,
+            "plan_id": 128,
+            "provider": 32,
+            "model": 128,
+        }
+        for field_name, maximum in text_limits.items():
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} must be a non-empty string")
+            if len(value) > maximum:
+                raise ValueError(f"{field_name} exceeds its storage boundary")
         for field_name in ("plan_version", "version"):
             value = getattr(self, field_name)
             if type(value) is not int or value < 1:
                 raise ValueError(f"{field_name} must be an integer greater than or equal to 1")
         if not isinstance(self.draft_json, str) or not self.draft_json:
             raise ValueError("draft_json must be a non-empty string")
+        self._require_utf8_size(
+            "draft_json", self.draft_json, MAX_GENERATED_CASE_DRAFT_JSON_BYTES
+        )
         if not isinstance(self.preview_json, str) or not self.preview_json:
             raise ValueError("preview_json must be a non-empty string")
+        self._require_utf8_size(
+            "preview_json", self.preview_json, MAX_GENERATED_CASE_PREVIEW_JSON_BYTES
+        )
         if not isinstance(self.archive, bytes) or not self.archive:
             raise ValueError("archive must be non-empty bytes")
+        if len(self.archive) > MAX_GENERATED_CASE_ARCHIVE_BYTES:
+            raise ValueError("archive exceeds its storage boundary")
         if not isinstance(self.archive_sha256, str) or re.fullmatch(
             r"sha256:[0-9a-f]{64}", self.archive_sha256
         ) is None:
             raise ValueError("archive_sha256 must be a lowercase sha256 digest")
+
+    @staticmethod
+    def _require_utf8_size(field_name: str, value: str, maximum: int) -> None:
+        try:
+            size = len(value.encode("utf-8"))
+        except UnicodeEncodeError as error:
+            raise ValueError(f"{field_name} must be valid UTF-8") from error
+        if size > maximum:
+            raise ValueError(f"{field_name} exceeds its storage boundary")
 
 
 class LLMProvider(Protocol):

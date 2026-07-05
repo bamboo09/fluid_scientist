@@ -8,7 +8,8 @@ from threading import Barrier
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import event
+from sqlalchemy import event, text
+from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
 from fluid_scientist.adapters.sql_repository import (
     ConcurrentUpdateError,
@@ -442,6 +443,130 @@ def test_concurrent_identical_generated_case_draft_insert_is_idempotent(tmp_path
         results = list(executor.map(lambda _: write(), range(2)))
 
     assert results == [draft, draft]
+
+
+def test_concurrent_different_generated_drafts_for_same_version_have_one_winner(
+    tmp_path,
+) -> None:
+    database_url = f"sqlite:///{tmp_path / 'workflow.db'}"
+    seed_repo = SQLWorkflowRepository(database_url)
+    first = seed_generated_draft(seed_repo)
+    changed_payload = generated_case_draft().model_dump()
+    changed_payload["objective"] = (
+        "Build a different but bounded generated OpenFOAM case for isolated validation."
+    )
+    second = replace(
+        first,
+        draft_id="draft-2",
+        draft_json=GeneratedCaseDraft.model_validate(changed_payload).model_dump_json(),
+    )
+    barrier = Barrier(2)
+
+    def write(draft: StoredGeneratedCaseDraft):
+        repo = SQLWorkflowRepository(database_url)
+        barrier.wait(timeout=5)
+        try:
+            return repo.store_generated_case_draft(draft)
+        except ExperimentArtifactConflict as error:
+            return error
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(write, (first, second)))
+
+    assert sum(isinstance(result, StoredGeneratedCaseDraft) for result in results) == 1
+    assert sum(isinstance(result, ExperimentArtifactConflict) for result in results) == 1
+    with seed_repo._engine.connect() as connection:
+        assert connection.scalar(text("SELECT count(*) FROM generated_case_drafts")) == 1
+
+
+def test_generated_case_draft_sqlite_foreign_keys_reject_orphans_and_cascade(tmp_path) -> None:
+    repo = repository(tmp_path)
+    draft = seed_generated_draft(repo)
+    repo.store_generated_case_draft(draft)
+
+    with repo._engine.begin() as connection, pytest.raises(SAIntegrityError):
+        connection.execute(
+            text(
+                """INSERT INTO generated_case_drafts
+                (draft_id, project_id, plan_id, plan_version, version, provider, model,
+                 draft_json, archive_sha256, archive, preview_json, created_at)
+                VALUES
+                ('orphan', 'missing-project', 'missing-plan', 1, 1, 'glm', 'model',
+                 '{}', :digest, :archive, '[]', :created_at)"""
+            ),
+            {
+                "digest": f"sha256:{'0' * 64}",
+                "archive": b"x",
+                "created_at": datetime.now(UTC).isoformat(),
+            },
+        )
+
+    with repo._engine.begin() as connection:
+        connection.execute(text("DELETE FROM experiment_plans WHERE plan_id = 'plan-1'"))
+    assert repo.load_generated_case_draft(draft.draft_id) is None
+
+    second_repo = SQLWorkflowRepository(f"sqlite:///{tmp_path / 'second.db'}")
+    second = seed_generated_draft(second_repo)
+    second_repo.store_generated_case_draft(second)
+    with second_repo._engine.begin() as connection:
+        connection.execute(text("DELETE FROM projects WHERE project_id = 'project-1'"))
+        assert connection.scalar(text("SELECT count(*) FROM generated_case_drafts")) == 0
+
+
+@pytest.mark.parametrize(
+    ("field_name", "oversized"),
+    [
+        pytest.param("draft_json", "x" * (9 * 1024 * 1024 + 1), id="draft-json"),
+        pytest.param("preview_json", "x" * (1024 * 1024 + 1), id="preview-json"),
+        pytest.param("archive", b"x" * (16 * 1024 * 1024 + 1), id="archive"),
+        pytest.param("draft_id", "x" * 129, id="draft-id"),
+        pytest.param("provider", "x" * 33, id="provider"),
+        pytest.param("model", "x" * 129, id="model"),
+    ],
+)
+def test_generated_case_draft_rejects_oversized_boundaries_before_store(
+    tmp_path, field_name, oversized
+) -> None:
+    repo = repository(tmp_path)
+    draft = seed_generated_draft(repo)
+
+    with pytest.raises(ValueError, match=field_name):
+        replace(draft, **{field_name: oversized})
+
+
+@pytest.mark.parametrize(
+    ("column", "oversized", "message"),
+    [
+        pytest.param(
+            "draft_json", "x" * (9 * 1024 * 1024 + 1), "draft_json", id="draft-json"
+        ),
+        pytest.param(
+            "preview_json", "x" * (1024 * 1024 + 1), "preview_json", id="preview-json"
+        ),
+        pytest.param(
+            "archive", b"x" * (16 * 1024 * 1024 + 1), "archive", id="archive"
+        ),
+    ],
+)
+def test_load_generated_case_draft_rejects_oversized_row_before_validation(
+    tmp_path, column, oversized, message, monkeypatch
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    repo = repository(tmp_path)
+    draft = seed_generated_draft(repo)
+    repo.store_generated_case_draft(draft)
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            f"UPDATE generated_case_drafts SET {column} = ? WHERE draft_id = ?",
+            (oversized, draft.draft_id),
+        )
+    monkeypatch.setattr(
+        "fluid_scientist.adapters.sql_repository.validate_custom_case_archive",
+        lambda *_args, **_kwargs: pytest.fail("expensive validation must not run"),
+    )
+
+    with pytest.raises(GeneratedCaseDraftIntegrityError, match=message):
+        repo.load_generated_case_draft(draft.draft_id)
 
 
 @pytest.mark.parametrize(

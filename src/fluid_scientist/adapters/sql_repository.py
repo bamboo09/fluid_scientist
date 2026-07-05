@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import datetime
 
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import create_engine, event, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -71,6 +71,12 @@ class GeneratedCaseDraftIntegrityError(RuntimeError):
     """Raised when immutable generated-case persistence fails verification."""
 
 
+def _enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
+    cursor = dbapi_connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
 class SQLWorkflowRepository:
     def __init__(self, database_url: str) -> None:
         engine_options = {}
@@ -80,6 +86,8 @@ class SQLWorkflowRepository:
                 "poolclass": StaticPool,
             }
         self._engine = create_engine(database_url, **engine_options)
+        if database_url.startswith("sqlite"):
+            event.listen(self._engine, "connect", _enable_sqlite_foreign_keys)
         Base.metadata.create_all(self._engine)
         self._sessions = sessionmaker(self._engine, expire_on_commit=False)
 
@@ -585,7 +593,7 @@ class SQLWorkflowRepository:
             )
         except (TypeError, ValueError) as error:
             raise GeneratedCaseDraftIntegrityError(
-                f"generated case draft {row.draft_id} has invalid row metadata"
+                f"generated case draft {row.draft_id} has invalid row metadata: {error}"
             ) from error
         plan = session.get(ExperimentPlanRow, stored.plan_id)
         if plan is None:
