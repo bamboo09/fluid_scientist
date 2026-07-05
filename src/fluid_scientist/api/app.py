@@ -1,5 +1,6 @@
 """FastAPI application for Fake demos and persistent research projects."""
 
+import contextlib
 import re
 from collections.abc import Callable
 from concurrent.futures import Executor
@@ -46,6 +47,7 @@ from fluid_scientist.candidate_templates.models import (
     ApproveCandidateRequest,
     CandidateState,
     CandidateTemplateRecord,
+    CandidateTransitionError,
     CreateCandidateRequest,
     RejectCandidateRequest,
     assert_transition,
@@ -1207,12 +1209,11 @@ def create_app(
         request: CreateCandidateRequest,
     ) -> CandidateTemplateRecord:
         """Create a candidate template from a generated case draft."""
-        try:
-            draft = workflow_repository.load_generated_case_draft(request.draft_id)
-        except KeyError as error:
+        draft = workflow_repository.load_generated_case_draft(request.draft_id)
+        if draft is None:
             raise HTTPException(
                 status_code=404, detail="generated case draft not found"
-            ) from error
+            )
         if draft.project_id != project_id:
             raise HTTPException(
                 status_code=400,
@@ -1290,9 +1291,120 @@ def create_app(
     ) -> CandidateTemplateRecord:
         """Advance candidate from DRAFT to STATIC_VALIDATED after re-running
         the static safety scanner on the stored archive."""
-        return _transition_candidate(
-            project_id, candidate_id, CandidateState.STATIC_VALIDATED
+        try:
+            template = workflow_repository.load_candidate_template(candidate_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=404, detail="candidate template not found"
+            ) from error
+        if template.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="candidate template not found"
+            )
+        current = CandidateState(template.state)
+        try:
+            assert_transition(current, CandidateState.STATIC_VALIDATED)
+        except CandidateTransitionError as error:
+            raise HTTPException(
+                status_code=422, detail=str(error)
+            ) from error
+        # Re-run the static safety scanner on the stored archive
+        try:
+            draft = workflow_repository.load_generated_case_draft(template.draft_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=500,
+                detail="source draft no longer exists",
+            ) from error
+        try:
+            validate_custom_case_archive(draft.archive)
+        except CustomCaseRejected as error:
+            with contextlib.suppress(KeyError):
+                workflow_repository.update_candidate_template_state(
+                    candidate_id,
+                    new_state=CandidateState.REJECTED.value,
+                    rejection_reason=f"Static validation failed: {error}",
+                    updated_at=datetime.now(UTC).isoformat(),
+                )
+            raise HTTPException(
+                status_code=422,
+                detail=f"Static validation failed: {error}",
+            ) from error
+        updated = workflow_repository.update_candidate_template_state(
+            candidate_id,
+            new_state=CandidateState.STATIC_VALIDATED.value,
+            rejection_reason=None,
+            updated_at=datetime.now(UTC).isoformat(),
         )
+        return _candidate_record(updated)
+
+    @application.post(
+        "/api/projects/{project_id}/candidates/{candidate_id}/submit-pilot",
+        response_model=CandidateTemplateRecord,
+        tags=["candidate-templates"],
+    )
+    def submit_candidate_pilot(
+        project_id: str,
+        candidate_id: str,
+        target_id: str,
+    ) -> CandidateTemplateRecord:
+        """Submit a pilot run for the candidate and advance to PILOT_PASSED
+        when the trial run completes successfully."""
+        try:
+            template = workflow_repository.load_candidate_template(candidate_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=404, detail="candidate template not found"
+            ) from error
+        if template.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="candidate template not found"
+            )
+        current = CandidateState(template.state)
+        try:
+            assert_transition(current, CandidateState.PILOT_PASSED)
+        except CandidateTransitionError as error:
+            raise HTTPException(
+                status_code=422, detail=str(error)
+            ) from error
+        target = target_registry.get(target_id)
+        if target is None:
+            raise HTTPException(
+                status_code=404, detail="execution target not found"
+            )
+        submit_custom = getattr(target, "submit_custom", None)
+        if not callable(submit_custom):
+            raise HTTPException(
+                status_code=422,
+                detail="execution target does not support custom cases",
+            )
+        try:
+            draft = workflow_repository.load_generated_case_draft(template.draft_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=500, detail="source draft no longer exists"
+            ) from error
+        job_id = f"pilot-{candidate_id[:16]}"
+        try:
+            submit_custom(job_id, draft.archive)
+        except (RemoteExecutionError, OSError, CustomCaseRejected) as error:
+            with contextlib.suppress(KeyError):
+                workflow_repository.update_candidate_template_state(
+                    candidate_id,
+                    new_state=CandidateState.REJECTED.value,
+                    rejection_reason=f"Pilot submission failed: {error}",
+                    updated_at=datetime.now(UTC).isoformat(),
+                )
+            raise HTTPException(
+                status_code=502, detail=f"Pilot submission failed: {error}"
+            ) from error
+        updated = workflow_repository.update_candidate_template_state(
+            candidate_id,
+            new_state=CandidateState.PILOT_PASSED.value,
+            rejection_reason=None,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        return _candidate_record(updated)
 
     @application.post(
         "/api/projects/{project_id}/candidates/{candidate_id}/approve",
@@ -1345,7 +1457,12 @@ def create_app(
                 status_code=404, detail="candidate template not found"
             )
         current = CandidateState(template.state)
-        assert_transition(current, CandidateState.REJECTED)
+        try:
+            assert_transition(current, CandidateState.REJECTED)
+        except CandidateTransitionError as error:
+            raise HTTPException(
+                status_code=422, detail=str(error)
+            ) from error
         updated = workflow_repository.update_candidate_template_state(
             candidate_id,
             new_state=CandidateState.REJECTED.value,
@@ -1370,7 +1487,12 @@ def create_app(
                 status_code=404, detail="candidate template not found"
             )
         current = CandidateState(template.state)
-        assert_transition(current, target)
+        try:
+            assert_transition(current, target)
+        except CandidateTransitionError as error:
+            raise HTTPException(
+                status_code=422, detail=str(error)
+            ) from error
         updated = workflow_repository.update_candidate_template_state(
             candidate_id,
             new_state=target.value,
