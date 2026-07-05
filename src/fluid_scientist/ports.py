@@ -129,6 +129,47 @@ class StoredGeneratedCaseDraft:
             raise ValueError(f"{field_name} exceeds its storage boundary")
 
 
+@dataclass(frozen=True)
+class StoredCandidateTemplate:
+    """Immutable persistence record for a candidate template."""
+
+    candidate_id: str
+    draft_id: str
+    project_id: str
+    plan_id: str
+    plan_version: int
+    draft_version: int
+    archive_sha256: str
+    state: str
+    rejection_reason: str | None
+    created_at: str
+    updated_at: str
+
+    def __post_init__(self) -> None:
+        text_limits = {
+            "candidate_id": 128,
+            "draft_id": 128,
+            "project_id": 128,
+            "plan_id": 128,
+        }
+        for field_name, maximum in text_limits.items():
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be a non-empty string")
+            if len(value) > maximum:
+                raise ValueError(f"{field_name} exceeds its storage boundary")
+        for field_name in ("plan_version", "draft_version"):
+            value = getattr(self, field_name)
+            if type(value) is not int or value < 1:
+                raise ValueError(f"{field_name} must be a positive integer")
+        if not isinstance(self.state, str) or not self.state.strip():
+            raise ValueError("state must be a non-empty string")
+        if self.rejection_reason is not None and (
+            not isinstance(self.rejection_reason, str) or not self.rejection_reason.strip()
+        ):
+            raise ValueError("rejection_reason must be a non-empty string or None")
+
+
 class LLMProvider(Protocol):
     def interpret(self, question: str) -> ResearchSpec: ...
 

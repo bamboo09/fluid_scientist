@@ -109,6 +109,27 @@ class CompiledExperimentRow(Base):
     created_at: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class CandidateTemplateRow(Base):
+    __tablename__ = "candidate_templates"
+
+    candidate_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    draft_id: Mapped[str] = mapped_column(
+        ForeignKey("generated_case_drafts.draft_id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    project_id: Mapped[str] = mapped_column(
+        ForeignKey("projects.project_id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    plan_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    plan_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    draft_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    archive_sha256: Mapped[str] = mapped_column(String(71), nullable=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 class GeneratedCaseDraftRow(Base):
     __tablename__ = "generated_case_drafts"
     __table_args__ = (UniqueConstraint("plan_id", "plan_version", "version"),)

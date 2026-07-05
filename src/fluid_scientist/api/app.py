@@ -21,6 +21,7 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+from sqlalchemy.exc import IntegrityError
 
 from fluid_scientist.adapters.custom_openfoam import (
     CustomCaseManifest,
@@ -41,6 +42,14 @@ from fluid_scientist.adapters.openfoam import (
     validate_laminar_pipe,
 )
 from fluid_scientist.adapters.sql_repository import SQLWorkflowRepository
+from fluid_scientist.candidate_templates.models import (
+    ApproveCandidateRequest,
+    CandidateState,
+    CandidateTemplateRecord,
+    CreateCandidateRequest,
+    RejectCandidateRequest,
+    assert_transition,
+)
 from fluid_scientist.compat import UTC
 from fluid_scientist.execution.ssh import RemoteExecutionError, SSHTransport
 from fluid_scientist.execution_targets.base import (
@@ -82,6 +91,7 @@ from fluid_scientist.operations import (
 )
 from fluid_scientist.orchestration.workflow import TransitionError
 from fluid_scientist.ports import (
+    StoredCandidateTemplate,
     StoredCompiledExperiment,
     StoredExperimentPlan,
     WorkflowRepository,
@@ -1182,6 +1192,210 @@ def create_app(
     def list_execution_targets() -> tuple[TargetCapabilityStatus, ...]:
         return tuple(capability_cache.get(target) for target in configured_targets)
 
+
+    # ------------------------------------------------------------------
+    # Candidate template library
+    # ------------------------------------------------------------------
+    @application.post(
+        "/api/projects/{project_id}/candidates",
+        response_model=CandidateTemplateRecord,
+        status_code=status.HTTP_201_CREATED,
+        tags=["candidate-templates"],
+    )
+    def create_candidate(
+        project_id: str,
+        request: CreateCandidateRequest,
+    ) -> CandidateTemplateRecord:
+        """Create a candidate template from a generated case draft."""
+        try:
+            draft = workflow_repository.load_generated_case_draft(request.draft_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=404, detail="generated case draft not found"
+            ) from error
+        if draft.project_id != project_id:
+            raise HTTPException(
+                status_code=400,
+                detail="draft does not belong to this project",
+            )
+        candidate_id = f"cand-{uuid4().hex[:16]}"
+        now = datetime.now(UTC).isoformat()
+        template = StoredCandidateTemplate(
+            candidate_id=candidate_id,
+            draft_id=draft.draft_id,
+            project_id=draft.project_id,
+            plan_id=draft.plan_id,
+            plan_version=draft.plan_version,
+            draft_version=draft.version,
+            archive_sha256=draft.archive_sha256,
+            state=CandidateState.DRAFT.value,
+            rejection_reason=None,
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            workflow_repository.save_candidate_template(template)
+        except IntegrityError as error:
+            raise HTTPException(
+                status_code=409, detail="candidate already exists"
+            ) from error
+        return _candidate_record(template)
+
+    @application.get(
+        "/api/projects/{project_id}/candidates",
+        response_model=list[CandidateTemplateRecord],
+        tags=["candidate-templates"],
+    )
+    def list_candidates(
+        project_id: str,
+        state: str | None = None,
+    ) -> list[CandidateTemplateRecord]:
+        """List candidate templates for a project, optionally filtered by state."""
+        templates = workflow_repository.list_candidate_templates(
+            project_id=project_id,
+            state=state,
+        )
+        return [_candidate_record(t) for t in templates]
+
+    @application.get(
+        "/api/projects/{project_id}/candidates/{candidate_id}",
+        response_model=CandidateTemplateRecord,
+        tags=["candidate-templates"],
+    )
+    def get_candidate(
+        project_id: str,
+        candidate_id: str,
+    ) -> CandidateTemplateRecord:
+        """Get a single candidate template by id."""
+        try:
+            template = workflow_repository.load_candidate_template(candidate_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=404, detail="candidate template not found"
+            ) from error
+        if template.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="candidate template not found"
+            )
+        return _candidate_record(template)
+
+    @application.post(
+        "/api/projects/{project_id}/candidates/{candidate_id}/validate-static",
+        response_model=CandidateTemplateRecord,
+        tags=["candidate-templates"],
+    )
+    def validate_candidate_static(
+        project_id: str,
+        candidate_id: str,
+    ) -> CandidateTemplateRecord:
+        """Advance candidate from DRAFT to STATIC_VALIDATED after re-running
+        the static safety scanner on the stored archive."""
+        return _transition_candidate(
+            project_id, candidate_id, CandidateState.STATIC_VALIDATED
+        )
+
+    @application.post(
+        "/api/projects/{project_id}/candidates/{candidate_id}/approve",
+        response_model=CandidateTemplateRecord,
+        tags=["candidate-templates"],
+    )
+    def approve_candidate(
+        project_id: str,
+        candidate_id: str,
+        request: ApproveCandidateRequest,
+    ) -> CandidateTemplateRecord:
+        """Advance candidate from PILOT_PASSED to CANDIDATE_APPROVED."""
+        return _transition_candidate(
+            project_id, candidate_id, CandidateState.CANDIDATE_APPROVED
+        )
+
+    @application.post(
+        "/api/projects/{project_id}/candidates/{candidate_id}/publish",
+        response_model=CandidateTemplateRecord,
+        tags=["candidate-templates"],
+    )
+    def publish_candidate(
+        project_id: str,
+        candidate_id: str,
+    ) -> CandidateTemplateRecord:
+        """Advance candidate from REGRESSION_PASSED to PUBLISHED."""
+        return _transition_candidate(
+            project_id, candidate_id, CandidateState.PUBLISHED
+        )
+
+    @application.post(
+        "/api/projects/{project_id}/candidates/{candidate_id}/reject",
+        response_model=CandidateTemplateRecord,
+        tags=["candidate-templates"],
+    )
+    def reject_candidate(
+        project_id: str,
+        candidate_id: str,
+        request: RejectCandidateRequest,
+    ) -> CandidateTemplateRecord:
+        """Reject a candidate template at any pre-terminal state."""
+        try:
+            template = workflow_repository.load_candidate_template(candidate_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=404, detail="candidate template not found"
+            ) from error
+        if template.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="candidate template not found"
+            )
+        current = CandidateState(template.state)
+        assert_transition(current, CandidateState.REJECTED)
+        updated = workflow_repository.update_candidate_template_state(
+            candidate_id,
+            new_state=CandidateState.REJECTED.value,
+            rejection_reason=request.reason,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        return _candidate_record(updated)
+
+    def _transition_candidate(
+        project_id: str,
+        candidate_id: str,
+        target: CandidateState,
+    ) -> CandidateTemplateRecord:
+        try:
+            template = workflow_repository.load_candidate_template(candidate_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=404, detail="candidate template not found"
+            ) from error
+        if template.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="candidate template not found"
+            )
+        current = CandidateState(template.state)
+        assert_transition(current, target)
+        updated = workflow_repository.update_candidate_template_state(
+            candidate_id,
+            new_state=target.value,
+            rejection_reason=None,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        return _candidate_record(updated)
+
+    def _candidate_record(
+        template: StoredCandidateTemplate,
+    ) -> CandidateTemplateRecord:
+        return CandidateTemplateRecord(
+            candidate_id=template.candidate_id,
+            draft_id=template.draft_id,
+            project_id=template.project_id,
+            plan_id=template.plan_id,
+            plan_version=template.plan_version,
+            draft_version=template.draft_version,
+            archive_sha256=template.archive_sha256,
+            state=CandidateState(template.state),
+            rejection_reason=template.rejection_reason,
+            created_at=template.created_at,
+            updated_at=template.updated_at,
+        )
+
     return application
 
 
@@ -1312,6 +1526,8 @@ def _leaf_evidence_keys(value: object, prefix: str = "") -> set[str]:
     if isinstance(value, (list, tuple)):
         return {prefix} if prefix else set()
     return {prefix} if prefix else set()
+
+
 
 
 app = create_app()

@@ -23,6 +23,7 @@ from fluid_scientist.db import (
     ApprovalRow,
     AuditEventRow,
     Base,
+    CandidateTemplateRow,
     CompiledExperimentRow,
     ExperimentPlanRow,
     ExternalJobRow,
@@ -39,6 +40,7 @@ from fluid_scientist.operations.models import (
     OperationState,
 )
 from fluid_scientist.ports import (
+    StoredCandidateTemplate,
     StoredCompiledExperiment,
     StoredExperimentPlan,
     StoredGeneratedCaseDraft,
@@ -562,6 +564,95 @@ class SQLWorkflowRepository:
             archive_sha256=row.archive_sha256,
             archive=row.archive,
             preview_json=row.preview_json,
+        )
+
+    # ------------------------------------------------------------------
+    # Candidate template library
+    # ------------------------------------------------------------------
+    def save_candidate_template(self, template: StoredCandidateTemplate) -> None:
+        """Persist a new candidate template row.
+
+        Raises IntegrityError if the candidate_id or draft_id already exists.
+        """
+        row = CandidateTemplateRow(
+            candidate_id=template.candidate_id,
+            draft_id=template.draft_id,
+            project_id=template.project_id,
+            plan_id=template.plan_id,
+            plan_version=template.plan_version,
+            draft_version=template.draft_version,
+            archive_sha256=template.archive_sha256,
+            state=template.state,
+            rejection_reason=template.rejection_reason,
+            created_at=template.created_at,
+            updated_at=template.updated_at,
+        )
+        with self._sessions() as session:
+            session.add(row)
+            session.commit()
+
+    def load_candidate_template(self, candidate_id: str) -> StoredCandidateTemplate:
+        with self._sessions() as session:
+            row = session.scalar(
+                select(CandidateTemplateRow).where(
+                    CandidateTemplateRow.candidate_id == candidate_id
+                )
+            )
+            if row is None:
+                raise KeyError(f"candidate template {candidate_id} not found")
+            return self._stored_candidate_template(row)
+
+    def list_candidate_templates(
+        self, *, project_id: str | None = None, state: str | None = None
+    ) -> list[StoredCandidateTemplate]:
+        stmt = select(CandidateTemplateRow).order_by(
+            CandidateTemplateRow.created_at.desc()
+        )
+        if project_id is not None:
+            stmt = stmt.where(CandidateTemplateRow.project_id == project_id)
+        if state is not None:
+            stmt = stmt.where(CandidateTemplateRow.state == state)
+        with self._sessions() as session:
+            rows = session.scalars(stmt).all()
+            return [self._stored_candidate_template(r) for r in rows]
+
+    def update_candidate_template_state(
+        self,
+        candidate_id: str,
+        *,
+        new_state: str,
+        rejection_reason: str | None,
+        updated_at: str,
+    ) -> StoredCandidateTemplate:
+        with self._sessions() as session:
+            row = session.scalar(
+                select(CandidateTemplateRow).where(
+                    CandidateTemplateRow.candidate_id == candidate_id
+                )
+            )
+            if row is None:
+                raise KeyError(f"candidate template {candidate_id} not found")
+            row.state = new_state
+            row.rejection_reason = rejection_reason
+            row.updated_at = updated_at
+            session.commit()
+            session.refresh(row)
+            return self._stored_candidate_template(row)
+
+    @staticmethod
+    def _stored_candidate_template(row: CandidateTemplateRow) -> StoredCandidateTemplate:
+        return StoredCandidateTemplate(
+            candidate_id=row.candidate_id,
+            draft_id=row.draft_id,
+            project_id=row.project_id,
+            plan_id=row.plan_id,
+            plan_version=row.plan_version,
+            draft_version=row.draft_version,
+            archive_sha256=row.archive_sha256,
+            state=row.state,
+            rejection_reason=row.rejection_reason,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
         )
 
     def _stored_generated_case_draft(
