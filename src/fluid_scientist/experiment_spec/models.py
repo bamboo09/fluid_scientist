@@ -8,7 +8,7 @@ text blobs.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import Enum
 from typing import Annotated, Any, Literal
 
@@ -20,6 +20,8 @@ from pydantic import (
     StringConstraints,
     model_validator,
 )
+
+from fluid_scientist.compat import UTC
 
 
 class StrictModel(BaseModel):

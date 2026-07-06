@@ -85,6 +85,10 @@ from fluid_scientist.experiment_planning.result_analysis import (
     ResultAnalyst,
     create_result_analyst,
 )
+from fluid_scientist.experiment_spec.compilation import (
+    SpecNotConfirmedError,
+    compile_confirmed_spec,
+)
 from fluid_scientist.experiment_spec.dependency import (
     change_summary,
     propagate_change,
@@ -1726,6 +1730,76 @@ def create_app(
             updated_at=datetime.now(UTC).isoformat(),
         )
         return json.loads(updated.spec_json)
+
+
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/compile",
+        tags=["experiment-specs"],
+    )
+    def compile_experiment_spec(
+        project_id: str,
+        experiment_id: str,
+    ) -> dict:
+        """Compile a confirmed ExperimentSpec into a runnable OpenFOAM case.
+
+        Only specs in the ``confirmed`` state can be compiled.  The endpoint
+        builds an ExperimentPlan from the confirmed parameter values, calls
+        the deterministic Simulation Compiler, stores the compiled archive,
+        and transitions the spec to ``compiling``.
+        """
+        import json
+
+        stored = workflow_repository.load_experiment_spec(experiment_id)
+        if stored is None or stored.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="experiment spec not found"
+            )
+
+        spec = ExperimentSpec.model_validate_json(stored.spec_json)
+
+        try:
+            compiled = compile_confirmed_spec(spec)
+        except SpecNotConfirmedError as error:
+            raise HTTPException(
+                status_code=409, detail=str(error)
+            ) from error
+        except (ValueError, CompilationError) as error:
+            raise HTTPException(
+                status_code=422, detail=str(error)
+            ) from error
+        except UnsupportedCompilation as error:
+            raise HTTPException(
+                status_code=422, detail=str(error)
+            ) from error
+
+        preview = {
+            "experiment_id": experiment_id,
+            "experiment_version": stored.experiment_version,
+            "experiment_type": compiled.experiment_type,
+            "archive_sha256": compiled.archive_sha256,
+            "manifest": compiled.manifest.model_dump(mode="json"),
+            "preprocessing": list(compiled.preprocessing),
+            "required_outputs": list(compiled.required_outputs),
+        }
+
+        workflow_repository.store_compiled_experiment(
+            StoredCompiledExperiment(
+                plan_id=experiment_id,
+                plan_version=stored.experiment_version,
+                archive_sha256=compiled.archive_sha256,
+                archive=compiled.archive,
+                preview_json=json.dumps(preview, ensure_ascii=False),
+            )
+        )
+
+        # Transition spec to compiling
+        workflow_repository.update_experiment_spec_status(
+            experiment_id,
+            new_status="compiling",
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+
+        return preview
 
     return application
 

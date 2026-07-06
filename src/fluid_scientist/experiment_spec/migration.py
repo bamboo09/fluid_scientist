@@ -7,9 +7,10 @@ ExperimentSpec format with structured ParameterSpec entries.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
+from fluid_scientist.compat import UTC
 from fluid_scientist.experiment_spec.models import (
     CodeBinding,
     Compressibility,
