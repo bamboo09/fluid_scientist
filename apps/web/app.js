@@ -51,6 +51,7 @@ let currentProject = null;
 let currentPlan = null;
 let currentCompilation = null;
 let currentSpec = null;
+let specCompiling = false;
 let activeTask = null;
 let latestResults = null;
 let postprocessSessionVersion = 0;
@@ -642,17 +643,32 @@ function showElement(element) { if (element) element.hidden = false; }
 function hideElement(element) { if (element) element.hidden = true; }
 function showError(message) { renderError("研究会话", new Error(message)); }
 
-async function loadAndRenderSpec(specId) {
-  if (!currentProject) return;
+async function loadAndRenderSpec(sessionId, specId) {
   try {
-    const spec = await requestJson(
-      `/api/projects/${currentProject.project_id}/experiment-specs/${specId}`,
-    );
+    // 通过研究会话 API 获取 spec
+    const response = await fetch(`/api/research-sessions/${sessionId}/experiment-spec`);
+    if (!response.ok) {
+      // 如果通过 session API 获取失败，尝试直接通过 project API
+      if (currentProject) {
+        const altResponse = await fetch(
+          `/api/projects/${currentProject.project_id}/experiment-specs/${specId}`,
+        );
+        if (altResponse.ok) {
+          const spec = await altResponse.json();
+          currentSpec = spec;
+          persist(storageKeys.specId, spec.experiment_id);
+          renderSpecWorkbench(spec);
+          return;
+        }
+      }
+      throw new Error(`HTTP ${response.status}`);
+    }
+    const spec = await response.json();
     currentSpec = spec;
     persist(storageKeys.specId, spec.experiment_id);
     renderSpecWorkbench(spec);
   } catch (error) {
-    renderError("加载实验规格", error);
+    showError(`加载实验规格失败: ${error.message}`);
   }
 }
 
@@ -819,40 +835,37 @@ function renderClarificationCard(result) {
 
 // 渲染草案就绪卡片
 function renderDraftReadyCard(result) {
-  const container = planResults || stream;
-  if (!container) return;
+  const container = planResults;
   container.innerHTML = "";
 
-  const card = document.createElement("div");
-  card.className = "card draft-ready-card";
-
-  const title = document.createElement("h3");
-  title.textContent = "实验草案已就绪";
-  card.appendChild(title);
-
-  if (result.warnings && result.warnings.length > 0) {
-    for (const w of result.warnings) {
-      const warn = document.createElement("div");
-      warn.className = "warning";
-      warn.textContent = w;
-      card.appendChild(warn);
-    }
-  }
-
-  const desc = document.createElement("p");
-  desc.textContent = "系统已根据您的需求生成实验草案。参数工作台将在下一步展示。";
-  card.appendChild(desc);
-
   if (result.experiment_spec_id) {
-    loadAndRenderSpec(result.experiment_spec_id);
+    // 有 spec_id，获取并渲染工作台
+    loadAndRenderSpec(result.session_id, result.experiment_spec_id);
   } else {
+    // 没有 spec_id，显示提示
+    const card = document.createElement("div");
+    card.className = "card draft-ready-card";
+
+    const title = document.createElement("h3");
+    title.textContent = "实验草案已就绪";
+    card.appendChild(title);
+
+    if (result.warnings && result.warnings.length > 0) {
+      for (const w of result.warnings) {
+        const warn = document.createElement("div");
+        warn.className = "warning";
+        warn.textContent = w;
+        card.appendChild(warn);
+      }
+    }
+
     const note = document.createElement("p");
     note.className = "muted";
-    note.textContent = "（实验规格正在生成中...）";
+    note.textContent = "实验规格正在生成中，请稍后刷新页面。";
     card.appendChild(note);
-  }
 
-  container.appendChild(card);
+    container.appendChild(card);
+  }
 }
 
 // 渲染不支持卡片
@@ -1129,14 +1142,51 @@ function renderParameterRow(param, spec) {
 }
 
 function updateSpecControls(spec) {
+  const saveBtn = byId("spec-save-btn");
   const readyBtn = byId("spec-ready-btn");
   const confirmBtn = byId("spec-confirm-btn");
+  const compileBtn = byId("spec-compile-btn");
+  const submitBtn = byId("spec-submit-btn");
   if (!readyBtn || !confirmBtn) return;
   const status = spec?.status;
-  readyBtn.disabled = status !== "draft";
-  confirmBtn.disabled = status !== "ready";
+  const editable = isSpecEditable(spec);
+  const hasCompilation = !!currentCompilation;
+  const submitted = ["running", "completed", "failed", "rejected"].includes(status);
+
+  // 保存草案：草稿/就绪状态下可保存
+  if (saveBtn) {
+    saveBtn.hidden = !editable;
+    saveBtn.disabled = !editable;
+  }
+
+  // 准备就绪：draft → ready
   readyBtn.hidden = status !== "draft";
-  confirmBtn.hidden = !["draft", "ready"].includes(status);
+  readyBtn.disabled = status !== "draft";
+
+  // 确认实验版本：ready → confirmed
+  confirmBtn.hidden = status !== "ready";
+  confirmBtn.disabled = status !== "ready";
+
+  // 生成 Case：confirmed 时编译；编译进行中显示"正在编译..."
+  if (compileBtn) {
+    if (specCompiling) {
+      compileBtn.hidden = false;
+      compileBtn.disabled = true;
+      compileBtn.textContent = "正在编译...";
+    } else {
+      const canCompile = status === "confirmed" && !hasCompilation;
+      compileBtn.hidden = !canCompile;
+      compileBtn.disabled = !canCompile;
+      compileBtn.textContent = "生成 Case";
+    }
+  }
+
+  // 提交运行：已有编译产物且尚未进入运行态
+  if (submitBtn) {
+    const canSubmit = hasCompilation && !submitted && !specCompiling;
+    submitBtn.hidden = !canSubmit;
+    submitBtn.disabled = !canSubmit;
+  }
 }
 
 function renderSpecWorkbench(spec) {
@@ -1199,6 +1249,12 @@ function renderSpecWorkbench(spec) {
 
   const actions = document.createElement("div");
   actions.className = "spec-actions card-actions";
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "button button-quiet";
+  saveBtn.id = "spec-save-btn";
+  saveBtn.textContent = "保存草案";
+  saveBtn.addEventListener("click", () => saveSpecDraft());
   const readyBtn = document.createElement("button");
   readyBtn.type = "button";
   readyBtn.className = "button button-secondary";
@@ -1207,11 +1263,23 @@ function renderSpecWorkbench(spec) {
   readyBtn.addEventListener("click", () => transitionSpec("ready"));
   const confirmBtn = document.createElement("button");
   confirmBtn.type = "button";
-  confirmBtn.className = "button button-primary";
+  confirmBtn.className = "button button-secondary";
   confirmBtn.id = "spec-confirm-btn";
-  confirmBtn.textContent = "确认实验";
+  confirmBtn.textContent = "确认实验版本";
   confirmBtn.addEventListener("click", () => transitionSpec("confirmed"));
-  actions.append(readyBtn, confirmBtn);
+  const compileBtn = document.createElement("button");
+  compileBtn.type = "button";
+  compileBtn.className = "button button-primary";
+  compileBtn.id = "spec-compile-btn";
+  compileBtn.textContent = "生成 Case";
+  compileBtn.addEventListener("click", () => compileSpec());
+  const submitBtn = document.createElement("button");
+  submitBtn.type = "button";
+  submitBtn.className = "button button-primary";
+  submitBtn.id = "spec-submit-btn";
+  submitBtn.textContent = "提交运行";
+  submitBtn.addEventListener("click", () => submitSpec());
+  actions.append(saveBtn, readyBtn, confirmBtn, compileBtn, submitBtn);
   card.append(actions);
 
   updateSpecControls(spec);
@@ -1298,9 +1366,6 @@ async function transitionSpec(targetStatus) {
     renderSpecWorkbench(currentSpec);
     const label = specStatusLabels[targetStatus] || targetStatus;
     appendConversation("assistant", `实验规格已转换到「${label}」状态。`, "workflow-event");
-    if (targetStatus === "confirmed") {
-      await compileAndSubmitSpec();
-    }
   } catch (error) {
     renderError("状态转换", error);
     if (button) button.disabled = false;
@@ -1326,30 +1391,68 @@ function deterministicSpecCaseId() {
   return `spec-${expId.slice(0, 30)}-v${expVersion.slice(0, 12)}-${suffix}`.slice(0, 64);
 }
 
-async function compileAndSubmitSpec() {
-  if (!canStartExperiment(activeTask)) {
-    const warning = "已有实验正在运行，请等待当前任务结束后再确认提交。";
-    setStatus(warning);
-    appendConversation("assistant", warning, "workflow-event");
-    return;
+async function saveSpecDraft() {
+  if (!currentProject || !currentSpec) return;
+  try {
+    const spec = await requestJson(
+      `/api/projects/${currentProject.project_id}/experiment-specs/${currentSpec.experiment_id}`,
+    );
+    currentSpec = spec;
+    renderSpecWorkbench(currentSpec);
+    appendConversation("assistant", "实验草案已保存。", "workflow-event");
+  } catch (error) {
+    renderError("保存草案", error);
   }
-  if (!currentProject || !currentSpec || !selectedTarget) {
-    if (!selectedTarget) renderError("提交", new Error("请先选择可用的执行平台"));
-    return;
+}
+
+// 生成 Case：将已确认的实验规格编译为可运行的算例归档
+async function compileSpec() {
+  if (!currentProject || !currentSpec) return false;
+  if (currentSpec.status !== "confirmed") {
+    renderError("生成 Case", new Error("仅已确认的实验规格可以生成 Case"));
+    return false;
   }
-  confirmationActive = true;
-  renderTaskCard({ phase: "preparing", targetId: selectedTarget, lastUpdated: new Date().toLocaleString() });
+  specCompiling = true;
+  renderSpecWorkbench(currentSpec);
   try {
     currentCompilation = await requestJson(
       `/api/projects/${currentProject.project_id}/experiment-specs/${currentSpec.experiment_id}/compile`,
       { method: "POST" },
     );
+    // 编译端点会将规格状态置为 compiling，本地同步以刷新工作台按钮
+    currentSpec = { ...currentSpec, status: "compiling" };
     const preview = $("[data-compile-preview]");
     if (preview) {
       preview.textContent = `SHA-256：${currentCompilation.archive_sha256}\n求解器：${currentCompilation.manifest.solver}\n预处理：${currentCompilation.preprocessing.join(" → ")}`;
     }
     appendConversation("assistant", `确定性编译与安全校验完成：${currentCompilation.archive_sha256}`, "workflow-event");
+    renderSpecWorkbench(currentSpec);
+    return true;
+  } catch (error) {
+    renderError("生成 Case", error);
+    currentSpec = { ...currentSpec, status: "confirmed" };
+    renderSpecWorkbench(currentSpec);
+    return false;
+  } finally {
+    specCompiling = false;
+  }
+}
 
+// 提交运行：基于已编译归档执行 Gate 2 审批与远程提交
+async function submitSpec() {
+  if (!canStartExperiment(activeTask)) {
+    const warning = "已有实验正在运行，请等待当前任务结束后再提交运行。";
+    setStatus(warning);
+    appendConversation("assistant", warning, "workflow-event");
+    return false;
+  }
+  if (!currentProject || !currentSpec || !currentCompilation || !selectedTarget) {
+    if (!selectedTarget) renderError("提交运行", new Error("请先选择可用的执行平台"));
+    return false;
+  }
+  confirmationActive = true;
+  renderTaskCard({ phase: "submitting", targetId: selectedTarget, lastUpdated: new Date().toLocaleString() });
+  try {
     currentProject = await requestJson(`/api/projects/${currentProject.project_id}/approvals`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1392,6 +1495,7 @@ async function compileAndSubmitSpec() {
     if (!externalJobId) {
       throw new Error("提交响应缺少外部 Job ID；尚不能确认任务已提交。请通过项目恢复检查远程状态。");
     }
+    currentSpec = { ...currentSpec, status: "running" };
     renderTaskCard({
       phase: "submitted",
       jobId: externalJobId,
@@ -1400,6 +1504,7 @@ async function compileAndSubmitSpec() {
       submittedAt: job.submitted_at,
       lastUpdated: new Date().toLocaleString(),
     });
+    renderSpecWorkbench(currentSpec);
     startPolling(() => pollSpecExperiment(
       externalJobId,
       selectedTarget,
@@ -1407,17 +1512,26 @@ async function compileAndSubmitSpec() {
       currentSpec.experiment_id,
       caseId,
     ));
+    return true;
   } catch (error) {
     const assignedJobId = activeTask?.jobId;
-    renderError("编译与提交", error, {
+    renderError("提交运行", error, {
       phase: "failed",
       jobId: assignedJobId,
       targetId: selectedTarget,
       lastUpdated: new Date().toLocaleString(),
     });
+    return false;
   } finally {
     confirmationActive = false;
   }
+}
+
+/** @deprecated 保留兼容：依次执行生成 Case 与提交运行。新流程请使用 compileSpec()/submitSpec()。 */
+async function compileAndSubmitSpec() {
+  const compiled = await compileSpec();
+  if (!compiled) return;
+  await submitSpec();
 }
 
 async function pollSpecExperiment(jobId, targetId, projectId, experimentId, caseId) {
@@ -1558,6 +1672,10 @@ function submissionJob(response) {
 }
 
 async function confirmAndSubmitPlan(button) {
+  // 如果存在研究会话，使用新的参数工作台流程，无需旧的“确认并提交”流程
+  if (currentResearchSession) {
+    return; // 新流程不需要这个按钮
+  }
   if (!canStartExperiment(activeTask)) {
     const warning = "已有实验正在运行，请等待当前任务结束后再确认提交。";
     setStatus(warning);
@@ -1925,7 +2043,7 @@ async function restoreActiveExperiment() {
         currentSpec = await requestJson(
           `/api/projects/${currentProject.project_id}/experiment-specs/${specId}`,
         );
-        if (currentSpec && ["draft", "ready"].includes(currentSpec.status)) {
+        if (currentSpec && ["draft", "ready", "confirmed", "compiling"].includes(currentSpec.status)) {
           renderSpecWorkbench(currentSpec);
         }
       } catch {
