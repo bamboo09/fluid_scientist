@@ -25,6 +25,7 @@ from fluid_scientist.research.models import (
 )
 from fluid_scientist.research.scope_engine import ScopeEngine
 from fluid_scientist.research.session_store import SessionStore
+from fluid_scientist.research.spec_factory import ExperimentSpecFactory
 
 
 class ResearchOrchestrator:
@@ -35,6 +36,8 @@ class ResearchOrchestrator:
         session_store: SessionStore,
         intent_engine: IntentEngine,
         scope_engine: ScopeEngine,
+        spec_factory: ExperimentSpecFactory | None = None,
+        workflow_repository=None,  # WorkflowRepository Protocol, optional
     ) -> None:
         """初始化编排器。
 
@@ -42,10 +45,14 @@ class ResearchOrchestrator:
             session_store: 会话存储。
             intent_engine: 意图引擎。
             scope_engine: 范围引擎。
+            spec_factory: ExperimentSpec 工厂，可选。
+            workflow_repository: 工作流仓库，可选。
         """
         self._store = session_store
         self._intent_engine = intent_engine
         self._scope_engine = scope_engine
+        self._spec_factory = spec_factory
+        self._repository = workflow_repository
 
     def start_session(
         self,
@@ -187,18 +194,65 @@ class ResearchOrchestrator:
                 current_understanding=current_understanding,
             )
 
-        # 8. ready_for_draft → 返回 DraftReady
-        self._store.update(
-            session.session_id,
-            status=ResearchSessionStatus.DRAFT_READY,
-            unresolved_questions=[],
-            updated_at=now,
-        )
+        # 8. ready_for_draft → 通过 Dynamic Schema 生成 ExperimentSpec
+        experiment_spec_id = None
+        warnings_list: list[str] = []
+
+        if self._spec_factory is not None and self._repository is not None:
+            try:
+                updated_session = self._store.get(session.session_id)
+                spec = self._spec_factory.create_from_schema(
+                    session=updated_session,
+                    intent=intent,
+                    physics_spec=updated_session.physics_spec,
+                )
+
+                # 存储到 workflow repository
+                from fluid_scientist.ports import StoredExperimentSpec
+                stored_spec = StoredExperimentSpec(
+                    experiment_id=spec.experiment_id,
+                    project_id=session.project_id,
+                    schema_version=spec.schema_version,
+                    experiment_version=spec.experiment_version,
+                    status=spec.status.value,
+                    task_type=spec.task_type.value,
+                    interaction_mode=spec.interaction_mode.value,
+                    spec_json=spec.model_dump_json(),
+                    created_at=now,
+                    updated_at=now,
+                )
+                self._repository.save_experiment_spec(stored_spec)
+                experiment_spec_id = spec.experiment_id
+
+                # 更新会话状态
+                self._store.update(
+                    session.session_id,
+                    status=ResearchSessionStatus.DRAFT_READY,
+                    experiment_spec_id=experiment_spec_id,
+                    unresolved_questions=[],
+                    updated_at=now,
+                )
+            except Exception as e:
+                warnings_list.append(f"ExperimentSpec 生成失败: {e}")
+                self._store.update(
+                    session.session_id,
+                    status=ResearchSessionStatus.DRAFT_READY,
+                    unresolved_questions=[],
+                    updated_at=now,
+                )
+        else:
+            self._store.update(
+                session.session_id,
+                status=ResearchSessionStatus.DRAFT_READY,
+                unresolved_questions=[],
+                updated_at=now,
+            )
+
         return DraftReady(
             session_id=session.session_id,
-            experiment_spec_id=None,  # 将在 Commit 3 填充
+            experiment_spec_id=experiment_spec_id,
             experiment_version=1,
-            warnings=[],
+            warnings=warnings_list,
         )
 
     def _extract_facts(

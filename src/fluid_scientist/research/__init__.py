@@ -24,6 +24,7 @@ from fluid_scientist.research.models import (
 from fluid_scientist.research.orchestrator import ResearchOrchestrator
 from fluid_scientist.research.scope_engine import ScopeEngine
 from fluid_scientist.research.session_store import SessionStore
+from fluid_scientist.research.spec_factory import ExperimentSpecFactory
 
 __all__ = [
     "Assumption",
@@ -31,6 +32,7 @@ __all__ = [
     "ClarificationRequired",
     "ClarificationTurn",
     "DraftReady",
+    "ExperimentSpecFactory",
     "ExtractedFact",
     "IntentAssessment",
     "IntentEngine",

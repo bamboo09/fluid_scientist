@@ -529,10 +529,14 @@ def create_app(
     capability_cache = target_capability_cache or TargetCapabilityCache()
     application.state.target_capability_cache = capability_cache
     research_session_store = SessionStore()
+    from fluid_scientist.research.spec_factory import ExperimentSpecFactory
+
     research_orchestrator = ResearchOrchestrator(
         session_store=research_session_store,
         intent_engine=IntentEngine(),
         scope_engine=ScopeEngine(),
+        spec_factory=ExperimentSpecFactory(),
+        workflow_repository=workflow_repository,
     )
     application.state.research_session_store = research_session_store
     application.state.research_orchestrator = research_orchestrator
