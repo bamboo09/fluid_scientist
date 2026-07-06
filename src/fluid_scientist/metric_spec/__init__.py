@@ -1,10 +1,14 @@
 """MetricSpec system — structured metric definitions, quality checks, and results.
 
-Implements P1 requirements: MetricSpec, metric registry, quality checks.
-This module provides the deterministic metric layer that feeds into the
-LLM-based ResultAnalyst for scientific interpretation.
+Implements P1 requirements: MetricSpec, metric registry, quality checks,
+sampling plan mapping, and analysis engine.
 """
 
+from fluid_scientist.metric_spec.analysis import (
+    MetricReport,
+    SimulationData,
+    analyze_simulation,
+)
 from fluid_scientist.metric_spec.models import (
     MetricCategory,
     MetricDataType,
@@ -31,6 +35,14 @@ from fluid_scientist.metric_spec.registry import (
     get_metric_spec,
     registered_types,
 )
+from fluid_scientist.metric_spec.sampling import (
+    SamplePoint,
+    SamplingConfig,
+    SamplingPlan,
+    SamplingStrategy,
+    create_spec_variant,
+    generate_sampling_plan,
+)
 
 __all__ = [
     "MetricCategory",
@@ -38,19 +50,28 @@ __all__ = [
     "MetricDefinition",
     "MetricQualityCheck",
     "MetricQualityStatus",
+    "MetricReport",
     "MetricResult",
     "MetricSpec",
     "MetricTarget",
     "QualityCheckOutcome",
     "QualityCheckType",
+    "SamplePoint",
+    "SamplingConfig",
+    "SamplingPlan",
+    "SamplingStrategy",
+    "SimulationData",
     "aggregate_status",
+    "analyze_simulation",
     "calculate_gci",
     "check_courant_number",
     "check_gci",
     "check_mass_imbalance",
     "check_range",
     "check_residual_tolerance",
+    "create_spec_variant",
     "evaluate_result",
+    "generate_sampling_plan",
     "get_metric_spec",
     "registered_types",
 ]
