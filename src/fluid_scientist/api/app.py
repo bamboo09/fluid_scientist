@@ -87,7 +87,7 @@ from fluid_scientist.experiment_planning.result_analysis import (
 )
 from fluid_scientist.experiment_spec.compilation import (
     SpecNotConfirmedError,
-    compile_confirmed_spec,
+    compile_spec,
 )
 from fluid_scientist.experiment_spec.dependency import (
     change_summary,
@@ -1873,7 +1873,7 @@ def create_app(
         spec = ExperimentSpec.model_validate_json(stored.spec_json)
 
         try:
-            compiled = compile_confirmed_spec(spec)
+            compiled, compilation_manifest = compile_spec(spec)
         except SpecNotConfirmedError as error:
             raise HTTPException(
                 status_code=409, detail=str(error)
@@ -1895,6 +1895,13 @@ def create_app(
             "manifest": compiled.manifest.model_dump(mode="json"),
             "preprocessing": list(compiled.preprocessing),
             "required_outputs": list(compiled.required_outputs),
+            "compilation_manifest": {
+                "compilation_id": compilation_manifest.compilation_id,
+                "spec_hash": compilation_manifest.spec_hash,
+                "case_hash": compilation_manifest.case_hash,
+                "compiler_id": compilation_manifest.compiler_id,
+                "compiler_version": compilation_manifest.compiler_version,
+            },
         }
 
         workflow_repository.store_compiled_experiment(
@@ -1914,7 +1921,20 @@ def create_app(
             updated_at=datetime.now(UTC).isoformat(),
         )
 
-        return preview
+        return {
+            "experiment_id": spec.experiment_id,
+            "experiment_version": spec.experiment_version,
+            "compilation_manifest": {
+                "compilation_id": compilation_manifest.compilation_id,
+                "spec_hash": compilation_manifest.spec_hash,
+                "case_hash": compilation_manifest.case_hash,
+                "compiler_id": compilation_manifest.compiler_id,
+                "compiler_version": compilation_manifest.compiler_version,
+            },
+            "archive_sha256": compiled.archive_sha256,
+            "archive_size": len(compiled.archive),
+            "entry_point": "system/controlDict",
+        }
 
     return application
 

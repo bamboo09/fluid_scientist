@@ -4,9 +4,16 @@ import pytest
 
 from fluid_scientist.experiment_planning.compilers import CompiledCase
 from fluid_scientist.experiment_spec.compilation import (
+    COMPILER_ID,
+    COMPILER_VERSION,
+    TEMPLATE_VERSIONS,
+    CompilationManifest,
     SpecNotConfirmedError,
     _detect_experiment_type,
     compile_confirmed_spec,
+    compile_spec,
+    compute_case_hash,
+    compute_spec_hash,
 )
 from fluid_scientist.experiment_spec.models import (
     Criticality,
@@ -218,3 +225,52 @@ class TestCompileConfirmedSpec:
         assert "system/controlDict" in names
         assert "0/U" in names
         assert "0/p" in names
+
+
+# --- compile_spec (formal interface) tests ---
+
+
+class TestCompileSpec:
+    """Tests for the formal compile_spec interface and CompilationManifest."""
+
+    def test_compile_spec_returns_manifest(self):
+        spec = _cavity_spec()
+        compiled, manifest = compile_spec(spec)
+        assert isinstance(compiled, CompiledCase)
+        assert isinstance(manifest, CompilationManifest)
+
+    def test_compile_spec_hash_matches_spec(self):
+        spec = _pipe_spec()
+        _, manifest = compile_spec(spec)
+        assert manifest.spec_hash == compute_spec_hash(spec)
+
+    def test_compile_spec_case_hash_matches(self):
+        spec = _cylinder_spec()
+        compiled, manifest = compile_spec(spec)
+        assert manifest.case_hash == compute_case_hash(compiled)
+
+    def test_compile_spec_rejects_non_confirmed(self):
+        spec = _cavity_spec(status=ExperimentStatus.DRAFT)
+        with pytest.raises(SpecNotConfirmedError, match="confirmed"):
+            compile_spec(spec)
+
+    def test_compile_spec_manifest_has_correct_metadata(self):
+        spec = _pipe_spec()
+        compiled, manifest = compile_spec(spec)
+        assert manifest.experiment_id == spec.experiment_id
+        assert manifest.experiment_version == spec.experiment_version
+        assert manifest.compiler_id == COMPILER_ID
+        assert manifest.compiler_version == COMPILER_VERSION
+        assert manifest.generated_files == list(compiled.manifest.members)
+        assert manifest.template_versions == TEMPLATE_VERSIONS
+        # spec_hash and case_hash are 16-char hex digests
+        assert len(manifest.spec_hash) == 16
+        assert len(manifest.case_hash) == 16
+
+    def test_compile_spec_and_confirmed_spec_produce_same_archive(self):
+        """compile_spec reuses compile_confirmed_spec, so archives must match."""
+        spec = _cavity_spec()
+        compiled, _ = compile_spec(spec)
+        confirmed = compile_confirmed_spec(spec)
+        assert compiled.archive == confirmed.archive
+        assert compiled.archive_sha256 == confirmed.archive_sha256
