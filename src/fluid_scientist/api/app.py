@@ -529,14 +529,19 @@ def create_app(
     capability_cache = target_capability_cache or TargetCapabilityCache()
     application.state.target_capability_cache = capability_cache
     research_session_store = SessionStore()
+    from fluid_scientist.code_extension.registry import ExtensionRegistry
+    from fluid_scientist.measurement.planner import MetricPlanner
     from fluid_scientist.research.spec_factory import ExperimentSpecFactory
 
+    extension_registry = ExtensionRegistry()
     research_orchestrator = ResearchOrchestrator(
         session_store=research_session_store,
         intent_engine=IntentEngine(),
         scope_engine=ScopeEngine(),
         spec_factory=ExperimentSpecFactory(),
         workflow_repository=workflow_repository,
+        metric_planner=MetricPlanner(),
+        extension_registry=extension_registry,
     )
     application.state.research_session_store = research_session_store
     application.state.research_orchestrator = research_orchestrator
@@ -640,6 +645,24 @@ def create_app(
                 status_code=404, detail="experiment spec not found"
             ) from error
         return stored.spec_dict
+
+    @application.get(
+        "/api/research-sessions/{session_id}/missing-capabilities",
+        tags=["research-sessions"],
+    )
+    def get_missing_capabilities(session_id: str) -> dict:
+        """获取研究会话中的缺失能力列表。"""
+        try:
+            session = research_session_store.get(session_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=404, detail="research session not found"
+            ) from error
+        return {
+            "missing_capabilities": [
+                cap.model_dump() for cap in session.missing_capabilities
+            ]
+        }
 
     @application.post(
         "/api/demo",

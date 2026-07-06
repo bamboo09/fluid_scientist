@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -17,6 +18,7 @@ from fluid_scientist.research.models import (
     DraftReady,
     ExtractedFact,
     IntentAssessment,
+    MissingCapability,
     ResearchPhysicsSpec,
     ResearchSession,
     ResearchSessionStatus,
@@ -28,6 +30,7 @@ from fluid_scientist.research.session_store import SessionStore
 from fluid_scientist.research.spec_factory import ExperimentSpecFactory
 
 if TYPE_CHECKING:
+    from fluid_scientist.code_extension.registry import ExtensionRegistry
     from fluid_scientist.measurement.planner import MetricPlanner
 
 
@@ -50,6 +53,7 @@ class ResearchOrchestrator:
         spec_factory: ExperimentSpecFactory | None = None,
         workflow_repository=None,  # WorkflowRepository Protocol, optional
         metric_planner: MetricPlanner | None = None,
+        extension_registry: ExtensionRegistry | None = None,
     ) -> None:
         """初始化编排器。
 
@@ -61,6 +65,8 @@ class ResearchOrchestrator:
             workflow_repository: 工作流仓库，可选。
             metric_planner: 指标计划器，可选。当提供时，在生成 ExperimentSpec
                 后会调用它生成 MeasurementPlan 并附加到 spec.metrics 中。
+            extension_registry: 代码扩展注册表，可选。当提供时，检测到缺失
+                能力后会自动创建 CodeExtensionSpec 并注册。
         """
         self._store = session_store
         self._intent_engine = intent_engine
@@ -68,6 +74,7 @@ class ResearchOrchestrator:
         self._spec_factory = spec_factory
         self._repository = workflow_repository
         self._metric_planner = metric_planner
+        self._extension_registry = extension_registry
 
     def start_session(
         self,
@@ -223,7 +230,35 @@ class ResearchOrchestrator:
                 )
 
                 # 8a. 调用 MetricPlanner 生成 MeasurementPlan 并附加到 spec.metrics
-                spec = self._attach_measurement_plan(spec, intent, updated_session)
+                spec, unknown_metrics = self._attach_measurement_plan(
+                    spec, intent, updated_session
+                )
+
+                # 8b. 检测缺失能力 — 将未知指标转化为 MissingCapability
+                missing_caps = self._detect_missing_capabilities(
+                    unknown_metrics, updated_session
+                )
+
+                if missing_caps:
+                    # 有阻塞型缺失能力 → 进入 awaiting_code_approval
+                    self._store.update(
+                        session.session_id,
+                        status=ResearchSessionStatus.AWAITING_CODE_APPROVAL,
+                        missing_capabilities=missing_caps,
+                        updated_at=now,
+                    )
+
+                    # 如果有 extension_registry，自动创建 CodeExtensionSpec
+                    if self._extension_registry is not None:
+                        for cap in missing_caps:
+                            if cap.code_extension_allowed:
+                                self._create_code_extension(cap, session)
+
+                    return UnsupportedRequest(
+                        session_id=session.session_id,
+                        reason=f"发现 {len(missing_caps)} 个缺失能力，需要代码扩展",
+                        missing_capabilities=missing_caps,
+                    )
 
                 # 存储到 workflow repository
                 from fluid_scientist.ports import StoredExperimentSpec
@@ -278,13 +313,17 @@ class ResearchOrchestrator:
         spec: Any,
         intent: IntentAssessment,
         session: ResearchSession,
-    ) -> Any:
+    ) -> tuple[Any, list[str]]:
         """调用 MetricPlanner 生成 MeasurementPlan 并附加到 spec.metrics。
 
-        如果未配置 metric_planner，则原样返回 spec。
+        如果未配置 metric_planner，则原样返回 spec 和空 unknown_metrics 列表。
+
+        Returns:
+            (spec, unknown_metrics) 元组。unknown_metrics 为 MetricPlanner
+            未能识别的指标 ID 列表。
         """
         if self._metric_planner is None:
-            return spec
+            return spec, []
 
         try:
             experiment_type = _PHYSICAL_SYSTEM_TO_EXPERIMENT_TYPE.get(
@@ -307,10 +346,75 @@ class ResearchOrchestrator:
                     "unknown_metrics": metric_plan.unknown_metrics,
                 }
             ]
-            return spec.model_copy(update={"metrics": new_metrics})
+            updated_spec = spec.model_copy(update={"metrics": new_metrics})
+            return updated_spec, metric_plan.unknown_metrics
         except Exception:
             # MetricPlanner 失败不应阻塞草稿生成
-            return spec
+            return spec, []
+
+    def _detect_missing_capabilities(
+        self,
+        unknown_metrics: list[str],
+        session: ResearchSession,
+    ) -> list[MissingCapability]:
+        """将未知指标转化为 MissingCapability。
+
+        Args:
+            unknown_metrics: MetricPlanner 未能识别的指标 ID 列表。
+            session: 当前研究会话（保留供将来扩展使用）。
+
+        Returns:
+            MissingCapability 列表，每个未知指标对应一个 blocking 级别的
+            缺失能力。
+        """
+        capabilities: list[MissingCapability] = []
+        for metric_id in unknown_metrics:
+            cap = MissingCapability(
+                capability_id=f"cap-{metric_id}",
+                capability_type="metric_algorithm",
+                description=f"指标 '{metric_id}' 的计算算法",
+                reason=f"Metric Registry 中未找到指标 '{metric_id}' 的定义",
+                severity="blocking",
+                code_extension_allowed=True,
+                suggested_extension_type="post_processing",
+            )
+            capabilities.append(cap)
+        return capabilities
+
+    def _create_code_extension(
+        self,
+        capability: MissingCapability,
+        session: ResearchSession,
+    ) -> None:
+        """为缺失能力创建 CodeExtensionSpec 并注册到 extension_registry。
+
+        使用惰性导入避免循环依赖。注册失败不阻塞主流程。
+
+        Args:
+            capability: 缺失能力描述。
+            session: 当前研究会话（用于扩展元数据）。
+        """
+        from fluid_scientist.code_extension.models import (
+            CodeExtensionSpec,
+            CodeExtensionType,
+            ExtensionStatus,
+        )
+
+        now = datetime.now(UTC).isoformat()
+        extension = CodeExtensionSpec(
+            extension_id=f"ext-{capability.capability_id}",
+            name=capability.description[:200],
+            extension_type=CodeExtensionType.POST_PROCESSING,
+            status=ExtensionStatus.DRAFT,
+            description=capability.reason[:2000],
+            code="# 待实现\n",
+            language="python",
+            created_at=now,
+            updated_at=now,
+        )
+
+        with contextlib.suppress(Exception):
+            self._extension_registry.register(extension)  # type: ignore[union-attr]
 
     def _extract_facts(
         self,

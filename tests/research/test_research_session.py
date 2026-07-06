@@ -15,6 +15,7 @@ from fluid_scientist.research.models import (
 from fluid_scientist.research.orchestrator import ResearchOrchestrator
 from fluid_scientist.research.scope_engine import ScopeEngine
 from fluid_scientist.research.session_store import SessionStore
+from fluid_scientist.research.spec_factory import ExperimentSpecFactory
 
 
 @pytest.fixture()
@@ -245,3 +246,191 @@ def test_confirmed_facts_accumulate(
     categories = {fact.category for fact in session2.confirmed_facts}
     assert "geometry" in categories
     assert "operating_condition" in categories or "material" in categories
+
+
+# --------------------------------------------------------------------------- #
+# 11. test_unknown_metric_creates_missing_capability
+# --------------------------------------------------------------------------- #
+
+
+class _FakeIntentEngineWithUnknownMetric(IntentEngine):
+    """返回包含未知指标的意图引擎，用于测试 MissingCapability 流程。"""
+
+    def assess_intent(  # type: ignore[override]
+        self,
+        user_message: str,
+        accumulated_context: dict,
+        confirmed_facts: list,
+    ) -> IntentAssessment:
+        return IntentAssessment(
+            task_type="new_simulation",
+            research_objective="研究管内流动的 custom_entropy_metric 指标特性",
+            physical_system="internal_flow",
+            requested_metrics=["custom_entropy_metric"],
+            ready_for_draft=True,
+            confidence=0.8,
+        )
+
+
+class _MockRepository:
+    """用于测试的内存 mock 仓库。"""
+
+    def __init__(self) -> None:
+        self._specs: dict[str, object] = {}
+
+    def save_experiment_spec(self, stored_spec: object) -> None:
+        self._specs[stored_spec.experiment_id] = stored_spec  # type: ignore[attr-defined]
+
+    def load_experiment_spec(self, experiment_id: str) -> object | None:
+        return self._specs.get(experiment_id)
+
+
+def test_unknown_metric_creates_missing_capability() -> None:
+    """未知指标应被转化为 MissingCapability 并存储在会话中。"""
+    from fluid_scientist.measurement.planner import MetricPlanner
+
+    store = SessionStore()
+    intent_engine = _FakeIntentEngineWithUnknownMetric()
+    scope_engine = ScopeEngine()
+    spec_factory = ExperimentSpecFactory()
+    repo = _MockRepository()
+
+    orchestrator = ResearchOrchestrator(
+        session_store=store,
+        intent_engine=intent_engine,
+        scope_engine=scope_engine,
+        spec_factory=spec_factory,
+        workflow_repository=repo,
+        metric_planner=MetricPlanner(),
+    )
+
+    # 消息中包含层流和水，以满足 ScopeEngine 的澄清条件
+    message = "研究管内流动的 custom_entropy_metric，流动为层流，介质为水"
+    result = orchestrator.start_session("test-proj", message)
+
+    assert isinstance(result, UnsupportedRequest)
+    assert len(result.missing_capabilities) == 1
+    cap = result.missing_capabilities[0]
+    assert cap.capability_id == "cap-custom_entropy_metric"
+    assert cap.capability_type == "metric_algorithm"
+    assert cap.severity == "blocking"
+    assert cap.code_extension_allowed is True
+
+    # 验证会话中也保存了 missing_capabilities
+    session = store.get(result.session_id)
+    assert len(session.missing_capabilities) == 1
+    assert session.missing_capabilities[0].capability_id == "cap-custom_entropy_metric"
+
+
+# --------------------------------------------------------------------------- #
+# 12. test_missing_capability_blocks_draft_ready
+# --------------------------------------------------------------------------- #
+
+
+def test_missing_capability_blocks_draft_ready() -> None:
+    """有阻塞型缺失能力时应返回 UnsupportedRequest 而非 DraftReady。"""
+    from fluid_scientist.measurement.planner import MetricPlanner
+    from fluid_scientist.research.models import ResearchSessionStatus
+
+    store = SessionStore()
+    intent_engine = _FakeIntentEngineWithUnknownMetric()
+    scope_engine = ScopeEngine()
+    spec_factory = ExperimentSpecFactory()
+    repo = _MockRepository()
+
+    orchestrator = ResearchOrchestrator(
+        session_store=store,
+        intent_engine=intent_engine,
+        scope_engine=scope_engine,
+        spec_factory=spec_factory,
+        workflow_repository=repo,
+        metric_planner=MetricPlanner(),
+    )
+
+    message = "研究管内流动的 custom_entropy_metric，流动为层流，介质为水"
+    result = orchestrator.start_session("test-proj", message)
+
+    # 不应是 DraftReady
+    assert not isinstance(result, DraftReady)
+    assert isinstance(result, UnsupportedRequest)
+    assert "缺失能力" in result.reason
+
+    # 会话状态应为 AWAITING_CODE_APPROVAL
+    session = store.get(result.session_id)
+    assert session.status == ResearchSessionStatus.AWAITING_CODE_APPROVAL
+
+
+# --------------------------------------------------------------------------- #
+# 13. test_missing_capability_triggers_code_extension
+# --------------------------------------------------------------------------- #
+
+
+def test_missing_capability_triggers_code_extension() -> None:
+    """有 extension_registry 时应自动创建并注册 CodeExtensionSpec。"""
+    from fluid_scientist.code_extension.models import ExtensionStatus
+    from fluid_scientist.code_extension.registry import ExtensionRegistry
+    from fluid_scientist.measurement.planner import MetricPlanner
+
+    store = SessionStore()
+    intent_engine = _FakeIntentEngineWithUnknownMetric()
+    scope_engine = ScopeEngine()
+    spec_factory = ExperimentSpecFactory()
+    repo = _MockRepository()
+    registry = ExtensionRegistry()
+
+    orchestrator = ResearchOrchestrator(
+        session_store=store,
+        intent_engine=intent_engine,
+        scope_engine=scope_engine,
+        spec_factory=spec_factory,
+        workflow_repository=repo,
+        metric_planner=MetricPlanner(),
+        extension_registry=registry,
+    )
+
+    message = "研究管内流动的 custom_entropy_metric，流动为层流，介质为水"
+    result = orchestrator.start_session("test-proj", message)
+
+    assert isinstance(result, UnsupportedRequest)
+
+    # 验证 CodeExtensionSpec 已注册
+    extension = registry.get("ext-cap-custom_entropy_metric")
+    assert extension is not None
+    assert extension.extension_type.value == "post_processing"
+    assert extension.status == ExtensionStatus.DRAFT
+    assert extension.language == "python"
+    assert "custom_entropy_metric" in extension.name
+
+
+# --------------------------------------------------------------------------- #
+# 14. test_supported_metric_no_missing_capability
+# --------------------------------------------------------------------------- #
+
+
+def test_supported_metric_no_missing_capability() -> None:
+    """标准指标（如 pressure_drop）不应产生 MissingCapability，应返回 DraftReady。"""
+    from fluid_scientist.measurement.planner import MetricPlanner
+
+    store = SessionStore()
+    intent_engine = IntentEngine()  # 使用真实的 fake 模式引擎
+    scope_engine = ScopeEngine()
+    spec_factory = ExperimentSpecFactory()
+    repo = _MockRepository()
+
+    orchestrator = ResearchOrchestrator(
+        session_store=store,
+        intent_engine=intent_engine,
+        scope_engine=scope_engine,
+        spec_factory=spec_factory,
+        workflow_repository=repo,
+        metric_planner=MetricPlanner(),
+    )
+
+    # pressure_drop 是标准指标，不应触发 MissingCapability
+    message = "研究弯管流动的压降，流动为层流，介质为水，管道直径0.05米"
+    result = orchestrator.start_session("test-proj", message)
+
+    assert isinstance(result, DraftReady)
+    # 会话中不应有 missing_capabilities
+    session = store.get(result.session_id)
+    assert len(session.missing_capabilities) == 0
