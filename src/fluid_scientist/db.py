@@ -109,6 +109,24 @@ class CompiledExperimentRow(Base):
     created_at: Mapped[str] = mapped_column(String(64), nullable=False)
 
 
+class ExperimentSpecRow(Base):
+    __tablename__ = "experiment_specs"
+
+    experiment_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    project_id: Mapped[str | None] = mapped_column(
+        ForeignKey("projects.project_id", ondelete="CASCADE"),
+        nullable=True, index=True,
+    )
+    schema_version: Mapped[str] = mapped_column(String(16), nullable=False)
+    experiment_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    task_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    interaction_mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    spec_json: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[str] = mapped_column(String(64), nullable=False)
+    updated_at: Mapped[str] = mapped_column(String(64), nullable=False)
+
+
 class CandidateTemplateRow(Base):
     __tablename__ = "candidate_templates"
 

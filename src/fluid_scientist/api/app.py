@@ -85,6 +85,20 @@ from fluid_scientist.experiment_planning.result_analysis import (
     ResultAnalyst,
     create_result_analyst,
 )
+from fluid_scientist.experiment_spec.dependency import (
+    change_summary,
+    propagate_change,
+)
+from fluid_scientist.experiment_spec.migration import migrate_plan
+from fluid_scientist.experiment_spec.models import (
+    ExperimentSpec,
+)
+from fluid_scientist.experiment_spec.state_machine import (
+    TransitionError as SpecTransitionError,
+)
+from fluid_scientist.experiment_spec.state_machine import (
+    assert_transition as assert_spec_transition,
+)
 from fluid_scientist.operations import (
     OperationKind,
     OperationRecord,
@@ -96,6 +110,7 @@ from fluid_scientist.ports import (
     StoredCandidateTemplate,
     StoredCompiledExperiment,
     StoredExperimentPlan,
+    StoredExperimentSpec,
     WorkflowRepository,
 )
 from fluid_scientist.services.model_configuration import (
@@ -1517,6 +1532,200 @@ def create_app(
             created_at=template.created_at,
             updated_at=template.updated_at,
         )
+
+    # ------------------------------------------------------------------
+    # Experiment Spec (structured parameter workbench)
+    # ------------------------------------------------------------------
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs",
+        status_code=status.HTTP_201_CREATED,
+        tags=["experiment-specs"],
+    )
+    def create_experiment_spec(
+        project_id: str,
+        body: dict,
+    ) -> dict:
+        """Create a new structured experiment spec from a plan or scratch."""
+        import json
+        from uuid import uuid4
+
+        experiment_id = f"exp-{uuid4().hex[:16]}"
+        now = datetime.now(UTC).isoformat()
+
+        # If plan_id provided, migrate from existing plan
+        plan_id = body.get("plan_id")
+        if plan_id:
+            stored = workflow_repository.load_experiment_plan(plan_id)
+            if stored is None:
+                raise HTTPException(status_code=404, detail="plan not found")
+            from fluid_scientist.experiment_planning.models import ExperimentPlan
+            plan = ExperimentPlan.model_validate_json(stored.plan_json)
+            spec = migrate_plan(plan, experiment_id, project_id)
+        else:
+            # Create from body directly
+            try:
+                spec = ExperimentSpec(**body)
+                spec = spec.model_copy(update={
+                "experiment_id": experiment_id,
+            })
+            except Exception as e:
+                raise HTTPException(status_code=422, detail=str(e)) from e
+
+        stored_spec = StoredExperimentSpec(
+            experiment_id=experiment_id,
+            project_id=project_id,
+            schema_version=spec.schema_version,
+            experiment_version=spec.experiment_version,
+            status=spec.status.value,
+            task_type=spec.task_type.value,
+            interaction_mode=spec.interaction_mode.value,
+            spec_json=spec.model_dump_json(),
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            workflow_repository.save_experiment_spec(stored_spec)
+        except Exception as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        return json.loads(stored_spec.spec_json)
+
+    @application.get(
+        "/api/projects/{project_id}/experiment-specs",
+        tags=["experiment-specs"],
+    )
+    def list_experiment_specs(
+        project_id: str,
+        status_filter: str | None = None,
+    ) -> list[dict]:
+        """List experiment specs for a project."""
+        import json
+        specs = workflow_repository.list_experiment_specs(
+            project_id=project_id, status=status_filter
+        )
+        return [json.loads(s.spec_json) for s in specs]
+
+    @application.get(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}",
+        tags=["experiment-specs"],
+    )
+    def get_experiment_spec(
+        project_id: str,
+        experiment_id: str,
+    ) -> dict:
+        """Get a single experiment spec."""
+        import json
+        stored = workflow_repository.load_experiment_spec(experiment_id)
+        if stored is None or stored.project_id != project_id:
+            raise HTTPException(status_code=404, detail="experiment spec not found")
+        return json.loads(stored.spec_json)
+
+    @application.patch(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/parameters/{parameter_id}",
+        tags=["experiment-specs"],
+    )
+    def update_parameter(
+        project_id: str,
+        experiment_id: str,
+        parameter_id: str,
+        body: dict,
+    ) -> dict:
+        """Update a single parameter and propagate dependencies."""
+        import json
+        stored = workflow_repository.load_experiment_spec(experiment_id)
+        if stored is None or stored.project_id != project_id:
+            raise HTTPException(status_code=404, detail="experiment spec not found")
+
+        spec = ExperimentSpec.model_validate_json(stored.spec_json)
+
+        # Check if spec is editable
+        from fluid_scientist.experiment_spec.state_machine import is_editable
+        status_val = spec.status.value if hasattr(spec.status, 'value') else str(spec.status)
+        if not is_editable(status_val):
+            raise HTTPException(
+                status_code=422,
+                detail="experiment spec is not editable in current state"
+            )
+
+        new_value = body.get("value")
+        if new_value is None:
+            raise HTTPException(status_code=422, detail="value is required")
+
+        try:
+            updated_spec, result = propagate_change(spec, parameter_id, new_value)
+        except KeyError as e:
+            raise HTTPException(status_code=404, detail=str(e)) from e
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
+        new_version = (
+            stored.experiment_version + 1
+            if result.needs_new_version
+            else stored.experiment_version
+        )
+        now = datetime.now(UTC).isoformat()
+        updated_stored = workflow_repository.replace_experiment_spec(
+            experiment_id,
+            spec_json=updated_spec.model_dump_json(),
+            experiment_version=new_version,
+            status=stored.status,
+            updated_at=now,
+        )
+        response = json.loads(updated_stored.spec_json)
+        response["_propagation"] = {
+            "directly_modified": result.directly_modified,
+            "auto_recomputed": result.auto_recomputed,
+            "requires_choice": result.requires_choice,
+            "stale_artifacts": result.stale_artifacts,
+            "new_warnings": result.new_warnings,
+            "needs_new_version": result.needs_new_version,
+            "summary": change_summary(result),
+        }
+        return response
+
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/transition",
+        tags=["experiment-specs"],
+    )
+    def transition_experiment_spec(
+        project_id: str,
+        experiment_id: str,
+        body: dict,
+    ) -> dict:
+        """Transition experiment spec to a new status."""
+        import json
+        target = body.get("target_status")
+        if not target:
+            raise HTTPException(status_code=422, detail="target_status is required")
+
+        stored = workflow_repository.load_experiment_spec(experiment_id)
+        if stored is None or stored.project_id != project_id:
+            raise HTTPException(status_code=404, detail="experiment spec not found")
+
+        try:
+            assert_spec_transition(stored.status, target)
+        except SpecTransitionError as e:
+            raise HTTPException(status_code=422, detail=str(e)) from e
+
+        # If transitioning to ready, check critical params
+        if target == "ready":
+            spec = ExperimentSpec.model_validate_json(stored.spec_json)
+            unresolved = spec.critical_unresolved()
+            if unresolved:
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        f"cannot transition to ready: {len(unresolved)}"
+                        " critical parameters unresolved: "
+                        + ", ".join(p.parameter_id for p in unresolved)
+                    )
+                )
+
+        updated = workflow_repository.update_experiment_spec_status(
+            experiment_id,
+            new_status=target,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        return json.loads(updated.spec_json)
 
     return application
 

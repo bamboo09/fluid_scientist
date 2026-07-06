@@ -26,6 +26,7 @@ from fluid_scientist.db import (
     CandidateTemplateRow,
     CompiledExperimentRow,
     ExperimentPlanRow,
+    ExperimentSpecRow,
     ExternalJobRow,
     GeneratedCaseDraftRow,
     OperationRow,
@@ -43,6 +44,7 @@ from fluid_scientist.ports import (
     StoredCandidateTemplate,
     StoredCompiledExperiment,
     StoredExperimentPlan,
+    StoredExperimentSpec,
     StoredGeneratedCaseDraft,
     StoredOperation,
     StoredWorkflow,
@@ -564,6 +566,113 @@ class SQLWorkflowRepository:
             archive_sha256=row.archive_sha256,
             archive=row.archive,
             preview_json=row.preview_json,
+        )
+
+    # ------------------------------------------------------------------
+    # Experiment spec (structured experiment specification)
+    # ------------------------------------------------------------------
+    def save_experiment_spec(self, spec: StoredExperimentSpec) -> None:
+        row = ExperimentSpecRow(
+            experiment_id=spec.experiment_id,
+            project_id=spec.project_id,
+            schema_version=spec.schema_version,
+            experiment_version=spec.experiment_version,
+            status=spec.status,
+            task_type=spec.task_type,
+            interaction_mode=spec.interaction_mode,
+            spec_json=spec.spec_json,
+            created_at=spec.created_at,
+            updated_at=spec.updated_at,
+        )
+        with self._sessions() as session:
+            session.add(row)
+            session.commit()
+
+    def load_experiment_spec(self, experiment_id: str) -> StoredExperimentSpec | None:
+        with self._sessions() as session:
+            row = session.scalar(
+                select(ExperimentSpecRow).where(
+                    ExperimentSpecRow.experiment_id == experiment_id
+                )
+            )
+            if row is None:
+                return None
+            return self._stored_experiment_spec(row)
+
+    def list_experiment_specs(
+        self, *, project_id: str | None = None, status: str | None = None
+    ) -> list[StoredExperimentSpec]:
+        stmt = select(ExperimentSpecRow).order_by(
+            ExperimentSpecRow.created_at.desc()
+        )
+        if project_id is not None:
+            stmt = stmt.where(ExperimentSpecRow.project_id == project_id)
+        if status is not None:
+            stmt = stmt.where(ExperimentSpecRow.status == status)
+        with self._sessions() as session:
+            rows = session.scalars(stmt).all()
+            return [self._stored_experiment_spec(r) for r in rows]
+
+    def update_experiment_spec_status(
+        self,
+        experiment_id: str,
+        *,
+        new_status: str,
+        updated_at: str,
+    ) -> StoredExperimentSpec:
+        with self._sessions() as session:
+            row = session.scalar(
+                select(ExperimentSpecRow).where(
+                    ExperimentSpecRow.experiment_id == experiment_id
+                )
+            )
+            if row is None:
+                raise KeyError(f"experiment spec {experiment_id} not found")
+            row.status = new_status
+            row.updated_at = updated_at
+            session.commit()
+            session.refresh(row)
+            return self._stored_experiment_spec(row)
+
+    def replace_experiment_spec(
+        self,
+        experiment_id: str,
+        *,
+        spec_json: str,
+        experiment_version: int,
+        status: str,
+        updated_at: str,
+    ) -> StoredExperimentSpec:
+        """Replace spec_json and version (used when updating parameters)."""
+        with self._sessions() as session:
+            row = session.scalar(
+                select(ExperimentSpecRow).where(
+                    ExperimentSpecRow.experiment_id == experiment_id
+                )
+            )
+            if row is None:
+                raise KeyError(f"experiment spec {experiment_id} not found")
+            row.spec_json = spec_json
+            row.experiment_version = experiment_version
+            row.status = status
+            row.updated_at = updated_at
+            session.commit()
+            session.refresh(row)
+            return self._stored_experiment_spec(row)
+
+    @staticmethod
+    def _stored_experiment_spec(row: ExperimentSpecRow) -> StoredExperimentSpec:
+        return StoredExperimentSpec(
+            experiment_id=row.experiment_id,
+            project_id=row.project_id,
+            schema_version=row.schema_version,
+            experiment_version=row.experiment_version,
+            status=row.status,
+            task_type=row.task_type,
+            interaction_mode=row.interaction_mode,
+            spec_json=row.spec_json,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
         )
 
     # ------------------------------------------------------------------

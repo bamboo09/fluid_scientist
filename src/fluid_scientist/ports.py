@@ -130,6 +130,32 @@ class StoredGeneratedCaseDraft:
 
 
 @dataclass(frozen=True)
+class StoredExperimentSpec:
+    """Immutable persistence record for a structured experiment spec."""
+
+    experiment_id: str
+    project_id: str | None
+    schema_version: str
+    experiment_version: int
+    status: str
+    task_type: str
+    interaction_mode: str
+    spec_json: str
+    created_at: str
+    updated_at: str
+
+    def __post_init__(self) -> None:
+        for name in ("experiment_id", "schema_version", "status", "task_type", "interaction_mode"):
+            v = getattr(self, name)
+            if not isinstance(v, str) or not v.strip():
+                raise ValueError(f"{name} must be a non-empty string")
+        if not isinstance(self.experiment_version, int) or self.experiment_version < 1:
+            raise ValueError("experiment_version must be a positive integer")
+        if not isinstance(self.spec_json, str) or not self.spec_json.strip():
+            raise ValueError("spec_json must be a non-empty string")
+
+
+@dataclass(frozen=True)
 class StoredCandidateTemplate:
     """Immutable persistence record for a candidate template."""
 
