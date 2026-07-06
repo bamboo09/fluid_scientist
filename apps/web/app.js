@@ -1341,7 +1341,14 @@ function bindEvents() {
     refreshComposer();
   });
   modelProvider?.addEventListener("change", () => {
-    if (modelId) modelId.value = modelDefaults[modelProvider.value] || "";
+    if (!modelId) return;
+    const current = modelId.value.trim();
+    const allDefaults = Object.values(modelDefaults);
+    const isEmpty = !current;
+    const isOtherProviderDefault = allDefaults.includes(current) && current !== modelDefaults[modelProvider.value];
+    if (isEmpty || isOtherProviderDefault) {
+      modelId.value = modelDefaults[modelProvider.value] || "";
+    }
   });
   byId("configure-model")?.addEventListener("click", configureModel);
   byId("custom-case-file")?.addEventListener("change", () => {

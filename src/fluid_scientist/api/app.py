@@ -506,7 +506,7 @@ def create_app(
 
     application = FastAPI(
         title="Fluid Scientist",
-        version="0.2.0",
+        version="0.3.0",
         description="Evidence-grounded fluid mechanics research workflow",
         lifespan=lifespan,
     )
