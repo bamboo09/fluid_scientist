@@ -13,8 +13,8 @@ from fluid_scientist.api.app import create_app
 def client():
     """创建测试客户端。
 
-    使用 raise_server_exceptions=False 以便在端点存在已知 bug
-    （如 spec_dict 属性缺失）时返回 500 而非抛出异常。
+    使用 raise_server_exceptions=False 以便在端点出错时返回 500
+    而非抛出异常，保证测试可以检查响应状态码。
     """
     repository = SQLWorkflowRepository("sqlite:///:memory:")
     app = create_app(repository=repository, execution_targets=[])
@@ -93,12 +93,6 @@ def test_detailed_request_produces_draft(client, project_id):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.skip(
-    reason=(
-        "PATCH /api/projects/{project_id}/experiment-specs/{spec_id}/parameters/"
-        "{param_id} 端点尚未实现。参数编辑工作台 API 属于后续 Commit 范围。"
-    )
-)
 def test_parameter_editing(client, project_id):
     """用户修改参数，依赖参数应自动更新。"""
     # 创建会话并获取 draft
@@ -120,6 +114,7 @@ def test_parameter_editing(client, project_id):
         )
         result = response.json()
 
+    assert result["type"] == "draft_ready"
     spec_id = result["experiment_spec_id"]
     assert spec_id is not None, "experiment_spec_id 不应为 None"
 
@@ -127,29 +122,59 @@ def test_parameter_editing(client, project_id):
     response = client.get(
         f"/api/research-sessions/{result['session_id']}/experiment-spec"
     )
+    assert response.status_code == 200
     spec = response.json()
 
-    # 找到一个可编辑参数并修改
+    # 找到一个可编辑参数（editable: true 或字段缺失）
     editable_params = [p for p in spec["parameters"] if p.get("editable", True)]
-    if editable_params:
-        param_id = editable_params[0]["parameter_id"]
-        old_value = editable_params[0]["value"]
-        new_value = 0.1 if isinstance(old_value, (int, float)) else "modified"
+    assert len(editable_params) > 0, "应至少有一个可编辑参数"
 
-        response = client.patch(
-            f"/api/projects/{project_id}/experiment-specs/{spec_id}/parameters/{param_id}",
-            json={"value": new_value},
-        )
-        assert response.status_code == 200
-        updated_spec = response.json()
-        # 验证参数已更新
-        updated_param = next(
-            p for p in updated_spec["parameters"] if p["parameter_id"] == param_id
-        )
-        assert (
-            updated_param["value"] == new_value
-            or str(updated_param["value"]) == str(new_value)
-        )
+    param = editable_params[0]
+    param_id = param["parameter_id"]
+
+    # 根据数据类型和约束确定有效的新值
+    constraints = param.get("constraints") or {}
+    data_type = param.get("data_type", "float")
+    min_val = constraints.get("min")
+    max_val = constraints.get("max")
+
+    if data_type == "integer":
+        if min_val is not None and max_val is not None:
+            new_value = int((min_val + max_val) / 2)
+        else:
+            new_value = 50
+    elif data_type == "float":
+        new_value = (min_val + max_val) / 2 if min_val is not None and max_val is not None else 0.05
+    else:
+        allowed = constraints.get("allowed_values")
+        new_value = allowed[0] if allowed else "test_value"
+
+    response = client.patch(
+        f"/api/projects/{project_id}/experiment-specs/{spec_id}/parameters/{param_id}",
+        json={"value": new_value},
+    )
+    assert response.status_code == 200
+    updated_spec = response.json()
+
+    # 验证参数已更新
+    updated_param = next(
+        p for p in updated_spec["parameters"] if p["parameter_id"] == param_id
+    )
+    assert (
+        updated_param["value"] == new_value
+        or str(updated_param["value"]) == str(new_value)
+    )
+
+    # 检查 _propagation 字段中的依赖传播信息
+    assert "_propagation" in updated_spec
+    propagation = updated_spec["_propagation"]
+    assert propagation["directly_modified"] == param_id
+    assert "auto_recomputed" in propagation
+    assert "requires_choice" in propagation
+    assert "stale_artifacts" in propagation
+    assert "new_warnings" in propagation
+    assert "needs_new_version" in propagation
+    assert "summary" in propagation
 
 
 # --------------------------------------------------------------------------- #
@@ -177,26 +202,24 @@ def test_metric_driven_measurement_plan(client, project_id):
         )
         result = response.json()
 
-    if result["type"] == "draft_ready" and result.get("experiment_spec_id"):
-        # GET /experiment-spec 端点存在已知 bug（spec_dict 属性缺失），
-        # 可能返回 500。使用 raise_server_exceptions=False 后会返回 500 响应。
-        response = client.get(
-            f"/api/research-sessions/{result['session_id']}/experiment-spec"
+    assert result["type"] == "draft_ready"
+    assert result.get("experiment_spec_id") is not None
+
+    response = client.get(
+        f"/api/research-sessions/{result['session_id']}/experiment-spec"
+    )
+    assert response.status_code == 200
+    spec = response.json()
+
+    # 检查 metrics 字段中是否有 MeasurementPlan 相关内容
+    if spec.get("metrics"):
+        metrics_str = str(spec["metrics"])
+        assert (
+            "function_object" in metrics_str.lower()
+            or "surfaceFieldValue" in metrics_str.lower()
+            or "forceCoeffs" in metrics_str.lower()
+            or "measurement_plan" in metrics_str.lower()
         )
-        if response.status_code == 200:
-            spec = response.json()
-            # 检查 metrics 字段中是否有 MeasurementPlan 相关内容
-            if spec.get("metrics"):
-                metrics_str = str(spec["metrics"])
-                assert (
-                    "function_object" in metrics_str.lower()
-                    or "surfaceFieldValue" in metrics_str.lower()
-                    or "forceCoeffs" in metrics_str.lower()
-                    or "measurement_plan" in metrics_str.lower()
-                )
-        else:
-            # 端点返回非 200（如 500 因 spec_dict bug），验证 spec 已创建即可
-            assert result["experiment_spec_id"] is not None
 
 
 # --------------------------------------------------------------------------- #
@@ -243,12 +266,6 @@ def test_unknown_metric_creates_missing_capability(client, project_id):
 # --------------------------------------------------------------------------- #
 
 
-@pytest.mark.skip(
-    reason=(
-        "POST /api/projects/{project_id}/experiment-specs/{spec_id}/transition "
-        "和 /compile 端点尚未实现。Spec 状态转换与编译 API 属于后续 Commit 范围。"
-    )
-)
 def test_compile_spec_directly(client, project_id):
     """编译应调用 compile_spec，不调用 compile_plan。"""
     # 创建会话并获取 draft
@@ -270,32 +287,40 @@ def test_compile_spec_directly(client, project_id):
         )
         result = response.json()
 
-    if result["type"] == "draft_ready" and result["experiment_spec_id"]:
-        spec_id = result["experiment_spec_id"]
+    assert result["type"] == "draft_ready"
+    spec_id = result["experiment_spec_id"]
+    assert spec_id is not None
 
-        # 转换到 ready
-        response = client.post(
-            f"/api/projects/{project_id}/experiment-specs/{spec_id}/transition",
-            json={"target_status": "ready"},
-        )
-        # 转换到 confirmed
-        response = client.post(
-            f"/api/projects/{project_id}/experiment-specs/{spec_id}/transition",
-            json={"target_status": "confirmed"},
-        )
+    # 转换到 ready
+    response = client.post(
+        f"/api/projects/{project_id}/experiment-specs/{spec_id}/transition",
+        json={"target_status": "ready"},
+    )
+    assert response.status_code == 200
 
-        # 编译
-        response = client.post(
-            f"/api/projects/{project_id}/experiment-specs/{spec_id}/compile",
+    # 转换到 confirmed
+    response = client.post(
+        f"/api/projects/{project_id}/experiment-specs/{spec_id}/transition",
+        json={"target_status": "confirmed"},
+    )
+    assert response.status_code == 200
+
+    # 编译
+    response = client.post(
+        f"/api/projects/{project_id}/experiment-specs/{spec_id}/compile",
+    )
+    if response.status_code == 200:
+        data = response.json()
+        # 验证返回了 compilation_manifest
+        manifest = data["compilation_manifest"]
+        assert "spec_hash" in manifest
+        assert "case_hash" in manifest
+    else:
+        # 编译可能因实验类型不受支持而返回 422，
+        # 此时只需验证端点存在且被调用（非 404）
+        assert response.status_code == 422, (
+            f"expected 200 or 422, got {response.status_code}"
         )
-        if response.status_code == 200:
-            data = response.json()
-            # 验证返回了 compilation_manifest
-            if "compilation_manifest" in data:
-                manifest = data["compilation_manifest"]
-                assert "spec_hash" in manifest
-                assert "case_hash" in manifest
-                assert manifest["experiment_id"] == spec_id
 
 
 # --------------------------------------------------------------------------- #

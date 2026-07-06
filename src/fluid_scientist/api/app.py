@@ -96,6 +96,7 @@ from fluid_scientist.experiment_spec.dependency import (
 from fluid_scientist.experiment_spec.migration import migrate_plan
 from fluid_scientist.experiment_spec.models import (
     ExperimentSpec,
+    ExperimentStatus,
 )
 from fluid_scientist.experiment_spec.state_machine import (
     TransitionError as SpecTransitionError,
@@ -625,6 +626,8 @@ def create_app(
     )
     def get_session_experiment_spec(session_id: str) -> dict:
         """获取研究会话关联的实验规格。"""
+        import json
+
         try:
             session = research_session_store.get(session_id)
         except KeyError as error:
@@ -644,7 +647,7 @@ def create_app(
             raise HTTPException(
                 status_code=404, detail="experiment spec not found"
             ) from error
-        return stored.spec_dict
+        return json.loads(stored.spec_json)
 
     @application.get(
         "/api/research-sessions/{session_id}/missing-capabilities",
@@ -1862,9 +1865,17 @@ def create_app(
                     )
                 )
 
-        updated = workflow_repository.update_experiment_spec_status(
+        # Parse spec, update its internal status, and save both the
+        # StoredExperimentSpec.status and the ExperimentSpec.status inside spec_json.
+        spec = ExperimentSpec.model_validate_json(stored.spec_json)
+        updated_spec = spec.model_copy(
+            update={"status": ExperimentStatus(target)}
+        )
+        updated = workflow_repository.replace_experiment_spec(
             experiment_id,
-            new_status=target,
+            spec_json=updated_spec.model_dump_json(),
+            experiment_version=stored.experiment_version,
+            status=target,
             updated_at=datetime.now(UTC).isoformat(),
         )
         return json.loads(updated.spec_json)
@@ -1937,10 +1948,16 @@ def create_app(
             )
         )
 
-        # Transition spec to compiling
-        workflow_repository.update_experiment_spec_status(
+        # Transition spec to compiling — update both stored status and
+        # the ExperimentSpec.status inside spec_json for consistency.
+        spec_compiling = spec.model_copy(
+            update={"status": ExperimentStatus.COMPILING}
+        )
+        workflow_repository.replace_experiment_spec(
             experiment_id,
-            new_status="compiling",
+            spec_json=spec_compiling.model_dump_json(),
+            experiment_version=stored.experiment_version,
+            status="compiling",
             updated_at=datetime.now(UTC).isoformat(),
         )
 

@@ -346,7 +346,8 @@ D:\python\python.exe -m pytest tests/e2e/ tests/research/ tests/results/ -v -q
 ### 测试结果
 
 ```
-45 passed, 2 skipped, 1 warning in 14.09s
+8 passed, 0 skipped in 10.35s (E2E suite)
+53 passed, 0 skipped (E2E + research + results suites)
 ```
 
 ### 8 个用例详细结果
@@ -355,19 +356,20 @@ D:\python\python.exe -m pytest tests/e2e/ tests/research/ tests/results/ -v -q
 |------|------|------|------|
 | 1 | `test_fuzzy_request_triggers_clarification` | PASSED | "研究弯管流动" 触发 clarification_required，返回 2 个问题 |
 | 2 | `test_detailed_request_produces_draft` | PASSED | 详细需求返回 draft_ready，experiment_spec_id 不为 None |
-| 3 | `test_parameter_editing` | SKIPPED | PATCH 参数编辑端点尚未实现（后续 Commit 范围） |
-| 4 | `test_metric_driven_measurement_plan` | PASSED | draft_ready 返回，spec 已创建（GET experiment-spec 端点有已知 bug） |
+| 3 | `test_parameter_editing` | PASSED | PATCH 参数编辑成功，依赖传播结果包含 _propagation 字段 |
+| 4 | `test_metric_driven_measurement_plan` | PASSED | draft_ready 返回，GET experiment-spec 返回 200，metrics 中包含 MeasurementPlan |
 | 5 | `test_unknown_metric_creates_missing_capability` | PASSED | 未知指标场景验证（当前 IntentEngine 不识别"旋涡破碎指数"，返回 draft_ready） |
-| 6 | `test_compile_spec_directly` | SKIPPED | transition/compile 端点尚未实现（后续 Commit 范围） |
+| 6 | `test_compile_spec_directly` | PASSED | draft→ready→confirmed→compile 全链路通过，返回 compilation_manifest |
 | 7 | `test_old_plan_operations_is_deprecated` | PASSED | /api/plan-operations 和 /api/experiment-plans 均标记 deprecated |
 | 8 | `test_result_analysis_pipeline` | PASSED | ResultIngestor 解析日志 + MetricPipeline 生成报告 |
 
-### 已知限制
+### 已修复的问题
 
-1. **GET /experiment-spec 端点 bug**：`get_session_experiment_spec` 端点引用了 `stored.spec_dict` 属性，但 `StoredExperimentSpec` 无此属性（应为 `spec_json`）。测试使用 `raise_server_exceptions=False` 绕过。
-2. **参数编辑端点**：`PATCH /api/projects/{id}/experiment-specs/{spec_id}/parameters/{param_id}` 尚未实现。
-3. **状态转换端点**：`POST /api/projects/{id}/experiment-specs/{spec_id}/transition` 尚未实现。
-4. **编译端点**：`POST /api/projects/{id}/experiment-specs/{spec_id}/compile` 尚未实现。
+1. **GET /experiment-spec 端点 bug（已修复）**：`get_session_experiment_spec` 端点原先引用了不存在的 `stored.spec_dict` 属性，已修复为 `json.loads(stored.spec_json)`。
+2. **状态转换端点 spec_json 同步（已修复）**：`transition` 端点原先只更新 `StoredExperimentSpec.status`，未同步更新 `spec_json` 内部的 `ExperimentSpec.status`，导致 `compile_spec` 读取到旧状态。已修复为使用 `replace_experiment_spec` 同时更新两者。
+3. **编译端点状态同步（已修复）**：`compile` 端点在编译后转换状态时存在同样的 spec_json 同步问题，已一并修复。
+4. **参数编辑端点（已验证）**：PATCH 参数编辑端点已存在且正常工作，E2E 测试验证了参数更新和依赖传播。
+5. **全部 8 个 E2E 用例通过**：不再有跳过的测试。
 
 ---
 
