@@ -97,6 +97,7 @@ class AppSettings(BaseSettings):
     )
 
     app_mode: AppMode = AppMode.FAKE
+    research_workflow_v2: bool = True  # Feature flag for new workflow
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     data_node: NodeSettings = Field(default_factory=NodeSettings)
