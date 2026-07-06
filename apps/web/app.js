@@ -50,6 +50,7 @@ let selectedTarget = localStorage.getItem(storageKeys.targetId) || "";
 let currentProject = null;
 let currentPlan = null;
 let currentCompilation = null;
+let currentSpec = null;
 let activeTask = null;
 let latestResults = null;
 let postprocessSessionVersion = 0;
@@ -100,6 +101,52 @@ async function requestJson(url, options = {}) {
   return payload;
 }
 
+const specStatusLabels = {
+  draft: "草稿",
+  ready: "就绪",
+  confirmed: "已确认",
+  compiling: "编译中",
+  running: "运行中",
+  completed: "已完成",
+  failed: "失败",
+  rejected: "已拒绝",
+  awaiting_code_approval: "等待代码审批",
+};
+
+const sourceLabels = {
+  user: "用户输入",
+  derived: "派生计算",
+  system_recommended: "系统推荐",
+  template_default: "模板默认",
+  literature: "文献参考",
+  generated_by_code: "代码生成",
+  unknown: "未知",
+};
+
+const criticalityLabels = {
+  critical: "关键",
+  high: "高",
+  medium: "中",
+  low: "低",
+};
+
+const paramStatusLabels = {
+  pending: "待确认",
+  accepted: "已接受",
+  modified: "已修改",
+  rejected: "已拒绝",
+};
+
+const categoryLabels = {
+  geometry: "几何",
+  boundary_condition: "边界条件",
+  physics: "物理属性",
+  material: "材料属性",
+  numerics: "数值参数",
+  mesh: "网格",
+  other: "其他",
+};
+
 function persist(key, value) {
   if (!value) {
     localStorage.removeItem(key);
@@ -110,6 +157,7 @@ function persist(key, value) {
   else if (key === storageKeys.caseId) localStorage.setItem(storageKeys.caseId, value);
   else if (key === storageKeys.targetId) localStorage.setItem(storageKeys.targetId, value);
   else if (key === storageKeys.operationId) localStorage.setItem(storageKeys.operationId, value);
+  else if (key === storageKeys.specId) localStorage.setItem(storageKeys.specId, value);
 }
 
 function setStatus(message) {
@@ -144,12 +192,13 @@ function clearResearchSession() {
   currentProject = null;
   currentPlan = null;
   currentCompilation = null;
+  currentSpec = null;
   activeTask = null;
   latestResults = null;
   postprocessSessionVersion += 1;
   activeOperation = null;
   activeOperationId = "";
-  for (const key of [storageKeys.projectId, storageKeys.planId, storageKeys.caseId, storageKeys.operationId]) {
+  for (const key of [storageKeys.projectId, storageKeys.planId, storageKeys.caseId, storageKeys.operationId, storageKeys.specId]) {
     localStorage.removeItem(key);
   }
   if (operationCard) {
@@ -158,7 +207,7 @@ function clearResearchSession() {
   }
   lastOperationAnnouncement = "";
   if (operationAnnouncementNode) operationAnnouncementNode.textContent = "";
-  for (const id of ["active-plan-card", "active-task-card"]) byId(id)?.remove();
+  for (const id of ["active-plan-card", "active-task-card", "active-spec-card"]) byId(id)?.remove();
   if (byId("report")) byId("report").hidden = true;
   if (researchQuestionCard) researchQuestionCard.hidden = true;
   if (welcomeMessage) welcomeMessage.hidden = false;
@@ -713,6 +762,496 @@ async function prepareProjectForGateTwo() {
   }
 }
 
+// ------------------------------------------------------------------
+// Experiment Spec workbench (P0-P3 structured parameter system)
+// ------------------------------------------------------------------
+
+async function createExperimentSpec(planId) {
+  const spec = await requestJson(`/api/projects/${currentProject.project_id}/experiment-specs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ plan_id: planId }),
+  });
+  currentSpec = spec;
+  persist(storageKeys.specId, spec.experiment_id);
+  return spec;
+}
+
+function isSpecEditable(spec) {
+  return spec && ["draft", "ready"].includes(spec.status);
+}
+
+function groupParameters(parameters) {
+  const groups = {};
+  for (const param of parameters || []) {
+    const category = param.category || "other";
+    if (!groups[category]) groups[category] = [];
+    groups[category].push(param);
+  }
+  return groups;
+}
+
+function renderParameterRow(param, spec) {
+  const row = document.createElement("div");
+  row.className = "spec-param-row";
+  row.dataset.paramId = param.parameter_id;
+  const editable = param.editable && isSpecEditable(spec);
+  row.dataset.editable = String(editable);
+
+  const label = document.createElement("div");
+  label.className = "spec-param-label";
+  const name = document.createElement("strong");
+  name.textContent = param.display_name;
+  const id = document.createElement("small");
+  id.textContent = param.parameter_id;
+  label.append(name, id);
+
+  const valueContainer = document.createElement("div");
+  valueContainer.className = "spec-param-value";
+  if (editable) {
+    const input = document.createElement("input");
+    input.type = param.data_type === "integer" ? "number" : "text";
+    input.value = param.value ?? "";
+    input.placeholder = "未设置";
+    input.addEventListener("change", () => updateSpecParameter(param.parameter_id, input.value));
+    valueContainer.append(input);
+  } else {
+    const valueSpan = document.createElement("span");
+    valueSpan.textContent = text(param.value);
+    valueContainer.append(valueSpan);
+  }
+  if (param.unit) {
+    const unit = document.createElement("small");
+    unit.className = "spec-param-unit";
+    unit.textContent = param.unit;
+    valueContainer.append(unit);
+  }
+
+  const meta = document.createElement("div");
+  meta.className = "spec-param-meta";
+  const sourceChip = document.createElement("span");
+  sourceChip.className = "spec-chip spec-chip-source";
+  sourceChip.textContent = sourceLabels[param.source?.type] || param.source?.type || "—";
+  const critChip = document.createElement("span");
+  critChip.className = "spec-chip spec-chip-criticality";
+  critChip.dataset.criticality = param.criticality;
+  critChip.textContent = criticalityLabels[param.criticality] || param.criticality || "—";
+  const statusChip = document.createElement("span");
+  statusChip.className = "spec-chip spec-chip-status";
+  statusChip.dataset.status = param.status;
+  statusChip.textContent = paramStatusLabels[param.status] || param.status || "—";
+  meta.append(sourceChip, critChip, statusChip);
+
+  row.append(label, valueContainer, meta);
+  return row;
+}
+
+function updateSpecControls(spec) {
+  const readyBtn = byId("spec-ready-btn");
+  const confirmBtn = byId("spec-confirm-btn");
+  if (!readyBtn || !confirmBtn) return;
+  const status = spec?.status;
+  readyBtn.disabled = status !== "draft";
+  confirmBtn.disabled = status !== "ready";
+  readyBtn.hidden = status !== "draft";
+  confirmBtn.hidden = !["draft", "ready"].includes(status);
+}
+
+function renderSpecWorkbench(spec) {
+  const existing = byId("active-spec-card");
+  if (existing) existing.remove();
+  const card = makeCard("work-card spec-workbench", "参数工作台");
+  card.id = "active-spec-card";
+
+  const statusBar = document.createElement("div");
+  statusBar.className = "spec-status-bar";
+  const statusLabel = document.createElement("span");
+  statusLabel.className = "spec-status-chip";
+  statusLabel.dataset.status = spec.status;
+  statusLabel.textContent = specStatusLabels[spec.status] || spec.status;
+  const versionLabel = document.createElement("span");
+  versionLabel.className = "spec-version-label";
+  versionLabel.textContent = `v${spec.experiment_version}`;
+  statusBar.append(statusLabel, versionLabel);
+  card.append(statusBar);
+
+  if (spec.research) {
+    const research = document.createElement("section");
+    research.className = "spec-research";
+    const title = document.createElement("h3");
+    title.textContent = spec.research.title || "—";
+    const objective = document.createElement("p");
+    objective.textContent = spec.research.objective || "—";
+    research.append(title, objective);
+    card.append(research);
+  }
+
+  if (spec.physics) {
+    const physics = document.createElement("section");
+    physics.className = "spec-physics";
+    const heading = document.createElement("h3");
+    heading.textContent = "物理设置";
+    physics.append(heading);
+    addDefinitionList(physics, spec.physics);
+    card.append(physics);
+  }
+
+  const groups = groupParameters(spec.parameters);
+  for (const [category, params] of Object.entries(groups)) {
+    const group = document.createElement("section");
+    group.className = "spec-param-group";
+    const heading = document.createElement("h3");
+    heading.textContent = categoryLabels[category] || category;
+    group.append(heading);
+    for (const param of params) {
+      group.append(renderParameterRow(param, spec));
+    }
+    card.append(group);
+  }
+
+  const propagation = document.createElement("div");
+  propagation.className = "spec-propagation";
+  propagation.id = "spec-propagation";
+  propagation.hidden = true;
+  card.append(propagation);
+
+  const actions = document.createElement("div");
+  actions.className = "spec-actions card-actions";
+  const readyBtn = document.createElement("button");
+  readyBtn.type = "button";
+  readyBtn.className = "button button-secondary";
+  readyBtn.id = "spec-ready-btn";
+  readyBtn.textContent = "准备就绪";
+  readyBtn.addEventListener("click", () => transitionSpec("ready"));
+  const confirmBtn = document.createElement("button");
+  confirmBtn.type = "button";
+  confirmBtn.className = "button button-primary";
+  confirmBtn.id = "spec-confirm-btn";
+  confirmBtn.textContent = "确认实验";
+  confirmBtn.addEventListener("click", () => transitionSpec("confirmed"));
+  actions.append(readyBtn, confirmBtn);
+  card.append(actions);
+
+  updateSpecControls(spec);
+
+  const taskHost = byId("task-card-host");
+  if (stream && taskHost) stream.insertBefore(card, taskHost);
+  else (stream || document.body).append(card);
+
+  return card;
+}
+
+function renderPropagation(propagation) {
+  const node = byId("spec-propagation");
+  if (!node) return;
+  node.hidden = false;
+  node.replaceChildren();
+  const heading = document.createElement("p");
+  heading.className = "spec-propagation-title";
+  heading.textContent = "依赖传播结果";
+  node.append(heading);
+  if (propagation.summary) {
+    const summary = document.createElement("pre");
+    summary.textContent = propagation.summary;
+    node.append(summary);
+  }
+  if (propagation.auto_recomputed?.length) {
+    const item = document.createElement("p");
+    item.textContent = `自动重算：${propagation.auto_recomputed.join("，")}`;
+    node.append(item);
+  }
+  if (propagation.stale_artifacts?.length) {
+    const item = document.createElement("p");
+    item.className = "spec-propagation-warning";
+    item.textContent = `过期产物：${propagation.stale_artifacts.join("，")}`;
+    node.append(item);
+  }
+  if (propagation.new_warnings?.length) {
+    for (const warning of propagation.new_warnings) {
+      const item = document.createElement("p");
+      item.className = "spec-propagation-warning";
+      item.textContent = warning;
+      node.append(item);
+    }
+  }
+}
+
+async function updateSpecParameter(parameterId, newValue) {
+  if (!currentSpec || !isSpecEditable(currentSpec)) return;
+  const coerced = newValue === "" ? null : (isNaN(Number(newValue)) ? newValue : Number(newValue));
+  try {
+    const response = await requestJson(
+      `/api/projects/${currentProject.project_id}/experiment-specs/${currentSpec.experiment_id}/parameters/${parameterId}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ value: coerced }),
+      },
+    );
+    const propagation = response._propagation;
+    currentSpec = response;
+    renderSpecWorkbench(currentSpec);
+    if (propagation) renderPropagation(propagation);
+    appendConversation("assistant", `参数 ${parameterId} 已更新。`, "workflow-event");
+  } catch (error) {
+    renderError("参数更新", error);
+    renderSpecWorkbench(currentSpec);
+  }
+}
+
+async function transitionSpec(targetStatus) {
+  if (!currentSpec) return;
+  const button = targetStatus === "ready" ? byId("spec-ready-btn") : byId("spec-confirm-btn");
+  if (button) button.disabled = true;
+  try {
+    const response = await requestJson(
+      `/api/projects/${currentProject.project_id}/experiment-specs/${currentSpec.experiment_id}/transition`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ target_status: targetStatus }),
+      },
+    );
+    currentSpec = response;
+    renderSpecWorkbench(currentSpec);
+    const label = specStatusLabels[targetStatus] || targetStatus;
+    appendConversation("assistant", `实验规格已转换到「${label}」状态。`, "workflow-event");
+    if (targetStatus === "confirmed") {
+      await compileAndSubmitSpec();
+    }
+  } catch (error) {
+    renderError("状态转换", error);
+    if (button) button.disabled = false;
+  }
+}
+
+function deterministicSpecCaseId() {
+  const sanitize = (value, fallback) => (
+    String(value ?? fallback)
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || fallback
+  );
+  const expId = sanitize(currentSpec.experiment_id, "exp");
+  const expVersion = sanitize(currentSpec.experiment_version, "1");
+  const identity = `${currentSpec.experiment_id}\u0000${currentSpec.experiment_version}`;
+  let hash = 2166136261;
+  for (let index = 0; index < identity.length; index += 1) {
+    hash ^= identity.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  const suffix = (hash >>> 0).toString(36).padStart(7, "0");
+  return `spec-${expId.slice(0, 30)}-v${expVersion.slice(0, 12)}-${suffix}`.slice(0, 64);
+}
+
+async function compileAndSubmitSpec() {
+  if (!canStartExperiment(activeTask)) {
+    const warning = "已有实验正在运行，请等待当前任务结束后再确认提交。";
+    setStatus(warning);
+    appendConversation("assistant", warning, "workflow-event");
+    return;
+  }
+  if (!currentProject || !currentSpec || !selectedTarget) {
+    if (!selectedTarget) renderError("提交", new Error("请先选择可用的执行平台"));
+    return;
+  }
+  confirmationActive = true;
+  renderTaskCard({ phase: "preparing", targetId: selectedTarget, lastUpdated: new Date().toLocaleString() });
+  try {
+    currentCompilation = await requestJson(
+      `/api/projects/${currentProject.project_id}/experiment-specs/${currentSpec.experiment_id}/compile`,
+      { method: "POST" },
+    );
+    const preview = $("[data-compile-preview]");
+    if (preview) {
+      preview.textContent = `SHA-256：${currentCompilation.archive_sha256}\n求解器：${currentCompilation.manifest.solver}\n预处理：${currentCompilation.preprocessing.join(" → ")}`;
+    }
+    appendConversation("assistant", `确定性编译与安全校验完成：${currentCompilation.archive_sha256}`, "workflow-event");
+
+    currentProject = await requestJson(`/api/projects/${currentProject.project_id}/approvals`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        gate: "GATE_2",
+        decision: "approve",
+        actor: "researcher",
+        subject_version: currentProject.version,
+        plan_id: currentSpec.experiment_id,
+        plan_version: currentSpec.experiment_version,
+        archive_sha256: currentCompilation.archive_sha256,
+      }),
+    });
+    appendConversation("assistant", "Gate 2 已绑定当前实验规格与归档摘要。", "workflow-event");
+
+    const caseId = deterministicSpecCaseId();
+    persist(storageKeys.caseId, caseId);
+    persist(storageKeys.targetId, selectedTarget);
+    renderTaskCard({
+      phase: "submitting",
+      targetId: selectedTarget,
+      lastUpdated: new Date().toLocaleString(),
+    });
+    const response = await requestJson(
+      `/api/projects/${currentProject.project_id}/experiment-plans/${currentSpec.experiment_id}/submit`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          target_id: selectedTarget,
+          case_id: caseId,
+          actor: "researcher",
+          archive_sha256: currentCompilation.archive_sha256,
+        }),
+      },
+    );
+    currentProject = response.project || currentProject;
+    const job = submissionJob(response);
+    const externalJobId = response.external_job_id ?? response.job_id ?? job.external_job_id ?? job.job_id;
+    if (!externalJobId) {
+      throw new Error("提交响应缺少外部 Job ID；尚不能确认任务已提交。请通过项目恢复检查远程状态。");
+    }
+    renderTaskCard({
+      phase: "submitted",
+      jobId: externalJobId,
+      pid: job.pid,
+      targetId: selectedTarget,
+      submittedAt: job.submitted_at,
+      lastUpdated: new Date().toLocaleString(),
+    });
+    startPolling(() => pollSpecExperiment(
+      externalJobId,
+      selectedTarget,
+      currentProject.project_id,
+      currentSpec.experiment_id,
+      caseId,
+    ));
+  } catch (error) {
+    const assignedJobId = activeTask?.jobId;
+    renderError("编译与提交", error, {
+      phase: "failed",
+      jobId: assignedJobId,
+      targetId: selectedTarget,
+      lastUpdated: new Date().toLocaleString(),
+    });
+  } finally {
+    confirmationActive = false;
+  }
+}
+
+async function pollSpecExperiment(jobId, targetId, projectId, experimentId, caseId) {
+  const statusUrl = `/api/projects/${projectId}/benchmarks/${caseId}?target_id=${encodeURIComponent(targetId)}`;
+  try {
+    const job = await requestJson(statusUrl);
+    const phase = phaseFromJob(job);
+    renderTaskCard({
+      phase,
+      jobId,
+      pid: job.pid,
+      error: job.error,
+      targetId,
+      submittedAt: job.submitted_at,
+      lastUpdated: new Date().toLocaleString(),
+    });
+    if (phase === "failed" || phase === "cancelled") return;
+    if (job.state === "succeeded") {
+      const results = await requestJson(plannedResultUrl({
+        projectId, planId: experimentId, caseId, targetId, action: "results",
+      }));
+      currentProject = results.project || currentProject;
+      renderResultsCard(results, {
+        source: "planned",
+        identity: { projectId, planId: experimentId, caseId, targetId },
+      });
+      return;
+    }
+    schedulePoll(() => pollSpecExperiment(jobId, targetId, projectId, experimentId, caseId));
+  } catch (error) {
+    renderTaskCard({
+      phase: activeTask?.phase || "submitted",
+      jobId,
+      targetId,
+      pid: activeTask?.pid,
+      warning: `状态查询暂时失败：${error.message}。将自动重试。`,
+      lastUpdated: new Date().toLocaleString(),
+    });
+    schedulePoll(() => pollSpecExperiment(jobId, targetId, projectId, experimentId, caseId));
+  }
+}
+
+function renderMetricQualityChecks(card, results) {
+  const collection = results?.collection || {};
+  const solver = collection.solver || {};
+  const observables = collection.observables || results?.summary?.observables || {};
+  const finalResiduals = solver.final_residuals || results?.summary?.final_residuals || {};
+  const residualEntries = Object.entries(finalResiduals);
+  if (!residualEntries.length && !observables.mass_imbalance && !observables.max_courant) return;
+
+  const section = document.createElement("section");
+  section.className = "metric-quality-checks";
+  const heading = document.createElement("h3");
+  heading.textContent = "指标质量检查";
+  section.append(heading);
+
+  const grid = document.createElement("div");
+  grid.className = "metric-quality-grid";
+
+  if (residualEntries.length) {
+    const maxResidual = Math.max(...residualEntries.map(([, v]) => Number(v) || 0));
+    const passed = maxResidual <= 1e-4;
+    const warning = maxResidual <= 1e-3;
+    const item = document.createElement("div");
+    item.className = "metric-quality-item";
+    item.dataset.status = passed ? "passed" : warning ? "warning" : "failed";
+    const label = document.createElement("span");
+    label.textContent = "残差容差";
+    const value = document.createElement("strong");
+    value.textContent = maxResidual.toExponential(2);
+    const detail = document.createElement("small");
+    detail.textContent = `阈值 1.0e-04 · ${passed ? "通过" : warning ? "警告" : "未通过"}`;
+    item.append(label, value, detail);
+    grid.append(item);
+  }
+
+  const inletFlow = Number(solver.inlet_mass_flow ?? observables.inlet_mass_flow);
+  const outletFlow = Number(solver.outlet_mass_flow ?? observables.outlet_mass_flow);
+  if (Number.isFinite(inletFlow) && Number.isFinite(outletFlow) && inletFlow !== 0) {
+    const imbalance = ((inletFlow - outletFlow) / inletFlow) * 100;
+    const passed = Math.abs(imbalance) <= 1.0;
+    const warning = Math.abs(imbalance) <= 2.0;
+    const item = document.createElement("div");
+    item.className = "metric-quality-item";
+    item.dataset.status = passed ? "passed" : warning ? "warning" : "failed";
+    const label = document.createElement("span");
+    label.textContent = "质量守恒";
+    const value = document.createElement("strong");
+    value.textContent = `${imbalance.toFixed(3)}%`;
+    const detail = document.createElement("small");
+    detail.textContent = `阈值 1.0% · ${passed ? "通过" : warning ? "警告" : "未通过"}`;
+    item.append(label, value, detail);
+    grid.append(item);
+  }
+
+  const maxCourant = Number(observables.max_courant ?? observables.courant_number);
+  if (Number.isFinite(maxCourant)) {
+    const passed = maxCourant <= 1.0;
+    const warning = maxCourant <= 2.0;
+    const item = document.createElement("div");
+    item.className = "metric-quality-item";
+    item.dataset.status = passed ? "passed" : warning ? "warning" : "failed";
+    const label = document.createElement("span");
+    label.textContent = "Courant 数";
+    const value = document.createElement("strong");
+    value.textContent = maxCourant.toFixed(3);
+    const detail = document.createElement("small");
+    detail.textContent = `阈值 1.0 · ${passed ? "通过" : warning ? "警告" : "未通过"}`;
+    item.append(label, value, detail);
+    grid.append(item);
+  }
+
+  section.append(grid);
+  card.append(section);
+}
+
 function deterministicCaseId() {
   const sanitize = (value, fallback) => (
     String(value ?? fallback)
@@ -754,98 +1293,17 @@ async function confirmAndSubmitPlan(button) {
   }
   confirmationActive = true;
   if (button) button.disabled = true;
-  renderTaskCard({ phase: "preparing", targetId: selectedTarget, lastUpdated: new Date().toLocaleString() });
   try {
     await prepareProjectForGateTwo();
-    currentCompilation = await requestJson(`/api/experiment-plans/${currentPlan.plan_id}/compile`, {
-      method: "POST",
-    });
-    const preview = $("[data-compile-preview]");
-    if (preview) {
-      preview.textContent = `SHA-256：${currentCompilation.archive_sha256}\n求解器：${currentCompilation.manifest.solver}\n预处理：${currentCompilation.preprocessing.join(" → ")}`;
-    }
-    appendConversation("assistant", `确定性编译与安全校验完成：${currentCompilation.archive_sha256}`, "workflow-event");
-
-    const approvedArtifact = currentProject.approved_artifacts?.[currentPlan.plan_id];
-    if (approvedArtifact) {
-      if (approvedArtifact.archive_sha256 !== currentCompilation.archive_sha256) {
-        throw new Error("重新编译的归档摘要与 Gate 2 已批准摘要不一致，已停止提交。 ");
-      }
-      if (approvedArtifact.plan_version !== undefined
-        && approvedArtifact.plan_version !== currentPlan.plan_version) {
-        throw new Error("当前计划版本与 Gate 2 已批准版本不一致，已停止提交。 ");
-      }
-      appendConversation("assistant", "已核对现有 Gate 2 绑定，摘要一致，无需重复审批。", "workflow-event");
-    } else {
-      currentProject = await requestJson(`/api/projects/${currentProject.project_id}/approvals`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          gate: "GATE_2",
-          decision: "approve",
-          actor: "researcher",
-          subject_version: currentProject.version,
-          plan_id: currentPlan.plan_id,
-          plan_version: currentPlan.plan_version,
-          archive_sha256: currentCompilation.archive_sha256,
-        }),
-      });
-      appendConversation("assistant", "Gate 2 已绑定当前计划版本与归档摘要。", "workflow-event");
-    }
-
-    const caseId = deterministicCaseId();
-    persist(storageKeys.caseId, caseId);
-    persist(storageKeys.targetId, selectedTarget);
-    renderTaskCard({
-      phase: "submitting",
-      targetId: selectedTarget,
-      lastUpdated: new Date().toLocaleString(),
-    });
-    const response = await requestJson(
-      `/api/projects/${currentProject.project_id}/experiment-plans/${currentPlan.plan_id}/submit`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          target_id: selectedTarget,
-          case_id: caseId,
-          actor: "researcher",
-          archive_sha256: currentCompilation.archive_sha256,
-        }),
-      },
-    );
-    currentProject = response.project || currentProject;
-    const job = submissionJob(response);
-    const externalJobId = response.external_job_id ?? response.job_id ?? job.external_job_id ?? job.job_id;
-    if (!externalJobId) {
-      throw new Error("提交响应缺少外部 Job ID；尚不能确认任务已提交。请通过项目恢复检查远程状态。");
-    }
-    renderTaskCard({
-      phase: "submitted",
-      jobId: externalJobId,
-      pid: job.pid,
-      targetId: selectedTarget,
-      submittedAt: job.submitted_at,
-      lastUpdated: new Date().toLocaleString(),
-    });
-    startPolling(() => pollPlannedExperiment(
-      externalJobId,
-      selectedTarget,
-      currentProject.project_id,
-      currentPlan.plan_id,
-      caseId,
-    ));
+    const spec = await createExperimentSpec(currentPlan.plan_id);
+    renderSpecWorkbench(spec);
+    setStatus("实验规格已创建。请审阅参数后依次点击「准备就绪」和「确认实验」。");
+    appendConversation("assistant", "已从实验计划创建结构化实验规格，请审阅参数工作台。", "workflow-event");
   } catch (error) {
-    const assignedJobId = activeTask?.jobId;
-    renderError("确认与提交", error, {
-      phase: "failed",
-      jobId: assignedJobId,
-      targetId: selectedTarget,
-      lastUpdated: new Date().toLocaleString(),
-    });
+    renderError("创建实验规格", error);
   } finally {
     confirmationActive = false;
-    if (button && !activeTask?.jobId) button.disabled = false;
+    if (button && !currentSpec) button.disabled = false;
   }
 }
 
@@ -963,6 +1421,7 @@ function renderResultsCard(results, { source = "planned", identity = null } = {}
   analysisNote.textContent = availability.allowed ? "" : availability.message;
   analysisNote.hidden = availability.allowed;
   card.append(body, postButton, analyzeButton, analysisNote, postprocessRoot);
+  renderMetricQualityChecks(card, latestResults);
 }
 
 async function pollPlannedExperiment(jobId, targetId, projectId, planId, caseId) {
@@ -1129,6 +1588,7 @@ async function restoreActiveExperiment() {
   const planId = localStorage.getItem(storageKeys.planId);
   const caseId = localStorage.getItem(storageKeys.caseId);
   const targetId = localStorage.getItem(storageKeys.targetId);
+  const specId = localStorage.getItem(storageKeys.specId);
   try {
     if (projectId) {
       currentProject = await requestJson(`/api/projects/${projectId}`);
@@ -1151,8 +1611,10 @@ async function restoreActiveExperiment() {
       if (!restoredPlan) {
         currentPlan = null;
         currentCompilation = null;
+        currentSpec = null;
         localStorage.removeItem(storageKeys.planId);
         localStorage.removeItem(storageKeys.caseId);
+        localStorage.removeItem(storageKeys.specId);
         updateContext();
         appendConversation(
           "assistant",
@@ -1174,6 +1636,19 @@ async function restoreActiveExperiment() {
         if (preview) {
           preview.textContent = `已恢复 Gate 2 批准绑定：${approvedArtifact.archive_sha256}`;
         }
+      }
+    }
+    if (specId && currentProject) {
+      try {
+        currentSpec = await requestJson(
+          `/api/projects/${currentProject.project_id}/experiment-specs/${specId}`,
+        );
+        if (currentSpec && ["draft", "ready"].includes(currentSpec.status)) {
+          renderSpecWorkbench(currentSpec);
+        }
+      } catch {
+        currentSpec = null;
+        localStorage.removeItem(storageKeys.specId);
       }
     }
     if (targetId) {
