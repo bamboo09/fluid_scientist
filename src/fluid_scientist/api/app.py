@@ -117,6 +117,17 @@ from fluid_scientist.ports import (
     StoredExperimentSpec,
     WorkflowRepository,
 )
+from fluid_scientist.research import (
+    ClarificationRequired,  # noqa: F401
+    DraftReady,  # noqa: F401
+    IntentEngine,
+    ResearchOrchestrator,
+    ResearchSession,  # noqa: F401
+    ResearchSessionStatus,  # noqa: F401
+    ScopeEngine,
+    SessionStore,
+    UnsupportedRequest,  # noqa: F401
+)
 from fluid_scientist.services.model_configuration import (
     LegacyExperimentDesigner,
     ModelConfiguration,
@@ -506,7 +517,7 @@ def create_app(
 
     application = FastAPI(
         title="Fluid Scientist",
-        version="0.3.0",
+        version="0.4.0",
         description="Evidence-grounded fluid mechanics research workflow",
         lifespan=lifespan,
     )
@@ -517,6 +528,14 @@ def create_app(
     target_registry = {target.target_id: target for target in configured_targets}
     capability_cache = target_capability_cache or TargetCapabilityCache()
     application.state.target_capability_cache = capability_cache
+    research_session_store = SessionStore()
+    research_orchestrator = ResearchOrchestrator(
+        session_store=research_session_store,
+        intent_engine=IntentEngine(),
+        scope_engine=ScopeEngine(),
+    )
+    application.state.research_session_store = research_session_store
+    application.state.research_orchestrator = research_orchestrator
     project_service = ProjectService(workflow_repository)
     demo_projects: dict[str, DemoResearchResult] = {}
 
@@ -527,6 +546,96 @@ def create_app(
     @application.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "mode": runtime_settings.app_mode.value}
+
+    # ===== Research Session API (Workflow V2) =====
+
+    @application.post(
+        "/api/research-sessions",
+        status_code=status.HTTP_201_CREATED,
+        tags=["research-sessions"],
+    )
+    def create_research_session(body: dict = Body(...)) -> dict:  # noqa: B008
+        """创建新的研究会话并处理第一轮输入。"""
+        project_id = body.get("project_id", "")
+        message = body.get("message", "")
+        if not message.strip():
+            raise HTTPException(status_code=422, detail="message is required")
+        # 确保 project 存在（如果 project_id 不为空）
+        if project_id:
+            try:
+                project_service.get(project_id)
+            except KeyError as error:
+                raise HTTPException(
+                    status_code=404, detail="project not found"
+                ) from error
+        result = research_orchestrator.start_session(
+            project_id=project_id,
+            message=message,
+        )
+        return result.model_dump()
+
+    @application.post(
+        "/api/research-sessions/{session_id}/turns",
+        tags=["research-sessions"],
+    )
+    def continue_research_session(
+        session_id: str, body: dict = Body(...)  # noqa: B008
+    ) -> dict:
+        """继续研究会话，处理用户的后续输入。"""
+        message = body.get("message", "")
+        if not message.strip():
+            raise HTTPException(status_code=422, detail="message is required")
+        try:
+            result = research_orchestrator.handle_turn(
+                session_id=session_id,
+                user_message=message,
+            )
+        except KeyError as error:
+            raise HTTPException(
+                status_code=404, detail="research session not found"
+            ) from error
+        return result.model_dump()
+
+    @application.get(
+        "/api/research-sessions/{session_id}",
+        tags=["research-sessions"],
+    )
+    def get_research_session(session_id: str) -> dict:
+        """获取研究会话的当前状态。"""
+        try:
+            session = research_session_store.get(session_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=404, detail="research session not found"
+            ) from error
+        return session.model_dump()
+
+    @application.get(
+        "/api/research-sessions/{session_id}/experiment-spec",
+        tags=["research-sessions"],
+    )
+    def get_session_experiment_spec(session_id: str) -> dict:
+        """获取研究会话关联的实验规格。"""
+        try:
+            session = research_session_store.get(session_id)
+        except KeyError as error:
+            raise HTTPException(
+                status_code=404, detail="research session not found"
+            ) from error
+        if session.experiment_spec_id is None:
+            raise HTTPException(
+                status_code=404,
+                detail="no experiment spec associated with this session",
+            )
+        try:
+            stored = workflow_repository.load_experiment_spec(
+                session.experiment_spec_id
+            )
+        except KeyError as error:
+            raise HTTPException(
+                status_code=404, detail="experiment spec not found"
+            ) from error
+        return stored.spec_dict
 
     @application.post(
         "/api/demo",
@@ -645,6 +754,8 @@ def create_app(
         "/api/plan-operations",
         response_model=OperationView,
         status_code=status.HTTP_202_ACCEPTED,
+        deprecated=True,
+        tags=["deprecated"],
     )
     def create_plan_operation(request: PlanOperationRequest) -> OperationView:
         try:
