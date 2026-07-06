@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from fluid_scientist.compat import UTC
@@ -27,6 +27,17 @@ from fluid_scientist.research.scope_engine import ScopeEngine
 from fluid_scientist.research.session_store import SessionStore
 from fluid_scientist.research.spec_factory import ExperimentSpecFactory
 
+if TYPE_CHECKING:
+    from fluid_scientist.measurement.planner import MetricPlanner
+
+
+# physical_system (IntentAssessment) → registry experiment_type
+_PHYSICAL_SYSTEM_TO_EXPERIMENT_TYPE: dict[str, str] = {
+    "internal_flow": "laminar_pipe",
+    "external_flow": "cylinder_flow",
+    "cavity_flow": "lid_driven_cavity",
+}
+
 
 class ResearchOrchestrator:
     """研究需求编排器，管理从需求收集到草稿生成的完整流程。"""
@@ -38,6 +49,7 @@ class ResearchOrchestrator:
         scope_engine: ScopeEngine,
         spec_factory: ExperimentSpecFactory | None = None,
         workflow_repository=None,  # WorkflowRepository Protocol, optional
+        metric_planner: MetricPlanner | None = None,
     ) -> None:
         """初始化编排器。
 
@@ -47,12 +59,15 @@ class ResearchOrchestrator:
             scope_engine: 范围引擎。
             spec_factory: ExperimentSpec 工厂，可选。
             workflow_repository: 工作流仓库，可选。
+            metric_planner: 指标计划器，可选。当提供时，在生成 ExperimentSpec
+                后会调用它生成 MeasurementPlan 并附加到 spec.metrics 中。
         """
         self._store = session_store
         self._intent_engine = intent_engine
         self._scope_engine = scope_engine
         self._spec_factory = spec_factory
         self._repository = workflow_repository
+        self._metric_planner = metric_planner
 
     def start_session(
         self,
@@ -207,6 +222,9 @@ class ResearchOrchestrator:
                     physics_spec=updated_session.physics_spec,
                 )
 
+                # 8a. 调用 MetricPlanner 生成 MeasurementPlan 并附加到 spec.metrics
+                spec = self._attach_measurement_plan(spec, intent, updated_session)
+
                 # 存储到 workflow repository
                 from fluid_scientist.ports import StoredExperimentSpec
                 stored_spec = StoredExperimentSpec(
@@ -254,6 +272,45 @@ class ResearchOrchestrator:
             experiment_version=1,
             warnings=warnings_list,
         )
+
+    def _attach_measurement_plan(
+        self,
+        spec: Any,
+        intent: IntentAssessment,
+        session: ResearchSession,
+    ) -> Any:
+        """调用 MetricPlanner 生成 MeasurementPlan 并附加到 spec.metrics。
+
+        如果未配置 metric_planner，则原样返回 spec。
+        """
+        if self._metric_planner is None:
+            return spec
+
+        try:
+            experiment_type = _PHYSICAL_SYSTEM_TO_EXPERIMENT_TYPE.get(
+                intent.physical_system or "", "unknown"
+            )
+            metric_plan = self._metric_planner.propose_metrics(
+                research_objective=intent.research_objective or "",
+                physics_spec=session.physics_spec,
+                user_metrics=list(intent.requested_metrics),
+                experiment_type=experiment_type,
+            )
+            measurement_plan_dict = metric_plan.measurement_plan.model_dump()
+            new_metrics = list(spec.metrics) + [
+                {
+                    "kind": "measurement_plan",
+                    "measurement_plan": measurement_plan_dict,
+                    "core_metrics": metric_plan.core_metrics,
+                    "credibility_metrics": metric_plan.credibility_metrics,
+                    "extension_metrics": metric_plan.extension_metrics,
+                    "unknown_metrics": metric_plan.unknown_metrics,
+                }
+            ]
+            return spec.model_copy(update={"metrics": new_metrics})
+        except Exception:
+            # MetricPlanner 失败不应阻塞草稿生成
+            return spec
 
     def _extract_facts(
         self,

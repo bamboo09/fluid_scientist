@@ -36,15 +36,20 @@ from fluid_scientist.metric_spec.registry import (
     registered_types,
 )
 from fluid_scientist.metric_spec.sampling import (
+    DOEConfig,
+    DOEPlan,
     SamplePoint,
     SamplingConfig,
     SamplingPlan,
     SamplingStrategy,
     create_spec_variant,
+    generate_doe_plan,
     generate_sampling_plan,
 )
 
 __all__ = [
+    "DOEConfig",
+    "DOEPlan",
     "MetricCategory",
     "MetricDataType",
     "MetricDefinition",
@@ -71,6 +76,7 @@ __all__ = [
     "check_residual_tolerance",
     "create_spec_variant",
     "evaluate_result",
+    "generate_doe_plan",
     "generate_sampling_plan",
     "get_metric_spec",
     "registered_types",

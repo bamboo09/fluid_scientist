@@ -1,7 +1,13 @@
-"""Sampling plan mapping — generate DOE matrices from ExperimentSpec parameters.
+"""DOE plan mapping — generate DOE matrices from ExperimentSpec parameters.
 
 Takes an ExperimentSpec and generates parameter sweep variants using different
 strategies: full factorial, one-at-a-time (OAT), and random sampling.
+
+Historically this module exposed ``SamplingPlan`` / ``SamplingConfig`` /
+``generate_sampling_plan``.  Those names are retained as aliases for
+``DOEPlan`` / ``DOEConfig`` / ``generate_doe_plan`` to preserve backward
+compatibility while aligning the vocabulary with the new ``MeasurementPlan``
+concept (which describes in-simulation sampling rather than the design matrix).
 """
 
 from __future__ import annotations
@@ -31,8 +37,8 @@ class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, strict=True)
 
 
-class SamplingConfig(StrictModel):
-    """Configuration for sampling plan generation.
+class DOEConfig(StrictModel):
+    """Configuration for DOE plan generation.
 
     Attributes:
         strategy: Sampling strategy to use.
@@ -61,8 +67,8 @@ class SamplePoint:
 
 
 @dataclass(frozen=True)
-class SamplingPlan:
-    """Complete sampling plan with all sample points."""
+class DOEPlan:
+    """Complete DOE plan with all sample points."""
 
     strategy: SamplingStrategy
     design_variables: tuple[str, ...]
@@ -75,7 +81,7 @@ class SamplingPlan:
 
 def _get_design_variables(
     spec: ExperimentSpec,
-    config: SamplingConfig,
+    config: DOEConfig,
 ) -> list[ParameterSpec]:
     """Identify design variables from the spec based on config."""
     if config.parameter_ids is not None:
@@ -123,7 +129,7 @@ def _generate_levels(param: ParameterSpec, num_levels: int) -> list[Any]:
 
 def _full_factorial(
     design_vars: list[ParameterSpec],
-    config: SamplingConfig,
+    config: DOEConfig,
 ) -> list[SamplePoint]:
     """Generate full factorial sampling matrix."""
     all_levels = [_generate_levels(p, config.levels) for p in design_vars]
@@ -148,7 +154,7 @@ def _full_factorial(
 def _oat(
     spec: ExperimentSpec,
     design_vars: list[ParameterSpec],
-    config: SamplingConfig,
+    config: DOEConfig,
 ) -> list[SamplePoint]:
     """Generate one-at-a-time sampling matrix."""
     baseline: dict[str, Any] = {
@@ -172,7 +178,7 @@ def _oat(
 
 def _random_sampling(
     design_vars: list[ParameterSpec],
-    config: SamplingConfig,
+    config: DOEConfig,
 ) -> list[SamplePoint]:
     """Generate random sampling matrix."""
     rng = random.Random(config.seed)
@@ -200,25 +206,25 @@ def _random_sampling(
     return samples
 
 
-def generate_sampling_plan(
+def generate_doe_plan(
     spec: ExperimentSpec,
-    config: SamplingConfig | None = None,
-) -> SamplingPlan:
-    """Generate a sampling plan from an ExperimentSpec.
+    config: DOEConfig | None = None,
+) -> DOEPlan:
+    """Generate a DOE plan from an ExperimentSpec.
 
     Args:
         spec: The experiment specification with parameter constraints.
-        config: Sampling configuration. If None, uses OAT with 3 levels.
+        config: DOE configuration. If None, uses OAT with 3 levels.
 
     Returns:
-        A SamplingPlan with all sample points.
+        A DOEPlan with all sample points.
     """
     if config is None:
-        config = SamplingConfig()
+        config = DOEConfig()
 
     design_vars = _get_design_variables(spec, config)
     if not design_vars:
-        return SamplingPlan(
+        return DOEPlan(
             strategy=config.strategy,
             design_variables=(),
             samples=(SamplePoint("s0000_baseline", {}),),
@@ -233,7 +239,7 @@ def generate_sampling_plan(
     else:
         raise ValueError(f"unknown sampling strategy: {config.strategy}")
 
-    return SamplingPlan(
+    return DOEPlan(
         strategy=config.strategy,
         design_variables=tuple(p.parameter_id for p in design_vars),
         samples=tuple(samples),
@@ -259,11 +265,23 @@ def create_spec_variant(
     return spec.model_copy(update={"parameters": tuple(updated_params)})
 
 
+# --- Backward-compatible aliases ---
+# ``SamplingPlan`` / ``SamplingConfig`` / ``generate_sampling_plan`` are kept
+# as aliases so existing callers continue to work after the DOE rename.
+
+SamplingConfig = DOEConfig
+SamplingPlan = DOEPlan
+generate_sampling_plan = generate_doe_plan
+
+
 __all__ = [
+    "DOEConfig",
+    "DOEPlan",
     "SamplePoint",
     "SamplingConfig",
     "SamplingPlan",
     "SamplingStrategy",
     "create_spec_variant",
+    "generate_doe_plan",
     "generate_sampling_plan",
 ]
