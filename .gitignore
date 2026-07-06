@@ -3,6 +3,7 @@
 .env
 .env.*
 !.env.example
+!.env.docker.example
 __pycache__/
 *.egg-info/
 .pytest_cache/
@@ -16,3 +17,6 @@ build/
 coverage/
 *.log
 *.db
+
+# SSH 密钥（绝不提交）
+ssh-keys/
