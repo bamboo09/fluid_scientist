@@ -68,6 +68,26 @@ const renderedPlanRefs = new Set();
 const planRequests = new Map();
 const analysisRequests = new AnalysisRequestController();
 
+// ===== Research Session (multi-turn clarification) =====
+let currentResearchSession = null;
+let currentClarificationQuestions = [];
+
+// Bridge aliases that map the research-session UI onto existing elements.
+const researchQuestionInput = promptInput;
+const designExperimentBtn = designButton;
+const planProgressCard = operationCard;
+
+// Dedicated container for research-session result cards (clarification / draft / unsupported).
+let planResults = document.getElementById("research-session-results");
+if (!planResults) {
+  planResults = document.createElement("section");
+  planResults.id = "research-session-results";
+  planResults.className = "research-session-results";
+  const taskHost = byId("task-card-host");
+  if (stream && taskHost) stream.insertBefore(planResults, taskHost);
+  else (stream || document.body).append(planResults);
+}
+
 const modelDefaults = Object.freeze({
   openai: "gpt-5.4",
   glm: "glm-4.5",
@@ -198,7 +218,9 @@ function clearResearchSession() {
   postprocessSessionVersion += 1;
   activeOperation = null;
   activeOperationId = "";
-  for (const key of [storageKeys.projectId, storageKeys.planId, storageKeys.caseId, storageKeys.operationId, storageKeys.specId]) {
+  currentResearchSession = null;
+  currentClarificationQuestions = [];
+  for (const key of [storageKeys.projectId, storageKeys.planId, storageKeys.caseId, storageKeys.operationId, storageKeys.specId, storageKeys.researchSessionId]) {
     localStorage.removeItem(key);
   }
   if (operationCard) {
@@ -208,6 +230,7 @@ function clearResearchSession() {
   lastOperationAnnouncement = "";
   if (operationAnnouncementNode) operationAnnouncementNode.textContent = "";
   for (const id of ["active-plan-card", "active-task-card", "active-spec-card"]) byId(id)?.remove();
+  if (planResults) planResults.innerHTML = "";
   if (byId("report")) byId("report").hidden = true;
   if (researchQuestionCard) researchQuestionCard.hidden = true;
   if (welcomeMessage) welcomeMessage.hidden = false;
@@ -614,6 +637,255 @@ function startOperationPolling(operationId, options = {}) {
   return operationPoller.start(operationId, options);
 }
 
+// ===== Research Session helpers =====
+function showElement(element) { if (element) element.hidden = false; }
+function hideElement(element) { if (element) element.hidden = true; }
+function showError(message) { renderError("研究会话", new Error(message)); }
+
+async function loadAndRenderSpec(specId) {
+  if (!currentProject) return;
+  try {
+    const spec = await requestJson(
+      `/api/projects/${currentProject.project_id}/experiment-specs/${specId}`,
+    );
+    currentSpec = spec;
+    persist(storageKeys.specId, spec.experiment_id);
+    renderSpecWorkbench(spec);
+  } catch (error) {
+    renderError("加载实验规格", error);
+  }
+}
+
+// 创建研究会话
+async function createResearchSession(message) {
+  if (!currentProject) {
+    currentProject = await createProject(message);
+  }
+  const response = await fetch("/api/research-sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      project_id: currentProject.project_id,
+      message: message,
+    }),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const result = await response.json();
+  currentResearchSession = { session_id: result.session_id, ...result };
+  if (result.session_id) localStorage.setItem(storageKeys.researchSessionId, result.session_id);
+  handleResearchTurnResult(result);
+}
+
+// 继续研究会话
+async function continueResearchSession(sessionId, message) {
+  const response = await fetch(`/api/research-sessions/${sessionId}/turns`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: message }),
+  });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const result = await response.json();
+  currentResearchSession = { ...currentResearchSession, ...result };
+  if (result.session_id) localStorage.setItem(storageKeys.researchSessionId, result.session_id);
+  handleResearchTurnResult(result);
+}
+
+// 处理研究会话结果
+function handleResearchTurnResult(result) {
+  hideElement(planProgressCard);
+  if (result.type === "clarification_required") {
+    currentClarificationQuestions = result.questions || [];
+    renderClarificationCard(result);
+  } else if (result.type === "draft_ready") {
+    renderDraftReadyCard(result);
+  } else if (result.type === "unsupported") {
+    renderUnsupportedCard(result);
+  }
+}
+
+// 渲染澄清卡片
+function renderClarificationCard(result) {
+  const container = planResults || stream;
+  if (!container) return;
+  container.innerHTML = "";
+
+  const card = document.createElement("div");
+  card.className = "card clarification-card";
+
+  const title = document.createElement("h3");
+  title.textContent = "需要补充信息";
+  card.appendChild(title);
+
+  const summary = document.createElement("p");
+  summary.className = "clarification-summary";
+  summary.textContent = result.summary;
+  card.appendChild(summary);
+
+  if (result.current_understanding && Object.keys(result.current_understanding).length > 0) {
+    const understanding = document.createElement("div");
+    understanding.className = "clarification-understanding";
+    understanding.innerHTML = "<strong>当前理解：</strong>";
+    for (const [key, value] of Object.entries(result.current_understanding)) {
+      const item = document.createElement("span");
+      item.className = "understanding-chip";
+      item.textContent = `${key}: ${value}`;
+      understanding.appendChild(item);
+    }
+    card.appendChild(understanding);
+  }
+
+  for (const q of result.questions) {
+    const qDiv = document.createElement("div");
+    qDiv.className = "clarification-question";
+
+    const qLabel = document.createElement("label");
+    qLabel.textContent = q.text;
+    qDiv.appendChild(qLabel);
+
+    if (q.options && q.options.length > 0) {
+      const optionsDiv = document.createElement("div");
+      optionsDiv.className = "clarification-options";
+      for (const opt of q.options) {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "button button-secondary clarification-option-btn";
+        btn.textContent = opt;
+        btn.addEventListener("click", () => {
+          optionsDiv.querySelectorAll(".clarification-option-btn").forEach((b) => b.classList.remove("selected"));
+          btn.classList.add("selected");
+        });
+        optionsDiv.appendChild(btn);
+      }
+      qDiv.appendChild(optionsDiv);
+    }
+
+    card.appendChild(qDiv);
+  }
+
+  const inputDiv = document.createElement("div");
+  inputDiv.className = "clarification-input";
+  const input = document.createElement("textarea");
+  input.className = "input";
+  input.placeholder = "输入您的回答（可选）...";
+  inputDiv.appendChild(input);
+  card.appendChild(inputDiv);
+
+  const buttonDiv = document.createElement("div");
+  buttonDiv.className = "clarification-actions";
+
+  const submitBtn = document.createElement("button");
+  submitBtn.className = "button button-primary";
+  submitBtn.textContent = "提交回答";
+  submitBtn.addEventListener("click", async () => {
+    let answer = input.value.trim();
+    if (!answer) {
+      const selected = card.querySelectorAll(".clarification-option-btn.selected");
+      const selectedTexts = Array.from(selected).map((b) => b.textContent);
+      answer = selectedTexts.join("，");
+    }
+    if (!answer) {
+      showError("请选择选项或输入回答");
+      return;
+    }
+    submitBtn.disabled = true;
+    submitBtn.textContent = "处理中...";
+    try {
+      await continueResearchSession(currentResearchSession.session_id, answer);
+    } catch (e) {
+      showError(`继续会话失败: ${e.message}`);
+      submitBtn.disabled = false;
+      submitBtn.textContent = "提交回答";
+    }
+  });
+  buttonDiv.appendChild(submitBtn);
+
+  const skipBtn = document.createElement("button");
+  skipBtn.className = "button button-secondary";
+  skipBtn.textContent = "按推荐继续";
+  skipBtn.addEventListener("click", async () => {
+    skipBtn.disabled = true;
+    try {
+      await continueResearchSession(currentResearchSession.session_id, "按推荐默认值继续");
+    } catch (e) {
+      showError(`继续会话失败: ${e.message}`);
+      skipBtn.disabled = false;
+    }
+  });
+  buttonDiv.appendChild(skipBtn);
+
+  card.appendChild(buttonDiv);
+  container.appendChild(card);
+}
+
+// 渲染草案就绪卡片
+function renderDraftReadyCard(result) {
+  const container = planResults || stream;
+  if (!container) return;
+  container.innerHTML = "";
+
+  const card = document.createElement("div");
+  card.className = "card draft-ready-card";
+
+  const title = document.createElement("h3");
+  title.textContent = "实验草案已就绪";
+  card.appendChild(title);
+
+  if (result.warnings && result.warnings.length > 0) {
+    for (const w of result.warnings) {
+      const warn = document.createElement("div");
+      warn.className = "warning";
+      warn.textContent = w;
+      card.appendChild(warn);
+    }
+  }
+
+  const desc = document.createElement("p");
+  desc.textContent = "系统已根据您的需求生成实验草案。参数工作台将在下一步展示。";
+  card.appendChild(desc);
+
+  if (result.experiment_spec_id) {
+    loadAndRenderSpec(result.experiment_spec_id);
+  } else {
+    const note = document.createElement("p");
+    note.className = "muted";
+    note.textContent = "（实验规格正在生成中...）";
+    card.appendChild(note);
+  }
+
+  container.appendChild(card);
+}
+
+// 渲染不支持卡片
+function renderUnsupportedCard(result) {
+  const container = planResults || stream;
+  if (!container) return;
+  container.innerHTML = "";
+
+  const card = document.createElement("div");
+  card.className = "card unsupported-card";
+
+  const title = document.createElement("h3");
+  title.textContent = "暂不支持该请求";
+  card.appendChild(title);
+
+  const reason = document.createElement("p");
+  reason.textContent = result.reason;
+  card.appendChild(reason);
+
+  if (result.missing_capabilities && result.missing_capabilities.length > 0) {
+    const capList = document.createElement("ul");
+    for (const cap of result.missing_capabilities) {
+      const li = document.createElement("li");
+      li.textContent = `${cap.description}（${cap.severity}）`;
+      capList.appendChild(li);
+    }
+    card.appendChild(capList);
+  }
+
+  container.appendChild(card);
+}
+
+/** @deprecated Use createResearchSession() instead. Kept for backward compatibility. */
 async function submitPlanOperation(question) {
   if (operationRequestActive) return;
   if (!selectedTarget) {
@@ -671,10 +943,20 @@ async function designExperimentFromPrompt(event) {
     appendConversation("assistant", warning, "workflow-event");
     return;
   }
-  const question = promptInput?.value.trim() || "";
+  const question = researchQuestionInput?.value.trim() || "";
   if (!question || !modelConfiguration.configured) return;
   showResearchQuestion(question);
-  await submitPlanOperation(question);
+  if (designExperimentBtn) designExperimentBtn.disabled = true;
+  showElement(planProgressCard);
+  setStatus("正在分析研究需求…");
+  try {
+    await createResearchSession(question);
+  } catch (error) {
+    showError(`研究需求提交失败: ${error.message}`);
+  } finally {
+    if (designExperimentBtn) designExperimentBtn.disabled = false;
+    hideElement(planProgressCard);
+  }
 }
 
 function renderTaskCard(task) {
@@ -1656,6 +1938,19 @@ async function restoreActiveExperiment() {
       if (targetSelect) targetSelect.value = targetId;
     }
     updateContext();
+    const savedSessionId = localStorage.getItem(storageKeys.researchSessionId);
+    if (savedSessionId) {
+      try {
+        const sessionResponse = await fetch(`/api/research-sessions/${savedSessionId}`);
+        if (sessionResponse.ok) {
+          const session = await sessionResponse.json();
+          currentResearchSession = { session_id: savedSessionId, ...session };
+          if (session && session.type) handleResearchTurnResult(session);
+        }
+      } catch {
+        // 忽略研究会话恢复失败
+      }
+    }
     const jobId = caseId ? currentProject.external_jobs?.[caseId] : null;
     if (!jobId || !planId || !caseId || !targetId) return;
     appendConversation("assistant", `已恢复远程任务 ${jobId}，不会重复提交。`, "workflow-event");
