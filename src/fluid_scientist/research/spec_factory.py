@@ -65,6 +65,43 @@ class ExperimentSpecFactory:
         # 3. 调用 Dynamic Schema Engine（传入已有参数值）
         schema_result = generate_schema(esp_physics, existing_params=existing_params)
 
+        # 3a. 从 ResearchContext 填充 ParameterProvenance
+        schema_params = list(schema_result.parameters)
+        if session.research_context is not None:
+            rc = session.research_context
+            updated_params = []
+            for param in schema_params:
+                # 尝试找到匹配的 confirmed fact
+                matching_fact = None
+                for f in rc.confirmed_facts:
+                    if f.key.lower() in (
+                        param.parameter_id.lower(),
+                        param.display_name.lower(),
+                    ):
+                        matching_fact = f
+                        break
+
+                if matching_fact:
+                    new_provenance = param.provenance.model_copy(update={
+                        "source_type": "user",
+                        "research_session_id": session.session_id,
+                        "turn_id": matching_fact.turn_id,
+                        "source_text": matching_fact.source_text,
+                    })
+                    updated_params.append(
+                        param.model_copy(update={"provenance": new_provenance})
+                    )
+                else:
+                    # System recommended
+                    new_provenance = param.provenance.model_copy(update={
+                        "source_type": "system_recommended",
+                        "research_session_id": session.session_id,
+                    })
+                    updated_params.append(
+                        param.model_copy(update={"provenance": new_provenance})
+                    )
+            schema_params = updated_params
+
         # 4. 构造 ExperimentSpec
         experiment_id = f"exp-{uuid4().hex[:16]}"
         now = datetime.now(UTC).isoformat()
@@ -90,7 +127,7 @@ class ExperimentSpecFactory:
             interaction_mode=InteractionMode.STANDARD,
             research=research,
             physics=esp_physics,
-            parameters=list(schema_result.parameters),
+            parameters=schema_params,
             metrics=[],  # 将在 Commit 5 填充
             created_at=now,
             updated_at=now,

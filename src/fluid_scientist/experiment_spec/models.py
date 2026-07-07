@@ -163,6 +163,12 @@ class ParameterProvenance(StrictModel):
     created_at: str | None = None
     last_modified_by: Literal["system", "user", "expert"] | None = None
     evidence: str | None = None
+    # NEW fields for Commit 3
+    source_type: Literal["user", "derived", "system_recommended", "template_default", "literature", "generated_by_code", "unknown"] = "unknown"
+    research_session_id: str | None = None
+    turn_id: str | None = None
+    source_text: str | None = None
+    modification_history: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class CodeBinding(StrictModel):
@@ -323,14 +329,24 @@ class ExperimentSpec(StrictModel):
         found = False
         for p in self.parameters:
             if p.parameter_id == parameter_id:
+                old_value = p.value
+                new_provenance = p.provenance.model_copy(update={
+                    "last_modified_by": "user",
+                    "modification_history": [
+                        *p.provenance.modification_history,
+                        {
+                            "old_value": old_value,
+                            "new_value": new_value,
+                            "modified_at": datetime.now(UTC).isoformat(),
+                        },
+                    ],
+                })
                 params.append(
                     p.model_copy(
                         update={
                             "value": new_value,
                             "status": ParameterStatus.MODIFIED,
-                            "provenance": p.provenance.model_copy(
-                                update={"last_modified_by": "user"}
-                            ),
+                            "provenance": new_provenance,
                         }
                     )
                 )

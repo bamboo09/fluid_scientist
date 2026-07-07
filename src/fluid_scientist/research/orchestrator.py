@@ -15,10 +15,12 @@ from fluid_scientist.research.intent_engine import IntentEngine
 from fluid_scientist.research.models import (
     ClarificationRequired,
     ClarificationTurn,
+    ConfirmedFact,
     DraftReady,
     ExtractedFact,
     IntentAssessment,
     MissingCapability,
+    ResearchContext,
     ResearchPhysicsSpec,
     ResearchSession,
     ResearchSessionStatus,
@@ -156,13 +158,19 @@ class ResearchOrchestrator:
         )
 
         # 3. 从本轮消息中提取事实
-        extracted_facts = self._extract_facts(user_message, intent)
+        extracted_facts = self._extract_facts(user_message, intent, turn_id)
         turn = turn.model_copy(update={"extracted_facts": extracted_facts})
 
         # 4. 更新会话的累积事实和意图评估（按 category+key 去重，保留最新）
         all_facts = self._merge_facts(session.confirmed_facts, extracted_facts)
         physics_spec = self._build_physics_spec(session, all_facts)
         prev_messages = session.accumulated_context.get("all_messages", "")
+
+        # 构建研究上下文（多轮累积）
+        research_context = self._build_research_context(
+            session, user_message, turn_id, intent, all_facts
+        )
+
         self._store.update(
             session.session_id,
             confirmed_facts=all_facts,
@@ -176,6 +184,7 @@ class ResearchOrchestrator:
                 "all_messages": f"{prev_messages} {user_message}".strip(),
                 "research_objective": intent.research_objective,
             },
+            research_context=research_context,
             updated_at=now,
         )
         updated_session = self._store.get(session.session_id)
@@ -201,11 +210,20 @@ class ResearchOrchestrator:
         # 7. 需要澄清 → 返回 ClarificationRequired
         if needs_clarification or not intent.ready_for_draft:
             updated_turn = turn.model_copy(update={"assistant_questions": questions})
+            # 更新研究上下文中的未解决问题
+            current_session = self._store.get(session.session_id)
+            if current_session.research_context is not None:
+                updated_rc = current_session.research_context.model_copy(
+                    update={"unresolved_questions": [q.text for q in questions]}
+                )
+            else:
+                updated_rc = None
             self._store.update(
                 session.session_id,
                 status=ResearchSessionStatus.CLARIFICATION_REQUIRED,
                 unresolved_questions=[q.text for q in questions],
                 turns=[*session.turns[:-1], updated_turn],
+                research_context=updated_rc,
                 updated_at=datetime.now(UTC).isoformat(),
             )
             current_understanding = self._build_understanding(intent, updated_session)
@@ -420,8 +438,12 @@ class ResearchOrchestrator:
         self,
         user_message: str,
         intent: IntentAssessment,
+        turn_id: str,
     ) -> list[ExtractedFact]:
-        """从用户消息和意图评估中提取结构化事实。"""
+        """从用户消息和意图评估中提取结构化事实。
+
+        每个提取的事实都会携带 turn_id 和 source_text，用于溯源追踪。
+        """
         facts: list[ExtractedFact] = []
         message_lower = user_message.lower()
 
@@ -435,6 +457,8 @@ class ResearchOrchestrator:
                     value=intent.physical_system,
                     confidence=0.8,
                     source="user_input",
+                    turn_id=turn_id,
+                    source_text=user_message,
                 )
             )
 
@@ -447,6 +471,8 @@ class ResearchOrchestrator:
                     key="flow_regime",
                     value="laminar",
                     confidence=0.9,
+                    turn_id=turn_id,
+                    source_text=user_message,
                 )
             )
         elif any(kw in message_lower for kw in ("湍流", "turbulent")):
@@ -457,6 +483,8 @@ class ResearchOrchestrator:
                     key="flow_regime",
                     value="turbulent",
                     confidence=0.9,
+                    turn_id=turn_id,
+                    source_text=user_message,
                 )
             )
 
@@ -469,6 +497,8 @@ class ResearchOrchestrator:
                     key="fluid_type",
                     value="water",
                     confidence=0.9,
+                    turn_id=turn_id,
+                    source_text=user_message,
                 )
             )
         elif any(kw in message_lower for kw in ("空气", "air")):
@@ -479,6 +509,8 @@ class ResearchOrchestrator:
                     key="fluid_type",
                     value="air",
                     confidence=0.9,
+                    turn_id=turn_id,
+                    source_text=user_message,
                 )
             )
 
@@ -491,6 +523,8 @@ class ResearchOrchestrator:
                     key=metric,
                     value="requested",
                     confidence=0.8,
+                    turn_id=turn_id,
+                    source_text=user_message,
                 )
             )
 
@@ -503,10 +537,82 @@ class ResearchOrchestrator:
                     key="target_phenomenon",
                     value=phenomenon,
                     confidence=0.8,
+                    turn_id=turn_id,
+                    source_text=user_message,
                 )
             )
 
         return facts
+
+    def _build_research_context(
+        self,
+        session: ResearchSession,
+        user_message: str,
+        turn_id: str,
+        intent: IntentAssessment,
+        all_facts: list[ExtractedFact],
+    ) -> ResearchContext:
+        """构建或更新研究上下文。
+
+        将本轮提取的事实转换为 ConfirmedFact，与已有上下文中的事实合并
+        （按 category+key 去重），并累积用户问题和回答。
+        """
+        now = datetime.now(UTC).isoformat()
+        existing_context = session.research_context
+
+        # 将 ExtractedFact 转换为 ConfirmedFact
+        new_confirmed = [
+            ConfirmedFact(
+                fact_id=f.fact_id,
+                category=f.category,
+                key=f.key,
+                value=f.value,
+                confidence=f.confidence,
+                source=f.source,
+                turn_id=f.turn_id or turn_id,
+                source_text=f.source_text,
+                confirmed_at=now,
+            )
+            for f in all_facts
+        ]
+
+        # 与已有 confirmed_facts 合并（按 category+key 去重）
+        existing_confirmed = (
+            existing_context.confirmed_facts if existing_context else []
+        )
+        merged: dict[tuple[str, str], ConfirmedFact] = {}
+        for f in existing_confirmed:
+            merged[(f.category, f.key)] = f
+        for f in new_confirmed:
+            merged[(f.category, f.key)] = f
+
+        user_questions = (
+            existing_context.user_questions if existing_context else []
+        )
+        user_answers = (
+            existing_context.user_answers if existing_context else []
+        )
+        source_turn_ids = (
+            existing_context.source_turn_ids if existing_context else []
+        )
+
+        # 收集 critical_unknowns 中的问题文本
+        new_questions = [
+            q.reason
+            for q in intent.critical_unknowns
+            if hasattr(q, "reason")
+        ]
+
+        return ResearchContext(
+            original_request=session.original_request,
+            clarified_objective=intent.research_objective,
+            user_questions=[*user_questions, *new_questions],
+            user_answers=[*user_answers, user_message],
+            confirmed_facts=list(merged.values()),
+            proposed_assumptions=intent.assumptions,
+            unresolved_questions=[],
+            source_turn_ids=[*source_turn_ids, turn_id],
+        )
 
     @staticmethod
     def _merge_facts(

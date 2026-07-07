@@ -47,6 +47,22 @@ class ExtractedFact(BaseModel):
     value: str
     confidence: float = 1.0
     source: str = "user_input"
+    turn_id: str | None = None
+    source_text: str | None = None
+
+
+class ConfirmedFact(BaseModel):
+    """经过多轮确认的结构化事实，携带完整溯源信息。"""
+
+    fact_id: str
+    category: str
+    key: str
+    value: str
+    confidence: float = 1.0
+    source: str = "user_input"
+    turn_id: str
+    source_text: str | None = None
+    confirmed_at: str | None = None
 
 
 class ClarificationTurn(BaseModel):
@@ -158,6 +174,26 @@ class MissingCapability(BaseModel):
     suggested_extension_type: str | None = None
 
 
+class ResearchContext(BaseModel):
+    """完整的多轮科研上下文，贯穿整个研究会话生命周期。
+
+    贯穿整个研究对话流程，累积用户的问题、回答、已确认事实、
+    已提出/接受/拒绝的假设以及未解决的问题。每个事实通过 turn_id
+    可追溯到提取它的对话轮次。
+    """
+
+    original_request: str
+    clarified_objective: str | None = None
+    user_questions: list[str] = Field(default_factory=list)
+    user_answers: list[str] = Field(default_factory=list)
+    confirmed_facts: list[ConfirmedFact] = Field(default_factory=list)
+    proposed_assumptions: list[ProposedAssumption] = Field(default_factory=list)
+    accepted_assumptions: list[ProposedAssumption] = Field(default_factory=list)
+    rejected_assumptions: list[ProposedAssumption] = Field(default_factory=list)
+    unresolved_questions: list[str] = Field(default_factory=list)
+    source_turn_ids: list[str] = Field(default_factory=list)
+
+
 class ResearchSession(BaseModel):
     """研究会话，贯穿需求收集到实验创建的完整生命周期。"""
 
@@ -174,6 +210,7 @@ class ResearchSession(BaseModel):
     experiment_spec_id: str | None = None
     turns: list[ClarificationTurn] = Field(default_factory=list)
     missing_capabilities: list[MissingCapability] = Field(default_factory=list)
+    research_context: ResearchContext | None = None
     created_at: str
     updated_at: str
 
@@ -218,6 +255,7 @@ __all__ = [
     "ClarificationQuestion",
     "ClarificationRequired",
     "ClarificationTurn",
+    "ConfirmedFact",
     "CriticalUnknown",
     "DraftReady",
     "ExtractedFact",
@@ -225,6 +263,7 @@ __all__ = [
     "MissingCapability",
     "PhysicsUnknown",
     "ProposedAssumption",
+    "ResearchContext",
     "ResearchPhysicsSpec",
     "ResearchSession",
     "ResearchSessionStatus",
