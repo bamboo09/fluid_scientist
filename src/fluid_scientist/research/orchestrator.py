@@ -360,8 +360,15 @@ class ResearchOrchestrator:
                     "measurement_plan": measurement_plan_dict,
                     "core_metrics": metric_plan.core_metrics,
                     "credibility_metrics": metric_plan.credibility_metrics,
+                    "comparison_metrics": metric_plan.comparison_metrics,
                     "extension_metrics": metric_plan.extension_metrics,
+                    "optional_metrics": metric_plan.optional_metrics,
                     "unknown_metrics": metric_plan.unknown_metrics,
+                    "unknown_metric_details": [
+                        um.model_dump() for um in metric_plan.unknown_metric_details
+                    ],
+                    "metric_definitions": metric_plan.metric_definitions,
+                    "reasoning_summary": metric_plan.reasoning_summary,
                 }
             ]
             updated_spec = spec.model_copy(update={"metrics": new_metrics})

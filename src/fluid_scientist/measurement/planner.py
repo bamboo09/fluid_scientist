@@ -3,23 +3,34 @@
 The ``MetricPlanner`` bridges the research intent (what the user wants to know)
 and the simulation configuration (what to sample inside a single run).  It
 produces a :class:`MetricPlan` that categorises requested metrics into
-core / credibility / extension buckets and a :class:`MeasurementPlan` that
-materialises the corresponding OpenFOAM functionObjects, spatial sampling
-locations, field outputs and time-sampling strategy.
+core / credibility / comparison / extension / optional buckets and a
+:class:`MeasurementPlan` that materialises the corresponding OpenFOAM
+functionObjects, spatial sampling locations, field outputs and time-sampling
+strategy.
 
-Categorisation rules (adapted to the existing ``MetricCategory`` enum):
+The planning pipeline follows:
 
-* **core** — metrics explicitly requested by the user or flagged ``critical``
-  in the registry (e.g. ``drag_coefficient`` for cylinder flow).
-* **credibility** — convergence/numerical-quality metrics
-  (``MetricCategory.CONVERGENCE``), e.g. ``residual_tolerance``.
-* **extension** — remaining registry metrics that are relevant but not
-  explicitly requested.
+1. **Physical quantity decomposition** -- from ``research_objective`` and
+   ``physics_spec`` determine which physical quantities are relevant.
+2. **Unknown metric extraction** -- non-standard metric names from natural
+   language are captured as :class:`UnknownMetric` objects.
+3. **Metric classification**:
+   * **core** -- directly answers the user's research question.
+   * **credibility** -- convergence/numerical quality (residuals, mass
+     conservation, Courant).
+   * **comparison** -- for comparing different models/cases (reynolds_number,
+     friction_factor, pressure_coefficient).
+   * **extension** -- helpful but not critical.
+   * **optional** -- nice-to-have.
+4. **Metric definitions** -- for each known metric, store formula, unit, and
+   category in ``metric_definitions``.
+5. **Required data** -- generate :class:`MeasurementPlan` with the sampling
+   configuration needed to extract the selected metrics.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -40,18 +51,141 @@ if TYPE_CHECKING:
     from fluid_scientist.research.models import ResearchPhysicsSpec
 
 
+class UnknownMetric(BaseModel):
+    """未知指标的结构化记录。"""
+
+    metric_name: str
+    registry_match: str | None = None
+    status: Literal["unknown", "pending_lookup", "awaiting_code_approval"] = "unknown"
+    user_requested: bool = True
+    extraction_source: str | None = None  # which user message mentioned it
+
+
 class MetricPlan(BaseModel):
     """指标计划。"""
 
     core_metrics: list[str] = Field(default_factory=list)
     credibility_metrics: list[str] = Field(default_factory=list)
+    comparison_metrics: list[str] = Field(default_factory=list)
     extension_metrics: list[str] = Field(default_factory=list)
+    optional_metrics: list[str] = Field(default_factory=list)
     unknown_metrics: list[str] = Field(default_factory=list)
+    unknown_metric_details: list[UnknownMetric] = Field(default_factory=list)
+    metric_definitions: dict[str, dict[str, Any]] = Field(default_factory=dict)
     measurement_plan: MeasurementPlan
+    reasoning_summary: str = ""
 
 
 class MetricPlanner:
     """从研究目标和物理规格生成指标计划。"""
+
+    # Standard metric definitions with formulas
+    _METRIC_DEFINITIONS: dict[str, dict[str, Any]] = {
+        "pressure_drop": {
+            "formula": "p_inlet - p_outlet",
+            "unit": "Pa",
+            "category": "physical",
+            "display_name": "压降",
+            "data_type": "scalar",
+        },
+        "drag_coefficient": {
+            "formula": "Fd / (0.5 * rho * U^2 * A)",
+            "unit": "dimensionless",
+            "category": "physical",
+            "display_name": "阻力系数 Cd",
+            "data_type": "scalar",
+        },
+        "lift_coefficient": {
+            "formula": "Fl / (0.5 * rho * U^2 * A)",
+            "unit": "dimensionless",
+            "category": "physical",
+            "display_name": "升力系数 Cl",
+            "data_type": "scalar",
+        },
+        "strouhal_number": {
+            "formula": "f * D / U",
+            "unit": "dimensionless",
+            "category": "dimensionless",
+            "display_name": "Strouhal 数 St",
+            "data_type": "scalar",
+        },
+        "friction_factor": {
+            "formula": "dp / (0.5 * rho * U^2 * L / D)",
+            "unit": "dimensionless",
+            "category": "dimensionless",
+            "display_name": "摩擦系数 f",
+            "data_type": "scalar",
+        },
+        "reynolds_number": {
+            "formula": "rho * U * D / mu",
+            "unit": "dimensionless",
+            "category": "dimensionless",
+            "display_name": "Reynolds 数",
+            "data_type": "scalar",
+        },
+        "velocity_profile": {
+            "formula": "U(x, y, z) at cross-sections",
+            "unit": "m/s",
+            "category": "physical",
+            "display_name": "速度剖面",
+            "data_type": "vector",
+        },
+        "outlet_velocity_uniformity": {
+            "formula": "CV_u = sigma_u / mean_u",
+            "unit": "dimensionless",
+            "category": "physical",
+            "display_name": "出口速度均匀性",
+            "data_type": "scalar",
+        },
+        "pressure_coefficient": {
+            "formula": "Cp = (p - p_inf) / (0.5 * rho * U^2)",
+            "unit": "dimensionless",
+            "category": "dimensionless",
+            "display_name": "压力系数 Cp",
+            "data_type": "scalar",
+        },
+        "mass_flow_rate": {
+            "formula": "m_dot = rho * U * A",
+            "unit": "kg/s",
+            "category": "physical",
+            "display_name": "质量流量",
+            "data_type": "scalar",
+        },
+        "residual_tolerance": {
+            "formula": "max(initial_residuals)",
+            "unit": "dimensionless",
+            "category": "convergence",
+            "display_name": "残差容差",
+            "data_type": "scalar",
+        },
+        "vortex_center_x": {
+            "formula": "argmin(|velocity|) along x",
+            "unit": "m",
+            "category": "physical",
+            "display_name": "涡心 X 坐标",
+            "data_type": "scalar",
+        },
+        "vortex_center_y": {
+            "formula": "argmin(|velocity|) along y",
+            "unit": "m",
+            "category": "physical",
+            "display_name": "涡心 Y 坐标",
+            "data_type": "scalar",
+        },
+        "pressure_profile": {
+            "formula": "p(x, y, z) along centerlines",
+            "unit": "Pa",
+            "category": "physical",
+            "display_name": "压力剖面",
+            "data_type": "vector",
+        },
+    }
+
+    # Metrics that serve as comparison/reference
+    _COMPARISON_METRICS = {"reynolds_number", "friction_factor", "pressure_coefficient"}
+
+    # Metrics that are credibility/numerical quality
+    _CREDIBILITY_METRICS = {"residual_tolerance"}
 
     def propose_metrics(
         self,
@@ -62,60 +196,145 @@ class MetricPlanner:
     ) -> MetricPlan:
         """提议指标并生成测量计划。
 
+        规划流程：
+        1. 物理量分解 -- 基于 research_objective 和 physics_spec 确定相关物理量。
+        2. 未知指标提取 -- 将非标准指标名提取为 :class:`UnknownMetric` 对象。
+        3. 指标分类 -- core / credibility / comparison / extension / optional。
+        4. 指标定义 -- 为每个已知指标存储公式、单位、类别。
+        5. 生成 :class:`MeasurementPlan`。
+
         Args:
-            research_objective: 研究目标描述（用于将来扩展，当前保留）。
+            research_objective: 研究目标描述（用于指标推理和未知指标溯源）。
             physics_spec: 研究物理规格，可选。
             user_metrics: 用户显式请求的指标 ID 列表。
             experiment_type: 实验类型，用于匹配 registry 中的标准指标。
 
         Returns:
-            包含指标分类和测量计划的 :class:`MetricPlan`。
+            包含指标分类、定义和测量计划的 :class:`MetricPlan`。
         """
         user_metrics = user_metrics or []
         core_metrics: list[str] = []
         credibility_metrics: list[str] = []
+        comparison_metrics: list[str] = []
         extension_metrics: list[str] = []
+        optional_metrics: list[str] = []
         unknown_metrics: list[str] = []
+        unknown_details: list[UnknownMetric] = []
+        metric_definitions: dict[str, dict[str, Any]] = {}
+        reasoning_parts: list[str] = []
 
         user_set = set(user_metrics)
 
-        # 1. 从 registry 获取标准指标
+        # 1. 从 registry 获取标准指标，进行分类并存储定义
         #    CONVERGENCE 类指标（如 residual_tolerance）优先归入 credibility，
         #    即使被标记为 critical 也不应进入 core。
         try:
             registry_spec = get_metric_spec(experiment_type)
             for metric_def in registry_spec.metrics:
-                if metric_def.category == MetricCategory.CONVERGENCE:
-                    credibility_metrics.append(metric_def.metric_id)
-                elif metric_def.metric_id in user_set or metric_def.critical:
-                    core_metrics.append(metric_def.metric_id)
+                mid = metric_def.metric_id
+                # 存储指标定义
+                metric_definitions[mid] = {
+                    "formula": metric_def.formula,
+                    "unit": metric_def.unit,
+                    "category": metric_def.category.value,
+                    "display_name": metric_def.display_name,
+                    "data_type": metric_def.data_type.value,
+                    "critical": metric_def.critical,
+                }
+
+                if (
+                    metric_def.category == MetricCategory.CONVERGENCE
+                    or mid in self._CREDIBILITY_METRICS
+                ):
+                    credibility_metrics.append(mid)
+                elif mid in user_set or metric_def.critical:
+                    core_metrics.append(mid)
+                elif mid in self._COMPARISON_METRICS:
+                    comparison_metrics.append(mid)
                 else:
-                    extension_metrics.append(metric_def.metric_id)
+                    extension_metrics.append(mid)
         except Exception:
             # 无匹配的 registry spec — 仅依赖用户指标
             pass
 
         # 2. 补充分类：用户请求的指标若尚未被 registry 分类，则按是否为
         #    标准指标归入 core（已知标准指标）或 unknown（完全未知）。
-        known_metrics = set(core_metrics + credibility_metrics + extension_metrics)
+        known_metrics = set(
+            core_metrics + credibility_metrics + comparison_metrics + extension_metrics
+        )
         for m in user_metrics:
             if m in known_metrics:
                 continue
-            if self._is_standard_metric(m):
+            if m in self._METRIC_DEFINITIONS:
+                # 已知标准指标但不在 registry 中
                 core_metrics.append(m)
+                metric_definitions[m] = self._METRIC_DEFINITIONS[m]
+                known_metrics.add(m)
             else:
+                # 未知指标 -- 提取为结构化记录
                 unknown_metrics.append(m)
+                unknown_details.append(
+                    UnknownMetric(
+                        metric_name=m,
+                        registry_match=None,
+                        status="unknown",
+                        user_requested=True,
+                        extraction_source=(
+                            research_objective[:200] if research_objective else None
+                        ),
+                    )
+                )
 
-        # 3. 生成 MeasurementPlan（用户指标 + 核心 registry 指标）
+        # 3. 补充对比指标（若尚未包含且物理规格中存在流态信息）
+        for cm in self._COMPARISON_METRICS:
+            if cm not in known_metrics and cm in self._METRIC_DEFINITIONS:
+                # 当流态相关时添加 reynolds_number 作为对比指标
+                if cm == "reynolds_number" and physics_spec and physics_spec.flow_regime:
+                    comparison_metrics.append(cm)
+                    metric_definitions[cm] = self._METRIC_DEFINITIONS[cm]
+                    known_metrics.add(cm)
+
+        # 4. 生成推理摘要
+        if core_metrics:
+            reasoning_parts.append(
+                f"核心指标: {', '.join(core_metrics)} — 直接回答研究问题"
+            )
+        if credibility_metrics:
+            reasoning_parts.append(
+                f"可信度指标: {', '.join(credibility_metrics)} — 验证数值结果可靠性"
+            )
+        if comparison_metrics:
+            reasoning_parts.append(
+                f"对比指标: {', '.join(comparison_metrics)} — 用于工况/模型对比"
+            )
+        if extension_metrics:
+            reasoning_parts.append(
+                f"扩展指标: {', '.join(extension_metrics)} — 有帮助但非必要"
+            )
+        if unknown_metrics:
+            reasoning_parts.append(
+                f"未知指标: {', '.join(unknown_metrics)} — 需要代码扩展或用户澄清"
+            )
+
+        reasoning_summary = (
+            "；".join(reasoning_parts) if reasoning_parts else "无指标分类信息"
+        )
+
+        # 5. 生成 MeasurementPlan（用户指标 + 核心 registry 指标）
         plan_metrics = list(dict.fromkeys(core_metrics + user_metrics))
         measurement_plan = self._generate_measurement_plan(plan_metrics, experiment_type)
 
         return MetricPlan(
             core_metrics=core_metrics,
             credibility_metrics=credibility_metrics,
+            comparison_metrics=comparison_metrics,
             extension_metrics=extension_metrics,
+            optional_metrics=optional_metrics,
             unknown_metrics=unknown_metrics,
+            unknown_metric_details=unknown_details,
+            metric_definitions=metric_definitions,
             measurement_plan=measurement_plan,
+            reasoning_summary=reasoning_summary,
         )
 
     @staticmethod
@@ -279,4 +498,4 @@ class MetricPlanner:
         )
 
 
-__all__ = ["MetricPlan", "MetricPlanner"]
+__all__ = ["MetricPlan", "MetricPlanner", "UnknownMetric"]
