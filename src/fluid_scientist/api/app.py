@@ -86,8 +86,10 @@ from fluid_scientist.experiment_planning.result_analysis import (
     create_result_analyst,
 )
 from fluid_scientist.experiment_spec.compilation import (
+    MissingRequiredParameterError,
     SpecNotConfirmedError,
     compile_spec,
+    validate_required_parameters,
 )
 from fluid_scientist.experiment_spec.dependency import (
     change_summary,
@@ -1935,8 +1937,20 @@ def create_app(
 
         spec = ExperimentSpec.model_validate_json(stored.spec_json)
 
+        # Hard gate: validate required parameters before attempting compilation.
+        try:
+            validate_required_parameters(spec)
+        except MissingRequiredParameterError as error:
+            raise HTTPException(
+                status_code=422, detail=str(error)
+            ) from error
+
         try:
             compiled, compilation_manifest = compile_spec(spec)
+        except MissingRequiredParameterError as error:
+            raise HTTPException(
+                status_code=422, detail=str(error)
+            ) from error
         except SpecNotConfirmedError as error:
             raise HTTPException(
                 status_code=409, detail=str(error)

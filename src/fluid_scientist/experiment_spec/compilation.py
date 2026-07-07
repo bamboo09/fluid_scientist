@@ -48,6 +48,18 @@ class SpecNotConfirmedError(ValueError):
     """Raised when attempting to compile a spec that is not in confirmed state."""
 
 
+class MissingRequiredParameterError(ValueError):
+    """Raised when a required parameter is None or 'unknown' during compilation."""
+
+    def __init__(self, parameter_id: str, detail: str = ""):
+        self.parameter_id = parameter_id
+        super().__init__(
+            f"Missing required parameter '{parameter_id}': {detail}"
+            if detail
+            else f"Missing required parameter '{parameter_id}'"
+        )
+
+
 @dataclass(frozen=True)
 class CompilationManifest:
     """编译产物清单 — 追踪 spec 版本与编译结果的关联。
@@ -77,8 +89,30 @@ def _param_values(spec: ExperimentSpec) -> dict[str, Any]:
     return {p.parameter_id: p.value for p in spec.parameters}
 
 
+def _required_float(values: dict[str, Any], key: str) -> float:
+    """Coerce a spec value to float. Raises if missing."""
+    v = values.get(key)
+    if v is None:
+        raise MissingRequiredParameterError(key, "value is None")
+    return float(v)
+
+
+def _required_int(values: dict[str, Any], key: str) -> int:
+    """Coerce a spec value to int. Raises if missing."""
+    v = values.get(key)
+    if v is None:
+        raise MissingRequiredParameterError(key, "value is None")
+    return int(v)
+
+
 def _float(values: dict[str, Any], key: str, default: float) -> float:
-    """Coerce a spec value to float with a fallback."""
+    """[DEPRECATED] Coerce a spec value to float with a fallback.
+
+    .. deprecated::
+        New code must use :func:`_required_float` instead.  This function
+        is retained only for the deprecated :func:`compile_confirmed_spec`
+        path.
+    """
     v = values.get(key)
     if v is None:
         return default
@@ -86,7 +120,13 @@ def _float(values: dict[str, Any], key: str, default: float) -> float:
 
 
 def _int(values: dict[str, Any], key: str, default: int) -> int:
-    """Coerce a spec value to int with a fallback."""
+    """[DEPRECATED] Coerce a spec value to int with a fallback.
+
+    .. deprecated::
+        New code must use :func:`_required_int` instead.  This function
+        is retained only for the deprecated :func:`compile_confirmed_spec`
+        path.
+    """
     v = values.get(key)
     if v is None:
         return default
@@ -108,8 +148,59 @@ def _detect_experiment_type(spec: ExperimentSpec) -> str:
     )
 
 
+# Required parameters per experiment type
+_REQUIRED_PARAMETERS: dict[str, list[str]] = {
+    "laminar_pipe": [
+        "diameter",
+        "length",
+        "mean_velocity",
+        "kinematic_viscosity",
+        "density",
+        "axial_cells",
+        "radial_cells",
+    ],
+    "cylinder_flow": [
+        "diameter",
+        "reynolds_number",
+        "kinematic_viscosity",
+        "density",
+        "end_time",
+    ],
+    "lid_driven_cavity": [
+        "side_length",
+        "lid_velocity",
+        "kinematic_viscosity",
+        "density",
+        "cells_per_side",
+        "end_time",
+    ],
+}
+
+
+def validate_required_parameters(spec: ExperimentSpec) -> None:
+    """Validate that all required parameters have non-None, non-'unknown' values.
+
+    Raises MissingRequiredParameterError if any required parameter is missing
+    or unknown.
+    """
+    experiment_type = _detect_experiment_type(spec)
+    required = _REQUIRED_PARAMETERS.get(experiment_type, [])
+    param_values = _param_values(spec)
+
+    for param_id in required:
+        value = param_values.get(param_id)
+        if value is None:
+            raise MissingRequiredParameterError(param_id, "parameter value is None")
+        if isinstance(value, str) and value.lower() in ("unknown", "none", "null", ""):
+            raise MissingRequiredParameterError(
+                param_id, f"parameter value is '{value}'"
+            )
+
+
 # --- Plan builders (reverse of migration) ---
 
+# [DEPRECATED] — hardcoded convergence defaults; new code should not use this.
+# Retained only for the deprecated compile_confirmed_spec() path.
 _DEFAULT_CONVERGENCE = ConvergenceTargets(
     residual_tolerance=1e-4,
     mass_imbalance_percent=1.0,
@@ -316,6 +407,9 @@ def compile_spec(spec: ExperimentSpec) -> tuple[CompiledCase, CompilationManifes
         compile_spec_native,
     )
 
+    # Hard gate: validate required parameters BEFORE attempting compilation.
+    validate_required_parameters(spec)
+
     registry = CompilerRegistry()
     if registry.resolve(spec) is not None:
         return compile_spec_native(spec, registry)
@@ -347,9 +441,11 @@ __all__ = [
     "COMPILER_VERSION",
     "TEMPLATE_VERSIONS",
     "CompilationManifest",
+    "MissingRequiredParameterError",
     "SpecNotConfirmedError",
     "compile_confirmed_spec",
     "compile_spec",
     "compute_case_hash",
     "compute_spec_hash",
+    "validate_required_parameters",
 ]

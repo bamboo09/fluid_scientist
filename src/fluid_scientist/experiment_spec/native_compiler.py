@@ -14,9 +14,11 @@ from uuid import uuid4
 from fluid_scientist.experiment_planning.compilers import CompiledCase
 from fluid_scientist.experiment_spec.compilation import (
     CompilationManifest,
+    MissingRequiredParameterError,
     SpecNotConfirmedError,
     compute_case_hash,
     compute_spec_hash,
+    validate_required_parameters,
 )
 from fluid_scientist.experiment_spec.models import (
     ExperimentSpec,
@@ -44,7 +46,24 @@ def _param_values(spec: ExperimentSpec) -> dict[str, Any]:
     return {p.parameter_id: p.value for p in spec.parameters}
 
 
+def _required_float(values: dict[str, Any], key: str) -> float:
+    """Coerce a spec value to float. Raises MissingRequiredParameterError if missing."""
+    v = values.get(key)
+    if v is None:
+        raise MissingRequiredParameterError(key, "value is None")
+    return float(v)
+
+
+def _required_int(values: dict[str, Any], key: str) -> int:
+    """Coerce a spec value to int. Raises MissingRequiredParameterError if missing."""
+    v = values.get(key)
+    if v is None:
+        raise MissingRequiredParameterError(key, "value is None")
+    return int(v)
+
+
 def _float(values: dict[str, Any], key: str, default: float) -> float:
+    """Coerce a spec value to float with a fallback (for optional parameters)."""
     v = values.get(key)
     if v is None:
         return default
@@ -52,6 +71,7 @@ def _float(values: dict[str, Any], key: str, default: float) -> float:
 
 
 def _int(values: dict[str, Any], key: str, default: int) -> int:
+    """Coerce a spec value to int with a fallback (for optional parameters)."""
     v = values.get(key)
     if v is None:
         return default
@@ -78,13 +98,13 @@ class PipeFlowCompiler:
 
         v = _param_values(spec)
         case = LaminarPipeCase(
-            diameter_m=_float(v, "diameter", 0.05),
-            length_m=_float(v, "length", 1.0),
-            mean_velocity_m_s=_float(v, "mean_velocity", 0.1),
-            kinematic_viscosity_m2_s=_float(v, "kinematic_viscosity", 1e-6),
-            density_kg_m3=_float(v, "density", 998.2),
-            axial_cells=_int(v, "axial_cells", 80),
-            radial_cells=_int(v, "radial_cells", 10),
+            diameter_m=_required_float(v, "diameter"),
+            length_m=_required_float(v, "length"),
+            mean_velocity_m_s=_required_float(v, "mean_velocity"),
+            kinematic_viscosity_m2_s=_required_float(v, "kinematic_viscosity"),
+            density_kg_m3=_required_float(v, "density"),
+            axial_cells=_required_int(v, "axial_cells"),
+            radial_cells=_required_int(v, "radial_cells"),
         )
         plan = PipeExperimentPlan(
             experiment_type="laminar_pipe",
@@ -136,9 +156,9 @@ class CylinderFlowCompiler:
             ts = None
             mc = 0.5
 
-        diameter = _float(v, "diameter", 0.1)
-        reynolds = _float(v, "reynolds_number", 100.0)
-        kin_visc = _float(v, "kinematic_viscosity", 1e-6)
+        diameter = _required_float(v, "diameter")
+        reynolds = _required_float(v, "reynolds_number")
+        kin_visc = _required_float(v, "kinematic_viscosity")
         derived_velocity = reynolds * kin_visc / diameter
 
         case = CylinderFlowCase(
@@ -146,13 +166,13 @@ class CylinderFlowCompiler:
             reynolds_number=reynolds,
             mean_velocity_m_s=derived_velocity,
             kinematic_viscosity_m2_s=kin_visc,
-            density_kg_m3=_float(v, "density", 998.2),
+            density_kg_m3=_required_float(v, "density"),
             domain_upstream_diameters=_float(v, "domain_upstream", 10.0),
             domain_downstream_diameters=_float(v, "domain_downstream", 20.0),
             domain_transverse_diameters=_float(v, "domain_width", 10.0),
             cells_radial=_int(v, "cells_radial", 40),
             cells_wake=_int(v, "cells_wake", 120),
-            end_time_s=_float(v, "end_time", 10.0),
+            end_time_s=_required_float(v, "end_time"),
             time_step_s=ts,
             max_courant=mc,
         )
@@ -193,12 +213,12 @@ class CavityFlowCompiler:
 
         v = _param_values(spec)
         case = LidDrivenCavityCase(
-            side_length_m=_float(v, "side_length", 0.1),
-            lid_velocity_m_s=_float(v, "lid_velocity", 1.0),
-            kinematic_viscosity_m2_s=_float(v, "kinematic_viscosity", 1e-6),
-            density_kg_m3=_float(v, "density", 998.2),
-            cells_per_side=_int(v, "cells_per_side", 64),
-            end_time_s=_float(v, "end_time", 10.0),
+            side_length_m=_required_float(v, "side_length"),
+            lid_velocity_m_s=_required_float(v, "lid_velocity"),
+            kinematic_viscosity_m2_s=_required_float(v, "kinematic_viscosity"),
+            density_kg_m3=_required_float(v, "density"),
+            cells_per_side=_required_int(v, "cells_per_side"),
+            end_time_s=_required_float(v, "end_time"),
         )
         plan = CavityExperimentPlan(
             experiment_type="lid_driven_cavity",
@@ -279,6 +299,9 @@ def compile_spec_native(
         raise SpecNotConfirmedError(
             f"experiment spec must be 'confirmed' to compile, got '{status_val}'"
         )
+
+    # Hard gate: validate required parameters BEFORE resolving the compiler.
+    validate_required_parameters(spec)
 
     if registry is None:
         registry = CompilerRegistry()

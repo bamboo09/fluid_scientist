@@ -324,9 +324,14 @@ class TestCompileSpecNativeNotConfirmed:
 class TestCompileSpecNativeUnknownType:
     def test_raises_value_error_for_unknown_type(self):
         """compile_spec_native() raises ValueError for unknown experiment
-        type."""
+        type.
+
+        With the parameter hard gate, validate_required_parameters() runs
+        before compiler resolution and raises 'cannot detect experiment
+        type' for specs whose parameter IDs don't match any known type.
+        """
         spec = _make_unknown_spec()
-        with pytest.raises(ValueError, match="no native compiler"):
+        with pytest.raises(ValueError, match="cannot detect"):
             compile_spec_native(spec)
 
 
