@@ -1,10 +1,11 @@
 """Strict domain models for research planning, execution, and reporting."""
 
 from datetime import datetime
-from enum import StrEnum
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from fluid_scientist.compat import StrEnum
 
 
 class StrictModel(BaseModel):
@@ -163,6 +164,11 @@ class Approval(FrozenModel):
     approved_by: str = Field(min_length=1)
     approved_at: datetime
     subject_version: int = Field(ge=1)
+
+
+class ApprovedArtifact(FrozenModel):
+    plan_version: int = Field(ge=1)
+    archive_sha256: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
 
 
 class AuditEvent(FrozenModel):

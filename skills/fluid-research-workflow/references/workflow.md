@@ -3,6 +3,7 @@
 ## Contracts
 
 - `ResearchSpec`: question, geometry, fluid, independent variables, responses, constraints, and simulation budget.
+- Provider-neutral `ExperimentPlan`: experiment type, bounded case inputs, convergence targets, parameter sweeps, requested outputs, assumptions, and limitations.
 - `EvidencePackage`: query, source-located evidence, conflicts, coverage gaps, review state, and confidence.
 - `CaseManifest`: immutable template commit, software/artifact digest, geometry, physics, numerics, resources, and outputs.
 - `ValidationResult`: iterative convergence, mass imbalance, grid/time-step independence, benchmark agreement, sensitivity, and warnings.
@@ -12,6 +13,61 @@
 ## HPC boundaries
 
 Use the data node for transfer, download, compilation, checksums, and artifact publication. Use the Login node only for typed `sbatch`, `squeue`, `sacct`, and `scancel` operations. Use compute nodes only for approved OpenFOAM commands against immutable artifacts. Exchange manifests and results through configured shared storage or explicit safe synchronization.
+
+## Workstation OpenFOAM boundary
+
+- Keep workstation hosts, usernames, identity paths, and `known_hosts` paths in runtime configuration. Never place them in source, reports, logs, or published Skills.
+- On Windows, require the runtime private-key file to be owned by the service user and remove inherited access for unrelated principals. If a sandbox-created key has broader ACLs, create an ignored owner-only runtime copy rather than weakening OpenSSH checks.
+- Read the SSH host fingerprint without accepting it. Require the researcher to compare it with the workstation's local host-key fingerprint before adding `known_hosts`.
+- Run direct workstation jobs through `fluid-worker doctor/submit/status/cancel/collect`. Do not route them through Slurm and do not pass free-form remote shell.
+- Require protocol-version and command capability checks before submission. Preserve deterministic job IDs so retries query the same job.
+- Treat worker upgrades as schema migrations. Run `doctor`, then replay `collect` against retained jobs from each supported experiment type. Verify generated metadata keys (for example `base_case`) against the deterministic compiler contract instead of assuming a new job is representative of old artifacts.
+- Treat the external job ID as the submission truth boundary. A button click, local timer, or lost HTTP response is not submission evidence. Display the remote PID and submission time when returned. Convert SSH/SCP timeout and process-launch exceptions to typed remote errors; retry the same approved plan/case/digest once because the worker's deterministic job ID makes this operation idempotent.
+- On browser recovery, fetch the stored plan and verify its owning project before restoring plan/case identifiers. Never let stale mixed identifiers trigger compilation, approval, or submission. Keep transient status-query errors visible and retry with bounded backoff instead of converting them into remote job failures.
+
+### Custom OpenFOAM execution
+
+- Apply double validation: validate the tar.gz before transfer and repeat the same validation inside `fluid-worker` before extraction.
+- Reject absolute paths, traversal, links, oversized expansion, dynamic code, system calls, missing dictionaries, and non-allow-listed solvers.
+- Upload only to the fixed home-relative incoming directory. Accept an archive name, never a caller-selected remote path.
+- Execute only `submit-custom` with the fixed chain: optional `blockMesh`, optional `mirrorMesh` when `system/mirrorMeshDict` is present, mandatory `checkMesh -allGeometry -allTopology`, then `foamRun -solver incompressibleFluid`.
+- Collect the mesh report, solver completion marker, final residuals, numeric time directories, case manifest, and `.foam` marker. Present these results in the browser; retain ParaView as an advanced workstation view.
+- Do not apply pipe pressure-drop or mass-flow acceptance thresholds to cylinder, bend, or other custom geometries unless their case defines and validates equivalent observables.
+
+### Model configuration
+
+Support only the first-batch providers OpenAI, GLM, and DeepSeek. Accept arbitrary model IDs, but keep each interactively supplied API key only in server-process memory. Never echo a key, place it in browser storage, write it to project files, or include it in logs and Skills. Require re-entry after service restart.
+
+Use native structured parsing for OpenAI. Request JSON from GLM and DeepSeek, then perform the same strict local schema validation. Treat authentication, model-not-found, transport, empty-output, JSON, and schema failures as different typed errors. Do not retry authentication, model-not-found, malformed-JSON, or capability-violation failures.
+
+For GLM and DeepSeek schema failures, permit only bounded correction retries using sanitized validation locations, messages, and error types. Never echo rejected field values back into logs or user-facing errors. Mesh-independence plans may sweep bounded integer resolution fields such as cavity `cells_per_side`; revalidate every sweep point through the case contract.
+
+### Provider-neutral planning and deterministic compilation
+
+- Allow the model to select only `laminar_pipe`, `cylinder_flow`, `lid_driven_cavity`, or `custom_openfoam` and fill their bounded plan fields. Reject unknown capabilities and extra fields.
+- Keep model planning separate from execution. Reject model-generated commands, shell, remote paths, and OpenFOAM dictionaries.
+- Route built-in plans through a deterministic compiler. Sort archive members, normalize tar metadata, set gzip time to zero, and validate the resulting archive before storing it.
+- Route `custom_openfoam` to the reviewed upload path instead of pretending it can use a built-in compiler.
+- Persist the immutable plan and compiled bytes. Preview the solver, preprocessing chain, required outputs, and archive digest without exposing server paths.
+- At Gate 2, bind the plan ID, plan version, and archive digest. On submission, retrieve the stored bytes, recompute their digest, compare it with the binding, and never recompile after approval.
+
+### Evidence-bound result analysis
+
+- Collect mesh quality, solver completion, final residuals, numeric time directories, and the `.foam` marker before asking a model to interpret results.
+- Extract pipe pressure/flow metrics, cylinder force coefficients, and cavity velocity and pressure probes from their OpenFOAM function-object files with deterministic parsers.
+- Give the Results Analyst only the structured deterministic payload and an allow-list of exact evidence keys. Reject any claim that cites an unavailable key.
+- Require the analyst to distinguish direct observation, statistical inference, model extrapolation, and unverified hypothesis. The analyst must never alter deterministic values or convert a smoke run into a credibility claim.
+- Keep conclusions, credibility assessment, limitations, and recommended next steps separate. Do not report Strouhal number, grid independence, or convergence unless the required time series or multi-grid evidence exists.
+
+## OpenFOAM Foundation 13 benchmark
+
+Use the Foundation distribution semantics, not similarly named OpenCFD releases. OpenFOAM Foundation 13 uses `foamRun -solver incompressibleFluid`, with `solver incompressibleFluid` in `controlDict`, viscosity in `constant/physicalProperties`, and laminar selection in `constant/momentumTransport`.
+
+Treat OpenFOAM incompressible `p` as kinematic pressure and `phi` as volumetric flow. Convert pressure drop to Pa and flow to kg/s using the case density before comparing against Hagen-Poiseuille or checking mass conservation. Require mesh quality, final residual, mass imbalance, and analytical benchmark thresholds before marking the Pilot verified.
+
+For a blockMesh axisymmetric pipe with a collapsed centreline, use a one-cell wedge in the circumferential direction. Subdividing that direction creates extremely thin centreline cells, high aspect ratio, and small determinant failures even when the solver exits normally.
+
+Do not classify the normal `SIGFPE` trapping banner as a floating-point crash. Require an actual exception or fatal-error record; preserve a regression case containing the trapping banner followed by a normal `End` marker.
 
 ## Failure routing
 

@@ -1,6 +1,7 @@
 name: fluid-scientist
 
 services:
+  # ===== 基础设施层 =====
   postgres:
     image: postgres:16-alpine
     environment:
@@ -59,9 +60,67 @@ services:
       timeout: 3s
       retries: 20
 
+  # ===== 应用层 =====
+  api:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: fluid-scientist:latest
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    environment:
+      FLUID_APP_MODE: ${FLUID_APP_MODE:-fake}
+      FLUID_DATABASE__URL: ${FLUID_DATABASE__URL:-sqlite:///app/data/fluid_scientist.db}
+      FLUID_OPENAI__API_KEY: ${FLUID_OPENAI__API_KEY:-}
+      FLUID_OPENAI__PLANNER_MODEL: ${FLUID_OPENAI__PLANNER_MODEL:-gpt-5.5}
+      FLUID_OPENAI__EXTRACTOR_MODEL: ${FLUID_OPENAI__EXTRACTOR_MODEL:-gpt-5.4-mini}
+      FLUID_WORKSTATION__HOSTS: ${FLUID_WORKSTATION__HOSTS:-[]}
+      FLUID_WORKSTATION__USERNAME: ${FLUID_WORKSTATION__USERNAME:-}
+      FLUID_WORKSTATION__PORT: ${FLUID_WORKSTATION__PORT:-22}
+      FLUID_WORKSTATION__IDENTITY_FILE: ${FLUID_WORKSTATION__IDENTITY_FILE:-}
+      FLUID_WORKSTATION__KNOWN_HOSTS_FILE: ${FLUID_WORKSTATION__KNOWN_HOSTS_FILE:-}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      MINIO_ENDPOINT: ${MINIO_ENDPOINT:-http://minio:9000}
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:-local-development}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:-change-me-locally}
+    volumes:
+      - app-data:/app/data
+      - ${SSH_KEYS_DIR:-./ssh-keys}:/app/ssh-keys:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    profiles:
+      - full
+      - app
+
+  api-dev:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: builder
+    image: fluid-scientist:dev
+    ports:
+      - "${APP_PORT:-8000}:8000"
+    environment:
+      FLUID_APP_MODE: fake
+      FLUID_DATABASE__URL: sqlite:///app/data/fluid_scientist.db
+    volumes:
+      - ../src:/app/src
+      - ../apps:/app/apps
+      - ../tests:/app/tests
+      - app-data:/app/data
+    command: ["uvicorn", "fluid_scientist.api.app:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    restart: unless-stopped
+    profiles:
+      - dev
+
 volumes:
   postgres-data:
   redis-data:
   qdrant-data:
   minio-data:
-
+  app-data:

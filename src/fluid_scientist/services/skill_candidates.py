@@ -1,11 +1,12 @@
 """Governed extraction, testing, approval, and publication of candidate Skills."""
 
 import re
-from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from fluid_scientist.compat import StrEnum
 
 
 class PublishBlocked(RuntimeError):

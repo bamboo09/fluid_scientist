@@ -93,6 +93,23 @@
 - [ ] Run Slurm, workflow, and injection tests; expect PASS.
 - [ ] Commit with `feat: add recoverable Slurm adapter`.
 
+### Task 6A: Selectable workstation OpenFOAM target
+
+**Files:**
+- Create: `src/fluid_scientist/execution_targets/base.py`
+- Create: `src/fluid_scientist/execution_targets/workstation.py`
+- Modify: `src/fluid_scientist/settings.py`
+- Modify: `src/fluid_scientist/api/app.py`
+- Modify: `apps/web/index.html`
+- Test: `tests/execution_targets/test_workstation.py`
+- Test: `tests/api/test_execution_targets.py`
+
+- [ ] Write failing tests for capability discovery, multiple candidate-host selection, unavailable targets, worker protocol mismatch, and API serialization.
+- [ ] Implement `ExecutionTargetAdapter` plus `WorkstationOpenFOAMTarget` using strict SSH host verification and the fixed `fluid-worker doctor/submit/status/cancel/collect` protocol.
+- [ ] Expose `GET /api/execution-targets` and add Workstation OpenFOAM/HPC Slurm selection to the experiment UI. Never persist candidate IPs in source or logs.
+- [ ] Run target, API, SSH, security, and full regression tests; expect PASS.
+- [ ] Commit with `feat: add selectable workstation OpenFOAM target`.
+
 ### Task 7: OpenFOAM laminar-pipe benchmark
 
 **Files:**

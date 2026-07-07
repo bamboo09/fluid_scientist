@@ -3,125 +3,179 @@
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <meta name="description" content="流体力学可信科研工作台">
-    <title>Fluid Scientist · 科研工作台</title>
+    <meta name="description" content="从自然语言研究问题到可追溯 OpenFOAM 实验的可信科研工作台。">
+    <title>Fluid Scientist · 对话式实验工作台</title>
     <link rel="stylesheet" href="/assets/styles.css">
   </head>
   <body>
-    <div class="grain" aria-hidden="true"></div>
-    <header class="topbar">
-      <div class="brand">
-        <span class="brand-mark">φ</span>
-        <div><strong>FLUID SCIENTIST</strong><small>可信数值研究系统</small></div>
+    <a class="skip-link" href="#experiment-prompt">跳到实验描述</a>
+
+    <header class="site-header">
+      <a class="brand" href="#conversation-stream" aria-label="Fluid Scientist 首页">
+        <span class="brand-mark" aria-hidden="true">φ</span>
+        <span><strong>Fluid Scientist</strong><small>可信流体实验工作台</small></span>
+      </a>
+      <div class="header-controls" aria-label="工作台状态">
+        <button class="status-button" id="open-model-settings" type="button" aria-haspopup="dialog">
+          <span>模型</span><strong id="header-model-status">尚未配置</strong>
+        </button>
+        <button class="status-button" id="open-target-settings" type="button">
+          <span>执行平台</span><strong id="header-target-status">正在检查</strong>
+        </button>
+        <p id="system-state" class="connection-state" role="status"><i aria-hidden="true"></i>正在连接服务</p>
       </div>
-      <div class="system-state"><span></span> FAKE MODE · 无需外部凭据</div>
     </header>
 
-    <div class="shell">
-      <aside class="sidebar" aria-label="项目导航">
-        <p class="eyebrow">RESEARCH / 001</p>
-        <nav>
-          <a class="active" href="#overview"><b>01</b>项目总览</a>
-          <a href="#spec"><b>02</b>研究规格</a>
-          <a href="#evidence"><b>03</b>文献证据 <em>01</em></a>
-          <a href="#experiment"><b>04</b>实验设计</a>
-          <a href="#jobs"><b>05</b>HPC 作业 <em>03</em></a>
-          <a href="#report"><b>06</b>实验结果分析与报告</a>
-        </nav>
-        <div class="sidebar-note">
-          <span>控制平面</span>
-          <strong>LOCAL / READY</strong>
-          <small>真实 HPC 接口尚未配置</small>
-        </div>
-      </aside>
+    <div class="workbench-shell">
+      <main class="workbench">
+        <section id="conversation-stream" class="conversation-stream" aria-label="实验对话">
+          <article id="welcome-message" class="message message-assistant">
+            <div class="message-avatar" aria-hidden="true">FS</div>
+            <div class="message-body">
+              <p class="message-meta">研究助手 · 现在</p>
+              <h1>从一个问题开始，建立可验证的数值实验。</h1>
+              <p>描述研究目标即可。你也可以补充几何、流体性质、工况、网格、收敛条件或希望观察的量。我会先生成实验计划，待你核对后再编译并提交。</p>
+              <div class="prompt-examples" aria-label="示例问题">
+                <button type="button" data-prompt="研究圆柱绕流中雷诺数对阻力系数与涡脱落频率的影响。">圆柱绕流与涡脱落</button>
+                <button type="button" data-prompt="验证层流圆管压降与 Hagen–Poiseuille 理论的一致性。">层流圆管压降</button>
+                <button type="button" data-prompt="设计顶盖驱动方腔的网格无关性实验，并比较中心线速度。">方腔流网格验证</button>
+              </div>
+            </div>
+          </article>
 
-      <main id="overview">
-        <section class="hero reveal">
-          <div>
-            <p class="eyebrow">90° BEND · SINGLE PHASE · STEADY RANS</p>
-            <h1>弯管压降与<br><i>二次流</i>研究</h1>
-          </div>
-          <div class="hero-meta">
-            <span>项目状态</span><strong id="project-status">等待研究问题</strong>
-            <span>工作流版本</span><strong>v0.1 / DEMO</strong>
-          </div>
+          <article id="research-question-card" class="research-question-card" hidden>
+            <p class="card-kicker">当前研究问题</p>
+            <h1 id="research-question-text"></h1>
+            <p id="session-status" class="session-status" role="status"></p>
+          </article>
+
+          <p id="operation-announcement" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></p>
+          <article id="active-operation" class="operation-card" aria-busy="false" hidden>
+            <header class="operation-header">
+              <div>
+                <p class="card-kicker">实验设计进度</p>
+                <h2 id="operation-status">等待开始</h2>
+              </div>
+              <span id="operation-elapsed" class="operation-elapsed">尚未计时</span>
+            </header>
+            <p id="operation-stage" class="operation-stage">模型尚未开始规划。</p>
+            <div class="operation-progress" role="progressbar" aria-label="实验设计进度" aria-valuemin="0" aria-valuemax="100">
+              <i id="operation-progress-bar"></i>
+            </div>
+            <p id="operation-message" class="operation-message"></p>
+            <div class="operation-actions">
+              <button id="cancel-operation" class="button button-quiet" type="button" hidden>取消规划</button>
+              <button id="retry-operation" class="button button-secondary" type="button" hidden>重新规划</button>
+            </div>
+          </article>
+
+          <article id="experiment-plan-review" class="work-card plan-card" hidden>
+            <header class="card-header">
+              <div><p class="card-kicker">实验计划 <span id="plan-provider-badge">等待生成</span></p><h2 id="plan-title">待审阅的实验计划</h2></div>
+              <span id="plan-type" class="type-chip">—</span>
+            </header>
+            <section class="objective-block"><h3>研究目标</h3><p id="plan-objective">—</p></section>
+            <div class="plan-summary-grid">
+              <section><h3>几何</h3><dl id="plan-geometry"></dl></section>
+              <section><h3>物理输入</h3><dl id="plan-physics"></dl></section>
+              <section><h3>网格</h3><dl id="plan-mesh"></dl></section>
+              <section><h3>运行控制</h3><dl id="plan-numerics"></dl></section>
+            </div>
+            <section class="plan-notes"><div><h3>请求输出</h3><ul id="plan-outputs"></ul></div><div><h3>假设</h3><ul id="plan-assumptions"></ul></div><div><h3>风险与局限</h3><ul id="plan-limitations"></ul></div></section>
+            <details class="parameter-details">
+              <summary>查看全部参数</summary>
+              <div class="detail-grid"><section><h3>边界条件</h3><div id="plan-boundaries"></div></section><section><h3>参数扫描</h3><div id="plan-sweeps"></div></section></div>
+            </details>
+            <output id="compile-preview" class="compiler-preview">确认后将由确定性编译器生成算例并绑定归档摘要。</output>
+            <aside id="design-rationale" class="design-rationale" hidden></aside>
+            <div class="card-actions">
+              <button id="compile-experiment" class="button button-primary" type="button">确认并提交</button>
+              <button id="submit-planned-experiment" class="visually-hidden" type="button" disabled>提交已批准算例</button>
+              <button id="analyze-experiment-results" class="button button-quiet" type="button" disabled>分析实验结果</button>
+            </div>
+          </article>
+
+          <section id="task-card-host" aria-label="远程任务"></section>
+
+          <article id="report" class="work-card result-card" hidden>
+            <header class="card-header"><div><p class="card-kicker">确定性结果</p><h2>实验结果与可信度检查</h2></div><span id="credibility-state" class="type-chip">待评估</span></header>
+            <div class="result-metrics"><div><span>平均压降</span><strong id="mean-pressure">—</strong><small>Pa</small></div><div><span id="secondary-metric-label">标准差</span><strong id="std-pressure">—</strong></div><div><span id="third-metric-label">细网格 GCI</span><strong id="gci">—</strong><small>%</small></div></div>
+            <div class="credibility-grid"><p><span>质量不平衡</span><strong id="mass-balance">—</strong></p><p><span>网格检查</span><strong id="mesh-score">—</strong></p><p><span>基准一致性</span><strong id="benchmark-score">—</strong></p></div>
+            <section id="postprocess-card" class="postprocess-card" hidden>
+              <div><p class="card-kicker">浏览器后处理</p><h3>结构化结果</h3></div>
+              <code id="postprocess-command">等待结果采集</code><small id="postprocess-times"></small>
+              <button id="view-postprocess" class="button button-secondary" type="button">在页面中查看结果</button>
+              <section id="postprocess-results" class="postprocess-results" hidden aria-live="polite" aria-busy="false"></section>
+            </section>
+            <details><summary>高级 ParaView 指引</summary><p>结果采集完成后，可在所选工作站使用生成的 <code>.foam</code> 标记文件进行高级可视化。</p></details>
+            <section class="analysis-block"><h3>证据约束的模型分析</h3><ol id="claim-list"></ol><p id="scope-note"></p></section>
+            <footer><span id="evidence-count">0</span> 条证据 · <span id="audit-count">0</span> 条审计事件</footer>
+          </article>
         </section>
 
-        <form id="research-form" class="research-input reveal" aria-label="运行研究演示">
-          <label for="question">研究问题</label>
-          <div class="input-row">
-            <textarea id="question" name="question" rows="2" minlength="10">弯管曲率和 Reynolds 数如何影响压降及二次流？</textarea>
-            <button id="run-button" type="submit"><span>运行可信闭环</span><b>→</b></button>
+        <form id="research-form" class="composer" aria-label="描述实验">
+          <label for="experiment-prompt">描述你想研究的问题</label>
+          <textarea id="experiment-prompt" name="experiment-prompt" rows="3" minlength="10" placeholder="例如：研究 Re = 100 的圆柱绕流，比较两组网格下的阻力系数与 Strouhal 数，并检查残差和质量守恒。"></textarea>
+          <output id="form-message" class="composer-status" role="status"></output>
+          <div class="composer-footer">
+            <p id="composer-hint">可描述几何、流体、工况、输出与约束，也可以只写研究目标。</p>
+            <button id="design-experiment" class="button button-primary" type="submit" disabled>设计实验 <span aria-hidden="true">→</span></button>
           </div>
-          <p id="form-message" role="status">将执行结构化、三个审批 Gate、Fake Slurm、数值验证与证据化报告。</p>
         </form>
-
-        <section class="stage-rail reveal" aria-label="研究阶段">
-          <div class="done"><b>01</b><span>问题</span></div>
-          <div class="done"><b>02</b><span>证据</span></div>
-          <div class="current"><b>03</b><span>Pilot</span></div>
-          <div><b>04</b><span>批量</span></div>
-          <div><b>05</b><span>验证</span></div>
-          <div><b>06</b><span>分析</span></div>
-          <div><b>07</b><span>报告</span></div>
-        </section>
-
-        <section class="dashboard-grid reveal">
-          <article class="panel action-panel">
-            <div class="panel-kicker"><span>ACTION</span><em>GATE 2</em></div>
-            <h2>Pilot 方案已锁定</h2>
-            <p>中心工况 × 三套网格。Fake 模式自动记录批准，但保留完整审计链。</p>
-            <dl><div><dt>算例</dt><dd>3</dd></div><div><dt>估算预算</dt><dd>18 CPU·h</dd></div></dl>
-          </article>
-
-          <article id="jobs" class="panel job-panel">
-            <div class="panel-kicker"><span>HPC / SLURM</span><em id="job-state">IDLE</em></div>
-            <h2>三节点执行边界</h2>
-            <ol>
-              <li><span>DATA</span>制品构建与校验</li>
-              <li><span>LOGIN</span>作业提交与查询</li>
-              <li><span>COMPUTE</span>OpenFOAM 求解</li>
-            </ol>
-            <div class="progress"><i id="job-progress"></i></div>
-          </article>
-
-          <article class="panel credibility-panel">
-            <div class="panel-kicker"><span>CREDIBILITY</span><em id="credibility-state">PENDING</em></div>
-            <div class="gauge"><strong id="mass-balance">—</strong><span>质量不平衡</span></div>
-            <ul>
-              <li>网格无关性 <b id="mesh-score">—</b></li>
-              <li>基准一致性 <b id="benchmark-score">—</b></li>
-              <li>HARD 违规 <b>0</b></li>
-            </ul>
-          </article>
-
-          <article id="evidence" class="panel evidence-panel">
-            <div class="panel-kicker"><span>EVIDENCE</span><em>TRACEABLE</em></div>
-            <blockquote>“仿真完成”不等于“科研可信”。</blockquote>
-            <p>结论必须绑定模拟制品、确定性分析指标或可定位文献证据。</p>
-            <span class="evidence-count" id="evidence-count">0</span><small>已绑定证据 ID</small>
-          </article>
-        </section>
-
-        <section id="report" class="report-section reveal" hidden>
-          <div class="section-heading">
-            <div><p class="eyebrow">RESULTS ANALYST / REVIEWER</p><h2>实验结果分析与报告</h2></div>
-            <span id="audit-count">0 AUDIT EVENTS</span>
-          </div>
-          <div class="report-grid">
-            <article class="metric-sheet">
-              <p>确定性计算</p>
-              <div><span>平均压降</span><strong id="mean-pressure">—</strong><small>Pa</small></div>
-              <div><span>标准差</span><strong id="std-pressure">—</strong><small>Pa</small></div>
-              <div><span>细网格 GCI</span><strong id="gci">—</strong><small>%</small></div>
-            </article>
-            <article class="claim-sheet"><p>证据化结论</p><ol id="claim-list"></ol></article>
-          </div>
-          <footer id="scope-note"></footer>
-        </section>
+        <div class="session-actions">
+          <button id="start-new-experiment" class="button button-secondary" type="button" hidden>研究另一个问题</button>
+        </div>
       </main>
+
+      <aside id="task-context" class="context-rail" aria-label="当前实验上下文">
+        <header><p class="rail-eyebrow">当前上下文</p><h2>实验记录</h2></header>
+        <section><h3>规划模型</h3><p><strong id="current-model">未连接</strong><span id="context-model-id">API 密钥不会保存在浏览器中</span></p><button type="button" class="text-button" data-open-dialog="model-settings">配置模型</button></section>
+        <section><h3>执行平台</h3><p><strong id="current-target">尚未选择</strong><span id="target-capability-state">等待能力检查</span></p><button type="button" class="text-button" data-open-dialog="target-settings">选择执行平台</button></section>
+        <section><h3>活动项目</h3><p><strong id="current-project">尚未创建</strong><span id="active-project-name">从第一条实验请求开始</span></p></section>
+        <section><h3>远程任务</h3><p><strong id="job-state" data-task-label>空闲</strong><span id="job-id">尚未提交</span></p><div class="progress" aria-hidden="true"><i id="job-progress"></i></div><p id="last-task-update" class="rail-note">没有活动任务</p></section>
+        <nav aria-label="辅助入口"><button id="open-custom-case" type="button" class="rail-link" aria-haspopup="dialog">上传自定义 OpenFOAM 算例 <span>↗</span></button><a class="rail-link" href="#conversation-stream">查看本次对话 <span>↑</span></a></nav>
+      </aside>
     </div>
-    <script src="/assets/app.js" defer></script>
+
+    <dialog id="model-settings" class="settings-dialog" aria-labelledby="model-settings-title">
+      <form method="dialog" class="dialog-shell">
+        <header><div><p class="card-kicker">高级设置</p><h2 id="model-settings-title">连接实验规划模型</h2></div><button class="icon-button" value="cancel" aria-label="关闭模型设置">×</button></header>
+        <p>密钥仅保存在当前服务进程的内存中，不会写入浏览器存储或项目文件。</p>
+        <label class="field-label" for="model-provider">模型服务</label><select id="model-provider"><option value="openai">OpenAI</option><option value="glm">GLM / 智谱</option><option value="deepseek">DeepSeek</option></select>
+        <label class="field-label" for="model-api-key">API Key</label><input id="model-api-key" type="password" autocomplete="off" spellcheck="false" placeholder="输入后仅发送到本地服务">
+        <label class="field-label" for="model-id">模型 ID</label><input id="model-id" type="text" value="gpt-5.4" autocomplete="off">
+        <p id="model-config-state" class="dialog-state" role="status">尚未配置模型。</p>
+        <div class="dialog-actions"><button value="cancel" class="button button-secondary">取消</button><button id="configure-model" class="button button-primary" type="button">保存并连接</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="target-settings" class="settings-dialog" aria-labelledby="target-settings-title">
+      <form method="dialog" class="dialog-shell">
+        <header><div><p class="card-kicker">执行边界</p><h2 id="target-settings-title">选择工作站或 HPC</h2></div><button class="icon-button" value="cancel" aria-label="关闭执行平台设置">×</button></header>
+        <p>任务状态只根据服务端和远程工作进程的真实响应更新。</p>
+        <label class="field-label" for="execution-target">实验执行平台</label>
+        <select id="execution-target" name="execution-target"><option value="">正在检查可用平台…</option></select>
+        <div class="dialog-actions"><button value="cancel" class="button button-primary">使用所选平台</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="custom-case-drawer" class="settings-dialog drawer-dialog" aria-labelledby="custom-case-title">
+      <form method="dialog" class="dialog-shell">
+        <header><div><p class="card-kicker">高级路径</p><h2 id="custom-case-title">提交自定义 OpenFOAM 算例</h2></div><button class="icon-button" value="cancel" aria-label="关闭自定义算例">×</button></header>
+        <p>模型生成的是实验计划，不能直接作为可执行算例。这里需要选择一个已准备好的 OpenFOAM Case 文件夹压缩包（<code>.tar.gz</code> 或 <code>.tgz</code>）；通过安全校验后才可提交。</p>
+        <label class="field-label" for="custom-experiment-name">实验名称</label><input id="custom-experiment-name" type="text" value="Cylinder Flow Study" maxlength="80">
+        <label class="file-field" for="custom-case-file"><span>算例归档</span><input id="custom-case-file" type="file" accept=".tar.gz,.tgz,application/gzip"><small>选择文件后先执行安全校验</small></label>
+        <output id="custom-case-result" class="dialog-state">尚未校验</output>
+        <div class="dialog-actions"><button id="validate-custom-case" class="button button-secondary" type="button">安全校验</button><button id="submit-custom-case" class="button button-primary" type="button" disabled>提交到执行平台</button></div>
+      </form>
+    </dialog>
+
+    <template id="assistant-message-template"><article class="message message-assistant"><div class="message-avatar" aria-hidden="true">FS</div><div class="message-body"><p class="message-meta">研究助手</p><div data-field="content"></div></div></article></template>
+    <template id="plan-card-template"><article class="work-card plan-card"><header class="card-header"><div><p class="card-kicker">实验计划</p><h2 data-field="title"></h2></div><span class="type-chip" data-field="type"></span></header><div data-field="content"></div></article></template>
+    <template id="task-card-template"><article class="work-card task-card" aria-live="polite"><header class="card-header"><div><p class="card-kicker">远程任务</p><h2 data-field="state">准备中</h2></div><span class="type-chip" data-field="job-id">等待 Job ID</span></header><dl class="task-facts"><div><dt>执行平台</dt><dd data-field="target">—</dd></div><div><dt>当前阶段</dt><dd data-field="stage">—</dd></div><div><dt>远程 PID</dt><dd data-field="pid">—</dd></div><div><dt>最后更新</dt><dd data-field="updated">—</dd></div></dl><div data-field="detail"></div></article></template>
+    <template id="error-card-template"><article class="work-card error-card" role="alert"><p class="card-kicker">操作未完成</p><h2 data-field="title">需要处理</h2><p data-field="message"></p><div data-field="action"></div></article></template>
+    <template id="result-card-template"><article class="work-card result-card"><p class="card-kicker">确定性结果</p><h2 data-field="title">实验已完成</h2><div data-field="content"></div></article></template>
+
+    <script type="module" src="/assets/app.js"></script>
   </body>
 </html>
-

@@ -1,0 +1,43 @@
+FoamFile
+{
+    format      ascii;
+    class       volVectorField;
+    location    "0";
+    object      U;
+}
+dimensions      [0 1 -1 0 0 0 0];
+internalField   uniform ({{velocity}} 0 0);
+boundaryField
+{
+    #includeEtc "caseDicts/setConstraintTypes"
+    inlet
+    {
+        type            codedFixedValue;
+        name            fullyDevelopedPipeInlet;
+        code
+        #{
+            const vectorField& centres = patch().Cf();
+            vectorField profile(centres.size(), vector::zero);
+            const scalar radius = {{radius}};
+            const scalar meanVelocity = {{velocity}};
+            forAll(centres, facei)
+            {
+                const scalar radialSquared =
+                    sqr(centres[facei].y()) + sqr(centres[facei].z());
+                profile[facei].x() =
+                    2.0*meanVelocity*(1.0 - radialSquared/sqr(radius));
+            }
+            operator==(profile);
+        #};
+        value           uniform ({{velocity}} 0 0);
+    }
+    outlet
+    {
+        type            pressureInletOutletVelocity;
+        value           $internalField;
+    }
+    walls
+    {
+        type            noSlip;
+    }
+}

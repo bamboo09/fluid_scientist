@@ -1,7 +1,8 @@
 """Deterministic fake adapters for CI, demos, and contract tests."""
 
-from datetime import UTC, datetime
+from datetime import datetime
 
+from fluid_scientist.compat import UTC
 from fluid_scientist.domain.models import (
     AnalysisResult,
     CaseManifest,
