@@ -981,7 +981,7 @@ def create_app(
             )
             project_service.store_compiled_experiment(
                 StoredCompiledExperiment(
-                    plan_id=plan_id,
+                    experiment_id=plan_id,
                     plan_version=stored_plan.version,
                     archive_sha256=compiled.archive_sha256,
                     archive=compiled.archive,
@@ -1148,6 +1148,8 @@ def create_app(
         "/api/projects/{project_id}/experiment-plans/{plan_id}/submit",
         response_model=BenchmarkSubmissionView,
         status_code=status.HTTP_201_CREATED,
+        deprecated=True,
+        tags=["deprecated"],
     )
     def submit_planned_experiment(
         project_id: str,
@@ -1208,6 +1210,8 @@ def create_app(
     @application.get(
         "/api/projects/{project_id}/experiment-plans/{plan_id}/results",
         response_model=PlannedExperimentResultsView,
+        deprecated=True,
+        tags=["deprecated"],
     )
     def planned_experiment_results(
         project_id: str,
@@ -1262,6 +1266,8 @@ def create_app(
     @application.post(
         "/api/projects/{project_id}/experiment-plans/{plan_id}/analysis",
         response_model=ExperimentAnalysisView,
+        deprecated=True,
+        tags=["deprecated"],
     )
     def analyze_planned_experiment(
         project_id: str,
@@ -1983,7 +1989,7 @@ def create_app(
 
         workflow_repository.store_compiled_experiment(
             StoredCompiledExperiment(
-                plan_id=experiment_id,
+                experiment_id=experiment_id,
                 plan_version=stored.experiment_version,
                 archive_sha256=compiled.archive_sha256,
                 archive=compiled.archive,

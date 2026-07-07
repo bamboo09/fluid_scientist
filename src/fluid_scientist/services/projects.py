@@ -112,11 +112,11 @@ class ProjectService:
         return self._repository.store_compiled_experiment(compiled)
 
     def load_compiled_experiment(
-        self, plan_id: str, plan_version: int
+        self, experiment_id: str, plan_version: int
     ) -> StoredCompiledExperiment:
-        compiled = self._repository.load_compiled_experiment(plan_id, plan_version)
+        compiled = self._repository.load_compiled_experiment(experiment_id, plan_version)
         if compiled is None:
-            raise KeyError(f"compiled experiment not found: {plan_id} version {plan_version}")
+            raise KeyError(f"compiled experiment not found: {experiment_id} version {plan_version}")
         return compiled
 
     def prepare_bound_experiment_submission(

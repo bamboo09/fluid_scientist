@@ -1516,6 +1516,10 @@ async function submitSpec() {
       targetId: selectedTarget,
       lastUpdated: new Date().toLocaleString(),
     });
+    console.warn(
+      "[DEPRECATED] POST /experiment-plans/{id}/submit is deprecated. " +
+      "Use POST /experiment-specs/{id}/ingest for the new analysis pipeline.",
+    );
     const response = await requestJson(
       `/api/projects/${currentProject.project_id}/experiment-plans/${currentSpec.experiment_id}/submit`,
       {
@@ -2337,3 +2341,56 @@ async function init() {
 }
 
 init();
+
+// =============================================================
+// New API functions for experiment-specs endpoints (Commit 11)
+// =============================================================
+
+/**
+ * Ingest OpenFOAM results from a case directory.
+ * Replaces the old /experiment-plans/{id}/submit endpoint.
+ * @deprecated The old submit endpoint is deprecated; use this instead.
+ */
+async function ingestExperimentResults(projectId, experimentId, casePath) {
+  console.info("[NEW API] Calling /experiment-specs/{id}/ingest");
+  return requestJson(
+    `/api/projects/${projectId}/experiment-specs/${experimentId}/ingest`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ case_path: casePath }),
+    },
+  );
+}
+
+/**
+ * Analyze ingested experiment results.
+ * Replaces the old /experiment-plans/{id}/analysis endpoint.
+ * @deprecated The old analysis endpoint is deprecated; use this instead.
+ */
+async function analyzeExperimentResults(projectId, experimentId) {
+  console.info("[NEW API] Calling /experiment-specs/{id}/analyze");
+  return requestJson(
+    `/api/projects/${projectId}/experiment-specs/${experimentId}/analyze`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    },
+  );
+}
+
+/**
+ * Generate a scientific report from analyzed results.
+ * Replaces the old /experiment-plans/{id}/results endpoint.
+ * @deprecated The old results endpoint is deprecated; use this instead.
+ */
+async function generateScientificReport(projectId, experimentId) {
+  console.info("[NEW API] Calling /experiment-specs/{id}/scientific-report");
+  return requestJson(
+    `/api/projects/${projectId}/experiment-specs/${experimentId}/scientific-report`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    },
+  );
+}

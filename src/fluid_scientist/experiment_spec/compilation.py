@@ -113,6 +113,11 @@ def _float(values: dict[str, Any], key: str, default: float) -> float:
         is retained only for the deprecated :func:`compile_confirmed_spec`
         path.
     """
+    warnings.warn(
+        "_float is deprecated; use _required_float instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     v = values.get(key)
     if v is None:
         return default
@@ -127,6 +132,11 @@ def _int(values: dict[str, Any], key: str, default: int) -> int:
         is retained only for the deprecated :func:`compile_confirmed_spec`
         path.
     """
+    warnings.warn(
+        "_int is deprecated; use _required_int instead",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     v = values.get(key)
     if v is None:
         return default
@@ -201,6 +211,7 @@ def validate_required_parameters(spec: ExperimentSpec) -> None:
 
 # [DEPRECATED] — hardcoded convergence defaults; new code should not use this.
 # Retained only for the deprecated compile_confirmed_spec() path.
+# .. deprecated:: Use native compile_spec() which does not require ExperimentPlan.
 _DEFAULT_CONVERGENCE = ConvergenceTargets(
     residual_tolerance=1e-4,
     mass_imbalance_percent=1.0,
@@ -208,7 +219,18 @@ _DEFAULT_CONVERGENCE = ConvergenceTargets(
 
 
 def _build_pipe_plan(spec: ExperimentSpec) -> PipeExperimentPlan:
-    """Build a PipeExperimentPlan from confirmed spec parameters."""
+    """[DEPRECATED] Build a PipeExperimentPlan from confirmed spec parameters.
+
+    .. deprecated::
+        This function is retained only for the deprecated
+        :func:`compile_confirmed_spec` path.  New code must use the
+        native compiler via :func:`compile_spec`.
+    """
+    warnings.warn(
+        "_build_pipe_plan is deprecated; use native compile_spec path",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     v = _param_values(spec)
     case = LaminarPipeCase(
         diameter_m=_float(v, "diameter", 0.05),
@@ -233,7 +255,18 @@ def _build_pipe_plan(spec: ExperimentSpec) -> PipeExperimentPlan:
 
 
 def _build_cylinder_plan(spec: ExperimentSpec) -> CylinderExperimentPlan:
-    """Build a CylinderExperimentPlan from confirmed spec parameters."""
+    """[DEPRECATED] Build a CylinderExperimentPlan from confirmed spec parameters.
+
+    .. deprecated::
+        This function is retained only for the deprecated
+        :func:`compile_confirmed_spec` path.  New code must use the
+        native compiler via :func:`compile_spec`.
+    """
+    warnings.warn(
+        "_build_cylinder_plan is deprecated; use native compile_spec path",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     v = _param_values(spec)
     time_step = v.get("time_step")
     max_courant = v.get("max_courant")
@@ -284,7 +317,18 @@ def _build_cylinder_plan(spec: ExperimentSpec) -> CylinderExperimentPlan:
 
 
 def _build_cavity_plan(spec: ExperimentSpec) -> CavityExperimentPlan:
-    """Build a CavityExperimentPlan from confirmed spec parameters."""
+    """[DEPRECATED] Build a CavityExperimentPlan from confirmed spec parameters.
+
+    .. deprecated::
+        This function is retained only for the deprecated
+        :func:`compile_confirmed_spec` path.  New code must use the
+        native compiler via :func:`compile_spec`.
+    """
+    warnings.warn(
+        "_build_cavity_plan is deprecated; use native compile_spec path",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     v = _param_values(spec)
     case = LidDrivenCavityCase(
         side_length_m=_float(v, "side_length", 0.1),
@@ -307,6 +351,8 @@ def _build_cavity_plan(spec: ExperimentSpec) -> CavityExperimentPlan:
     )
 
 
+# [DEPRECATED] — legacy plan builders; retained only for compile_confirmed_spec().
+# New code must use the native compiler via compile_spec().
 _BUILDERS = {
     "laminar_pipe": _build_pipe_plan,
     "cylinder_flow": _build_cylinder_plan,
@@ -389,9 +435,9 @@ def compile_confirmed_spec(spec: ExperimentSpec) -> CompiledCase:
 def compile_spec(spec: ExperimentSpec) -> tuple[CompiledCase, CompilationManifest]:
     """直接从 ExperimentSpec 编译 OpenFOAM 算例。
 
-    Uses native compilation path (CompilerRegistry) when available.
-    Falls back to legacy compile_confirmed_spec only if no native compiler
-    can handle the spec.
+    Uses the native compilation path (CompilerRegistry) exclusively.
+    The legacy ``compile_confirmed_spec`` fallback has been removed —
+    all three native compilers (Pipe, Cylinder, Cavity) are now working.
 
     Args:
         spec: 必须处于 ``confirmed`` 状态的 ExperimentSpec。
@@ -401,6 +447,7 @@ def compile_spec(spec: ExperimentSpec) -> tuple[CompiledCase, CompilationManifes
 
     Raises:
         SpecNotConfirmedError: 如果 spec 不是 confirmed 状态。
+        ValueError: 如果没有可用的原生编译器。
     """
     from fluid_scientist.experiment_spec.native_compiler import (
         CompilerRegistry,
@@ -411,29 +458,15 @@ def compile_spec(spec: ExperimentSpec) -> tuple[CompiledCase, CompilationManifes
     validate_required_parameters(spec)
 
     registry = CompilerRegistry()
-    if registry.resolve(spec) is not None:
-        return compile_spec_native(spec, registry)
-
-    # Fallback: legacy path (with deprecation warning)
-    compiled = compile_confirmed_spec(spec)
-
-    spec_hash = compute_spec_hash(spec)
-    case_hash = compute_case_hash(compiled)
-
-    manifest = CompilationManifest(
-        compilation_id=f"comp-{uuid4().hex[:16]}",
-        experiment_id=spec.experiment_id,
-        experiment_version=spec.experiment_version,
-        spec_hash=spec_hash,
-        case_hash=case_hash,
-        generated_files=list(compiled.manifest.members),
-        compiler_id=COMPILER_ID,
-        compiler_version=COMPILER_VERSION,
-        template_versions=dict(TEMPLATE_VERSIONS),
-        extension_versions=_build_extension_versions(spec),
-        environment=_build_environment(),
-    )
-    return compiled, manifest
+    compiler = registry.resolve(spec)
+    if compiler is None:
+        experiment_type = _detect_experiment_type(spec)
+        raise ValueError(
+            f"No native compiler available for experiment type '{experiment_type}'. "
+            "Legacy compile_confirmed_spec fallback has been removed. "
+            "Ensure the spec has parameters that match a supported experiment type."
+        )
+    return compile_spec_native(spec, registry)
 
 
 __all__ = [

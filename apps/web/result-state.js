@@ -108,6 +108,10 @@ export function plannedResultUrl({
   targetId,
   action = "results",
 }) {
+  console.warn(
+    "[DEPRECATED] plannedResultUrl constructs deprecated /experiment-plans/ URLs. " +
+    "Use the new /experiment-specs/{id}/ingest, /analyze, /scientific-report endpoints instead.",
+  );
   const safeAction = action === "analysis" ? "analysis" : "results";
   const query = new URLSearchParams({ target_id: targetId, case_id: caseId });
   const encodedProjectId = encodeURIComponent(projectId).replaceAll(".", "%2E");

@@ -81,7 +81,37 @@ def _enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
     cursor.close()
 
 
+def _migrate_compiled_experiments_plan_id_impl(engine) -> None:
+    """Rename compiled_experiments.plan_id to experiment_id if needed.
+
+    SQLite 3.25+ supports ALTER TABLE ... RENAME COLUMN.  For older
+    versions the migration is a no-op (the table will be created with
+    the correct column name by create_all).
+    """
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    if not inspector.has_table("compiled_experiments"):
+        return
+    columns = {col["name"] for col in inspector.get_columns("compiled_experiments")}
+    if "plan_id" in columns and "experiment_id" not in columns:
+        with engine.begin() as conn:
+            # Disable FK enforcement during migration to avoid issues
+            conn.execute(text("PRAGMA foreign_keys=OFF"))
+            conn.execute(
+                text(
+                    "ALTER TABLE compiled_experiments "
+                    "RENAME COLUMN plan_id TO experiment_id"
+                )
+            )
+            conn.execute(text("PRAGMA foreign_keys=ON"))
+
+
 class SQLWorkflowRepository:
+    def _migrate_compiled_experiments_plan_id(self) -> None:
+        """Rename plan_id column to experiment_id in compiled_experiments table."""
+        _migrate_compiled_experiments_plan_id_impl(self._engine)
+
     def __init__(self, database_url: str) -> None:
         engine_options = {}
         if database_url in {"sqlite://", "sqlite:///:memory:"}:
@@ -93,6 +123,7 @@ class SQLWorkflowRepository:
         if database_url.startswith("sqlite"):
             event.listen(self._engine, "connect", _enable_sqlite_foreign_keys)
         Base.metadata.create_all(self._engine)
+        self._migrate_compiled_experiments_plan_id()
         self._sessions = sessionmaker(self._engine, expire_on_commit=False)
 
     def save_snapshot(self, project_id: str, snapshot: str, *, expected_version: int) -> int:
@@ -346,7 +377,7 @@ class SQLWorkflowRepository:
         with self._sessions.begin() as session:
             row = session.scalar(
                 select(CompiledExperimentRow).where(
-                    CompiledExperimentRow.plan_id == compiled.plan_id,
+                    CompiledExperimentRow.experiment_id == compiled.experiment_id,
                     CompiledExperimentRow.plan_version == compiled.plan_version,
                 )
             )
@@ -354,13 +385,13 @@ class SQLWorkflowRepository:
                 existing = self._stored_compiled(row)
                 if existing != compiled:
                     raise ExperimentArtifactConflict(
-                        "compiled plan "
-                        f"{compiled.plan_id} version {compiled.plan_version} is immutable"
+                        "compiled experiment "
+                        f"{compiled.experiment_id} version {compiled.plan_version} is immutable"
                     )
                 return existing
             session.add(
                 CompiledExperimentRow(
-                    plan_id=compiled.plan_id,
+                    experiment_id=compiled.experiment_id,
                     plan_version=compiled.plan_version,
                     archive_sha256=compiled.archive_sha256,
                     archive=compiled.archive,
@@ -371,12 +402,12 @@ class SQLWorkflowRepository:
             return compiled
 
     def load_compiled_experiment(
-        self, plan_id: str, plan_version: int
+        self, experiment_id: str, plan_version: int
     ) -> StoredCompiledExperiment | None:
         with self._sessions() as session:
             row = session.scalar(
                 select(CompiledExperimentRow).where(
-                    CompiledExperimentRow.plan_id == plan_id,
+                    CompiledExperimentRow.experiment_id == experiment_id,
                     CompiledExperimentRow.plan_version == plan_version,
                 )
             )
@@ -561,7 +592,7 @@ class SQLWorkflowRepository:
     @staticmethod
     def _stored_compiled(row: CompiledExperimentRow) -> StoredCompiledExperiment:
         return StoredCompiledExperiment(
-            plan_id=row.plan_id,
+            experiment_id=row.experiment_id,
             plan_version=row.plan_version,
             archive_sha256=row.archive_sha256,
             archive=row.archive,

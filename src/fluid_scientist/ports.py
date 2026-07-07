@@ -59,7 +59,7 @@ class StoredExperimentPlan:
 
 @dataclass(frozen=True)
 class StoredCompiledExperiment:
-    plan_id: str
+    experiment_id: str
     plan_version: int
     archive_sha256: str
     archive: bytes
@@ -275,7 +275,7 @@ class WorkflowRepository(Protocol):
     ) -> StoredCompiledExperiment: ...
 
     def load_compiled_experiment(
-        self, plan_id: str, plan_version: int
+        self, experiment_id: str, plan_version: int
     ) -> StoredCompiledExperiment | None: ...
 
     def store_generated_case_draft(

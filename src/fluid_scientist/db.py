@@ -96,12 +96,10 @@ class ExperimentPlanRow(Base):
 
 class CompiledExperimentRow(Base):
     __tablename__ = "compiled_experiments"
-    __table_args__ = (UniqueConstraint("plan_id", "plan_version"),)
+    __table_args__ = (UniqueConstraint("experiment_id", "plan_version"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    plan_id: Mapped[str] = mapped_column(
-        ForeignKey("experiment_plans.plan_id", ondelete="CASCADE"), index=True
-    )
+    experiment_id: Mapped[str] = mapped_column(String(128), index=True)
     plan_version: Mapped[int] = mapped_column(Integer, nullable=False)
     archive_sha256: Mapped[str] = mapped_column(String(71), nullable=False)
     archive: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
