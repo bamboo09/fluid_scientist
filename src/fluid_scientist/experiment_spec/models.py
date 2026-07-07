@@ -21,7 +21,7 @@ from pydantic import (
     model_validator,
 )
 
-from fluid_scientist.compat import UTC
+from fluid_scientist.compat import UTC, StrEnum
 
 
 class StrictModel(BaseModel):
@@ -29,6 +29,7 @@ class StrictModel(BaseModel):
 
 
 # --- Enums ---
+
 
 class ExperimentStatus(str, Enum):
     DRAFT = "draft"
@@ -121,7 +122,19 @@ class TemporalType(str, Enum):
     TRANSIENT = "transient"
 
 
+class PhysicsFieldStatus(StrEnum):
+    """Status of an individual high-risk physics field."""
+
+    CONFIRMED = "confirmed"
+    USER_PROVIDED = "user_provided"
+    DERIVED = "derived"
+    SYSTEM_RECOMMENDED = "system_recommended"
+    UNKNOWN = "unknown"
+    NOT_APPLICABLE = "not_applicable"
+
+
 # --- Parameter Spec ---
+
 
 class ParameterSourceInfo(StrictModel):
     type: ParameterSource
@@ -218,16 +231,39 @@ class ParameterSpec(StrictModel):
 
 # --- Physics Spec ---
 
+
+class PhysicsFieldMeta(BaseModel):
+    """Status metadata for a single high-risk physics field."""
+
+    value: str | bool | None = None
+    status: PhysicsFieldStatus = PhysicsFieldStatus.UNKNOWN
+    confidence: Literal["high", "medium", "low"] = "low"
+    reason: str | None = None
+    requires_confirmation: bool = True
+
+
 class PhysicsSpec(StrictModel):
-    dimensions: Dimensions = Dimensions.TWO_D
-    phases: PhaseType = PhaseType.SINGLE_PHASE
-    compressibility: Compressibility = Compressibility.INCOMPRESSIBLE
-    flow_regime: FlowRegime = FlowRegime.LAMINAR
-    temporal_type: TemporalType = TemporalType.STEADY
-    gravity_enabled: bool = False
+    """Physics specification — high-risk fields default to None (unknown).
+
+    Callers must explicitly set these fields or rely on system recommendations
+    with appropriate warnings.  No silent defaults are applied.
+    """
+
+    dimensions: Dimensions | None = None
+    phases: PhaseType | None = None
+    compressibility: Compressibility | None = None
+    flow_regime: FlowRegime | None = None
+    temporal_type: TemporalType | None = None
+    gravity_enabled: bool | None = None
+
+    solver: str | None = None
+    turbulence_model: str | None = None
+
+    field_status: dict[str, PhysicsFieldMeta] = Field(default_factory=dict)
 
 
 # --- Research Spec ---
+
 
 class ResearchSpec(StrictModel):
     title: Annotated[StrictStr, StringConstraints(min_length=1, max_length=512)]
@@ -238,6 +274,7 @@ class ResearchSpec(StrictModel):
 
 
 # --- Experiment Spec (top-level) ---
+
 
 class ExperimentSpec(StrictModel):
     """Unified experiment specification — the single source of truth."""
@@ -286,26 +323,30 @@ class ExperimentSpec(StrictModel):
         found = False
         for p in self.parameters:
             if p.parameter_id == parameter_id:
-                params.append(p.model_copy(update={
-                    "value": new_value,
-                    "status": ParameterStatus.MODIFIED,
-                    "provenance": p.provenance.model_copy(
-                        update={"last_modified_by": "user"}
-                    ),
-                }))
+                params.append(
+                    p.model_copy(
+                        update={
+                            "value": new_value,
+                            "status": ParameterStatus.MODIFIED,
+                            "provenance": p.provenance.model_copy(
+                                update={"last_modified_by": "user"}
+                            ),
+                        }
+                    )
+                )
                 found = True
             else:
                 params.append(p)
         if not found:
             raise KeyError(f"parameter {parameter_id} not found")
-        return self.model_copy(update={
-            "parameters": params,
-            "updated_at": datetime.now(UTC).isoformat()
-        })
+        return self.model_copy(
+            update={"parameters": params, "updated_at": datetime.now(UTC).isoformat()}
+        )
 
     def critical_unresolved(self) -> list[ParameterSpec]:
         return [
-            p for p in self.parameters
+            p
+            for p in self.parameters
             if p.criticality == Criticality.CRITICAL
             and (p.value is None or p.source.type == ParameterSource.UNKNOWN)
         ]

@@ -194,32 +194,30 @@ class ExperimentSpecFactory:
     def _convert_physics_spec(
         research_physics: ResearchPhysicsSpec | None,
     ) -> PhysicsSpec:
-        """将 ResearchPhysicsSpec 转换为 experiment_spec.PhysicsSpec。"""
-        if research_physics is None:
-            return PhysicsSpec()  # 默认值
+        """将 ResearchPhysicsSpec 转换为 experiment_spec.PhysicsSpec。
 
-        # 安全地转换字符串到枚举
-        def safe_enum(enum_cls, value, default):
+        当 ResearchPhysicsSpec 的字段为 None 时，PhysicsSpec 的对应字段
+        也保持 None（未知），不再静默填充硬编码默认值。
+        """
+        if research_physics is None:
+            return PhysicsSpec()  # 所有高风险字段为 None（未知）
+
+        # 安全地转换字符串到枚举，None 保留为 None
+        def safe_enum(enum_cls, value):
             if value is None:
-                return default
+                return None
             try:
                 return enum_cls(value)
             except (ValueError, KeyError):
-                return default
+                return None
 
         return PhysicsSpec(
-            dimensions=safe_enum(Dimensions, research_physics.dimensions, Dimensions.TWO_D),
-            phases=safe_enum(PhaseType, research_physics.phases, PhaseType.SINGLE_PHASE),
-            compressibility=safe_enum(
-                Compressibility, research_physics.compressibility, Compressibility.INCOMPRESSIBLE
-            ),
-            flow_regime=safe_enum(
-                FlowRegime, research_physics.flow_regime, FlowRegime.LAMINAR
-            ),
-            temporal_type=safe_enum(
-                TemporalType, research_physics.temporal_type, TemporalType.STEADY
-            ),
-            gravity_enabled=False,
+            dimensions=safe_enum(Dimensions, research_physics.dimensions),
+            phases=safe_enum(PhaseType, research_physics.phases),
+            compressibility=safe_enum(Compressibility, research_physics.compressibility),
+            flow_regime=safe_enum(FlowRegime, research_physics.flow_regime),
+            temporal_type=safe_enum(TemporalType, research_physics.temporal_type),
+            gravity_enabled=None,
         )
 
     @staticmethod

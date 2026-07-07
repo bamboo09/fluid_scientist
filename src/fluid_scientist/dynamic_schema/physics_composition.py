@@ -94,10 +94,14 @@ _SOLVERS: dict[str, SolverCapability] = {
     ),
     "pimpleFoam": SolverCapability(
         solver_name="pimpleFoam",
-        supported_physics=frozenset({
-            "transient", "incompressible",
-            "internal_flow", "external_flow",
-        }),
+        supported_physics=frozenset(
+            {
+                "transient",
+                "incompressible",
+                "internal_flow",
+                "external_flow",
+            }
+        ),
         supported_compressibility="incompressible",
         supported_temporal="transient",
         supported_phases=frozenset({"single_phase"}),
@@ -189,11 +193,14 @@ def list_turbulence_models() -> tuple[str, ...]:
 
 def check_solver_capability(
     solver_name: str,
-    compressibility: str = "incompressible",
-    temporal: str = "steady",
-    phase: str = "single_phase",
+    compressibility: str | None = None,
+    temporal: str | None = None,
+    phase: str | None = None,
 ) -> tuple[bool, list[str]]:
     """Check if a solver supports the required physics.
+
+    When a physics dimension is None (unknown), it is skipped — the caller
+    should treat a None dimension as "not yet validated".
 
     Returns (is_capable, list_of_issues).
     """
@@ -203,37 +210,41 @@ def check_solver_capability(
 
     issues: list[str] = []
 
-    if (
+    if compressibility is not None and (
         solver.supported_compressibility != "both"
         and solver.supported_compressibility != compressibility
     ):
-            issues.append(
-                f"{solver_name} does not support {compressibility} flow "
-                f"(supports {solver.supported_compressibility})"
-            )
+        issues.append(
+            f"{solver_name} does not support {compressibility} flow "
+            f"(supports {solver.supported_compressibility})"
+        )
 
-    if solver.supported_temporal != "both" and solver.supported_temporal != temporal:
+    if temporal is not None and (
+        solver.supported_temporal != "both" and solver.supported_temporal != temporal
+    ):
         issues.append(
             f"{solver_name} does not support {temporal} simulation "
             f"(supports {solver.supported_temporal})"
         )
 
-    if phase not in solver.supported_phases:
-        issues.append(
-            f"{solver_name} does not support {phase} flow"
-        )
+    if phase is not None and phase not in solver.supported_phases:
+        issues.append(f"{solver_name} does not support {phase} flow")
 
     return len(issues) == 0, issues
 
 
 def recommend_turbulence_model(
-    reynolds: float,
+    reynolds: float | None,
     flow_features: frozenset[str] | None = None,
-) -> str:
+) -> str | None:
     """Recommend a turbulence model based on Reynolds number and flow features.
 
-    Returns the model name, or "laminar" if Re < 2300.
+    Returns the model name, "laminar" if Re < 2300, or None if Re is None
+    (unknown).  When Re is None the caller should issue a warning rather
+    than silently defaulting to a turbulence model.
     """
+    if reynolds is None:
+        return None
     if reynolds < 2300:
         return "laminar"
 
@@ -293,8 +304,8 @@ def compose_physics_modules(
 
     # Determine turbulence model
     if reynolds is None:
-        turb_model = "kOmegaSST"
-        warnings.append("Reynolds number unknown; defaulting to kOmegaSST")
+        turb_model = None
+        warnings.append("Reynolds number unknown; turbulence model cannot be determined")
     elif reynolds < 2300:
         turb_model = None  # Laminar
     else:
@@ -308,10 +319,10 @@ def compose_physics_modules(
             and reynolds is not None
             and turb_spec.applicable_reynolds_min > reynolds
         ):
-                warnings.append(
-                    f"{turb_model} requires Re >= {turb_spec.applicable_reynolds_min}, "
-                    f"but Re = {reynolds:.0f}"
-                )
+            warnings.append(
+                f"{turb_model} requires Re >= {turb_spec.applicable_reynolds_min}, "
+                f"but Re = {reynolds:.0f}"
+            )
 
     # Recommend boundary conditions based on geometry type
     bc: dict[str, str] = {}
@@ -364,10 +375,7 @@ def compose_physics_modules(
             and turb_spec.requires_wall_function
             and geometry_type == "external"
         ):
-                warnings.append(
-                    f"{turb_model} requires wall functions; "
-                    "ensure y+ is in target range"
-                )
+            warnings.append(f"{turb_model} requires wall functions; ensure y+ is in target range")
 
     return PhysicsModuleComposition(
         solver=solver_name,
@@ -414,20 +422,14 @@ def handle_unknown_scenario(
         )
         risk_level = "low"
     else:
-        recommendations.append(
-            "No close template match found. Manual configuration required."
-        )
+        recommendations.append("No close template match found. Manual configuration required.")
         custom_params.extend(["geometry", "boundary_conditions", "solver"])
         risk_level = "high"
 
-    recommendations.append(
-        "Validate physics assumptions before running simulation."
-    )
+    recommendations.append("Validate physics assumptions before running simulation.")
 
     if risk_level == "high":
-        recommendations.append(
-            "High-risk scenario: perform a pilot run with coarse mesh first."
-        )
+        recommendations.append("High-risk scenario: perform a pilot run with coarse mesh first.")
 
     return {
         "closest_match": closest,

@@ -148,7 +148,11 @@ class TestDetectExperimentType:
 
 class TestGenerateSchema:
     def test_basic_schema_generation(self):
-        physics = PhysicsSpec()
+        physics = PhysicsSpec(
+            compressibility=Compressibility.INCOMPRESSIBLE,
+            temporal_type=TemporalType.STEADY,
+            phases=PhaseType.SINGLE_PHASE,
+        )
         result = generate_schema(physics)
         assert isinstance(result, SchemaGenerationResult)
         assert len(result.parameters) > 0
@@ -171,17 +175,29 @@ class TestGenerateSchema:
         assert result.turbulence_model == "kOmegaSST"
 
     def test_schema_transient_recommends_pimple(self):
-        physics = PhysicsSpec(temporal_type=TemporalType.TRANSIENT)
+        physics = PhysicsSpec(
+            compressibility=Compressibility.INCOMPRESSIBLE,
+            temporal_type=TemporalType.TRANSIENT,
+            phases=PhaseType.SINGLE_PHASE,
+        )
         result = generate_schema(physics)
         assert result.solver_recommendation == "pimpleFoam"
 
     def test_schema_compressible_recommends_rho(self):
-        physics = PhysicsSpec(compressibility=Compressibility.COMPRESSIBLE)
+        physics = PhysicsSpec(
+            compressibility=Compressibility.COMPRESSIBLE,
+            temporal_type=TemporalType.STEADY,
+            phases=PhaseType.SINGLE_PHASE,
+        )
         result = generate_schema(physics)
         assert "rho" in result.solver_recommendation.lower()
 
     def test_schema_multi_phase_unsupported(self):
-        physics = PhysicsSpec(phases=PhaseType.MULTI_PHASE)
+        physics = PhysicsSpec(
+            compressibility=Compressibility.INCOMPRESSIBLE,
+            temporal_type=TemporalType.STEADY,
+            phases=PhaseType.MULTI_PHASE,
+        )
         result = generate_schema(physics)
         assert "multi_phase_flow" in result.unsupported_features
         assert any("multi_phase" in w for w in result.warnings)
@@ -228,23 +244,17 @@ class TestSolverCapability:
         assert "pimpleFoam" in solvers
 
     def test_check_simplefoam_incompressible_steady(self):
-        capable, issues = check_solver_capability(
-            "simpleFoam", "incompressible", "steady"
-        )
+        capable, issues = check_solver_capability("simpleFoam", "incompressible", "steady")
         assert capable is True
         assert len(issues) == 0
 
     def test_check_simplefoam_compressible_fails(self):
-        capable, issues = check_solver_capability(
-            "simpleFoam", "compressible", "steady"
-        )
+        capable, issues = check_solver_capability("simpleFoam", "compressible", "steady")
         assert capable is False
         assert any("compressible" in i for i in issues)
 
     def test_check_simplefoam_transient_fails(self):
-        capable, issues = check_solver_capability(
-            "simpleFoam", "incompressible", "transient"
-        )
+        capable, issues = check_solver_capability("simpleFoam", "incompressible", "transient")
         assert capable is False
         assert any("transient" in i for i in issues)
 
@@ -312,7 +322,7 @@ class TestComposePhysicsModules:
 
     def test_compose_unknown_reynolds_defaults(self):
         comp = compose_physics_modules("simpleFoam", None)
-        assert comp.turbulence_model == "kOmegaSST"
+        assert comp.turbulence_model is None
         assert any("unknown" in w.lower() for w in comp.warnings)
 
     def test_compose_linear_solvers(self):

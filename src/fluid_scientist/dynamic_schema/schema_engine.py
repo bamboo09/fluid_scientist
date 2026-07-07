@@ -65,15 +65,20 @@ def _is_turbulent(reynolds: float | None) -> bool:
 
 
 def _recommend_solver(
-    compressibility: str,
-    temporal: str,
-    phase: str,
-) -> tuple[str, list[str]]:
+    compressibility: str | None,
+    temporal: str | None,
+    phase: str | None,
+) -> tuple[str | None, list[str]]:
     """Recommend an OpenFOAM solver based on physics.
 
     Returns (solver_name, unsupported_features).
+    Returns (None, unsupported) when critical physics fields are unknown,
+    so the caller can decide on a fallback with appropriate warnings.
     """
     unsupported: list[str] = []
+
+    if compressibility is None or temporal is None or phase is None:
+        return None, unsupported
 
     if phase != FlowPhase.SINGLE_PHASE.value:
         unsupported.append("multi_phase_flow")
@@ -89,7 +94,7 @@ def _recommend_solver(
         if temporal == "transient":
             return "rhoPimpleFoam", unsupported
 
-    # Default fallback
+    # Default fallback for known but unmatched combinations
     return "simpleFoam", unsupported
 
 
@@ -245,39 +250,39 @@ def generate_schema(
     # Detect experiment type
     experiment_type = detect_experiment_type(physics, existing_params)
 
-    # Recommend solver — extract enum values from PhysicsSpec
+    # Recommend solver — extract enum values from PhysicsSpec.
+    # High-risk fields are NOT silently defaulted; None triggers warnings.
     compressibility = getattr(physics, "compressibility", None)
     if compressibility is not None:
         compressibility = (
-            compressibility.value
-            if hasattr(compressibility, "value")
-            else str(compressibility)
+            compressibility.value if hasattr(compressibility, "value") else str(compressibility)
         )
     else:
-        compressibility = "incompressible"
+        compressibility = None  # 不再静默默认 "incompressible"
+        warnings.append("compressibility is unknown - system recommendation will be used")
 
     temporal = getattr(physics, "temporal_type", None)
     if temporal is not None:
-        temporal = (
-            temporal.value
-            if hasattr(temporal, "value")
-            else str(temporal)
-        )
+        temporal = temporal.value if hasattr(temporal, "value") else str(temporal)
     else:
-        temporal = "steady"
+        temporal = None  # 不再静默默认 "steady"
+        warnings.append("temporal_type is unknown - system recommendation will be used")
 
     phase = getattr(physics, "phases", None)
     if phase is not None:
-        phase = (
-            phase.value
-            if hasattr(phase, "value")
-            else str(phase)
-        )
+        phase = phase.value if hasattr(phase, "value") else str(phase)
     else:
-        phase = FlowPhase.SINGLE_PHASE.value
+        phase = None  # 不再静默默认 "single_phase"
+        warnings.append("phases is unknown - system recommendation will be used")
 
     solver, solver_unsupported = _recommend_solver(compressibility, temporal, phase)
     unsupported.extend(solver_unsupported)
+    if solver is None:
+        warnings.append(
+            "solver could not be determined from unknown physics "
+            "- using simpleFoam as system fallback"
+        )
+        solver = "simpleFoam"
 
     # Recommend turbulence model
     turb_model = _recommend_turbulence_model(reynolds, experiment_type)
@@ -290,23 +295,17 @@ def generate_schema(
         updated: list[ParameterSpec] = []
         for p in params:
             if p.parameter_id in existing_params:
-                updated.append(
-                    p.model_copy(update={"value": existing_params[p.parameter_id]})
-                )
+                updated.append(p.model_copy(update={"value": existing_params[p.parameter_id]}))
             else:
                 updated.append(p)
         params = updated
 
     # Add warnings for unsupported features
     if unsupported:
-        warnings.extend(
-            f"Feature '{f}' is not supported in the current stage" for f in unsupported
-        )
+        warnings.extend(f"Feature '{f}' is not supported in the current stage" for f in unsupported)
 
     if experiment_type == "unknown":
-        warnings.append(
-            "Could not detect experiment type; using generic parameter schema"
-        )
+        warnings.append("Could not detect experiment type; using generic parameter schema")
 
     if reynolds is not None and reynolds > 1e6:
         warnings.append(

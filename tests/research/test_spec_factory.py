@@ -206,7 +206,7 @@ def test_spec_physics_converted_correctly(
     assert spec.physics.compressibility == Compressibility.INCOMPRESSIBLE
     assert spec.physics.flow_regime == FlowRegime.LAMINAR
     assert spec.physics.temporal_type == TemporalType.STEADY
-    assert spec.physics.gravity_enabled is False
+    assert spec.physics.gravity_enabled is None
 
 
 # --------------------------------------------------------------------------- #
@@ -226,11 +226,11 @@ def test_spec_factory_with_default_physics(
         physics_spec=None,
     )
 
-    assert spec.physics.dimensions == Dimensions.TWO_D
-    assert spec.physics.phases == PhaseType.SINGLE_PHASE
-    assert spec.physics.compressibility == Compressibility.INCOMPRESSIBLE
-    assert spec.physics.flow_regime == FlowRegime.LAMINAR
-    assert spec.physics.temporal_type == TemporalType.STEADY
+    assert spec.physics.dimensions is None
+    assert spec.physics.phases is None
+    assert spec.physics.compressibility is None
+    assert spec.physics.flow_regime is None
+    assert spec.physics.temporal_type is None
 
 
 # --------------------------------------------------------------------------- #
@@ -280,9 +280,7 @@ def test_orchestrator_creates_spec_on_draft_ready() -> None:
         workflow_repository=repo,
     )
 
-    detailed_message = (
-        "研究弯管流动的压降，流动为层流，介质为水，管道直径0.05米"
-    )
+    detailed_message = "研究弯管流动的压降，流动为层流，介质为水，管道直径0.05米"
     result = orchestrator.start_session("test-proj", detailed_message)
 
     assert isinstance(result, DraftReady)
@@ -314,9 +312,7 @@ def test_orchestrator_draft_ready_has_spec_id() -> None:
         workflow_repository=repo,
     )
 
-    detailed_message = (
-        "研究弯管流动的压降，流动为层流，介质为水，管道直径0.05米"
-    )
+    detailed_message = "研究弯管流动的压降，流动为层流，介质为水，管道直径0.05米"
     result = orchestrator.start_session("test-proj", detailed_message)
 
     assert isinstance(result, DraftReady)
@@ -344,9 +340,7 @@ def test_orchestrator_without_factory_returns_none_spec_id() -> None:
         scope_engine=scope_engine,
     )
 
-    detailed_message = (
-        "研究弯管流动的压降，流动为层流，介质为水，管道直径0.05米"
-    )
+    detailed_message = "研究弯管流动的压降，流动为层流，介质为水，管道直径0.05米"
     result = orchestrator.start_session("test-proj", detailed_message)
 
     assert isinstance(result, DraftReady)
