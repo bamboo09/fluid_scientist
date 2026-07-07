@@ -271,10 +271,56 @@ class TestCompileSpec:
         assert len(manifest.spec_hash) == 16
         assert len(manifest.case_hash) == 16
 
-    def test_compile_spec_and_confirmed_spec_produce_same_archive(self):
-        """compile_spec reuses compile_confirmed_spec, so archives must match."""
+    def test_compile_spec_and_confirmed_spec_produce_different_metadata(self):
+        """compile_spec (native) and compile_confirmed_spec (old) produce
+        different archives because the native compiler emits
+        fluidScientist/spec.json (schema_version=2) while the old path
+        emits fluidScientist/plan.json (schema_version=1).
+
+        The OpenFOAM case files themselves are identical.
+        """
+        import gzip
+        import io
+        import tarfile
+
         spec = _cavity_spec()
         compiled, _ = compile_spec(spec)
         confirmed = compile_confirmed_spec(spec)
-        assert compiled.archive == confirmed.archive
-        assert compiled.archive_sha256 == confirmed.archive_sha256
+
+        # Archives differ because metadata files are different
+        # (spec.json vs plan.json)
+        assert compiled.archive != confirmed.archive
+
+        # But the OpenFOAM case files are identical
+        def _extract(archive):
+            files = {}
+            with (
+                gzip.GzipFile(fileobj=io.BytesIO(archive)) as gz,
+                tarfile.open(fileobj=gz, mode="r") as tar,
+            ):
+                for member in tar.getmembers():
+                    if member.isfile():
+                        handle = tar.extractfile(member)
+                        if handle is not None:
+                            files[member.name] = handle.read()
+            return files
+
+        native_files = _extract(compiled.archive)
+        old_files = _extract(confirmed.archive)
+
+        # Native has spec.json, old has plan.json
+        assert "fluidScientist/spec.json" in native_files
+        assert "fluidScientist/plan.json" not in native_files
+        assert "fluidScientist/plan.json" in old_files
+        assert "fluidScientist/spec.json" not in old_files
+
+        # All OpenFOAM case files are identical
+        of_prefixes = ("0/", "constant/", "system/")
+        for name, content in native_files.items():
+            if name.startswith(of_prefixes):
+                assert name in old_files, f"missing in old: {name}"
+                assert content == old_files[name], f"content differs: {name}"
+        for name, content in old_files.items():
+            if name.startswith(of_prefixes):
+                assert name in native_files, f"missing in native: {name}"
+                assert content == native_files[name], f"content differs: {name}"
