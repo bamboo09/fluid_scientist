@@ -187,10 +187,15 @@ def test_strict_measurement_plan_compiles_to_case(client, project_id):
     spec_id = result["experiment_spec_id"]
     session_id = result["session_id"]
 
-    # Set mean_velocity to match inlet_velocity (0.02 m/s) so that
-    # Re = 0.02 * 0.05 / 1e-6 = 1000 < 2300 (laminar regime).
-    # The native compiler reads mean_velocity (not inlet_velocity).
+    # Set ALL required parameters for laminar_pipe so the hard gate passes.
+    # The draft already sets diameter=0.05 from the user message.
+    # mean_velocity = 0.02 m/s  -> Re = 0.02*0.05/1e-6 = 1000 < 2300 (laminar)
     _set_parameter(client, project_id, spec_id, "mean_velocity", 0.02)
+    _set_parameter(client, project_id, spec_id, "length", 1.0)
+    _set_parameter(client, project_id, spec_id, "kinematic_viscosity", 1e-6)
+    _set_parameter(client, project_id, spec_id, "density", 998.2)
+    _set_parameter(client, project_id, spec_id, "axial_cells", 80)
+    _set_parameter(client, project_id, spec_id, "radial_cells", 10)
 
     # Fetch the updated spec
     response = client.get(f"/api/research-sessions/{session_id}/experiment-spec")
@@ -242,8 +247,14 @@ def test_strict_native_compile_no_compile_plan(client, project_id):
     spec_id = result["experiment_spec_id"]
     session_id = result["session_id"]
 
-    # Set mean_velocity so Re < 2300 (laminar regime required by native compiler)
+    # Set ALL required parameters for laminar_pipe so the hard gate passes.
+    # The draft already sets diameter=0.05 from the user message.
     _set_parameter(client, project_id, spec_id, "mean_velocity", 0.02)
+    _set_parameter(client, project_id, spec_id, "length", 1.0)
+    _set_parameter(client, project_id, spec_id, "kinematic_viscosity", 1e-6)
+    _set_parameter(client, project_id, spec_id, "density", 998.2)
+    _set_parameter(client, project_id, spec_id, "axial_cells", 80)
+    _set_parameter(client, project_id, spec_id, "radial_cells", 10)
 
     # Fetch the updated spec
     response = client.get(f"/api/research-sessions/{session_id}/experiment-spec")
