@@ -11,26 +11,42 @@ from fluid_scientist.measurement.models import (
     FieldOutputSpec,
     FunctionObjectSpec,
     FunctionObjectType,
+    LineSamplingSpec,
     MeasurementPlan,
     MetricBinding,
+    ProbeSpec,
     SpatialSamplingSpec,
     SpatialSamplingType,
+    StorageEstimate,
     TimeSamplingSpec,
+    VolumeSamplingSpec,
 )
 from fluid_scientist.measurement.planner import (
     MetricPlan,
     MetricPlanner,
+)
+from fluid_scientist.measurement.time_sampler import (
+    PhysicalContext,
+    TimeSampler,
+    estimate_vortex_shedding_frequency,
 )
 
 __all__ = [
     "FieldOutputSpec",
     "FunctionObjectSpec",
     "FunctionObjectType",
+    "LineSamplingSpec",
     "MeasurementPlan",
     "MetricBinding",
     "MetricPlan",
     "MetricPlanner",
+    "PhysicalContext",
+    "ProbeSpec",
     "SpatialSamplingSpec",
     "SpatialSamplingType",
+    "StorageEstimate",
+    "TimeSampler",
     "TimeSamplingSpec",
+    "VolumeSamplingSpec",
+    "estimate_vortex_shedding_frequency",
 ]

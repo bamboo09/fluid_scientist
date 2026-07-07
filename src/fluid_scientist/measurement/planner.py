@@ -42,7 +42,13 @@ from fluid_scientist.measurement.models import (
     MetricBinding,
     SpatialSamplingSpec,
     SpatialSamplingType,
+    StorageEstimate,
     TimeSamplingSpec,
+)
+from fluid_scientist.measurement.time_sampler import (
+    PhysicalContext,
+    TimeSampler,
+    estimate_vortex_shedding_frequency,
 )
 from fluid_scientist.metric_spec.models import MetricCategory
 from fluid_scientist.metric_spec.registry import get_metric_spec
@@ -322,7 +328,26 @@ class MetricPlanner:
 
         # 5. 生成 MeasurementPlan（用户指标 + 核心 registry 指标）
         plan_metrics = list(dict.fromkeys(core_metrics + user_metrics))
-        measurement_plan = self._generate_measurement_plan(plan_metrics, experiment_type)
+
+        # Extract physics parameters for time sampling
+        physics_params: dict[str, Any] = {}
+        if physics_spec:
+            if physics_spec.geometry_facts:
+                physics_params["diameter"] = physics_spec.geometry_facts.get("diameter")
+                physics_params["length"] = physics_spec.geometry_facts.get("length")
+            if physics_spec.operating_conditions:
+                physics_params["velocity"] = physics_spec.operating_conditions.get("inlet_velocity")
+            if physics_spec.material_facts:
+                physics_params["kinematic_viscosity"] = physics_spec.material_facts.get("kinematic_viscosity")
+            physics_params["is_transient"] = (
+                physics_spec.temporal_type == "transient"
+                if physics_spec.temporal_type
+                else True
+            )
+
+        measurement_plan = self._generate_measurement_plan(
+            plan_metrics, experiment_type, physics_params=physics_params
+        )
 
         return MetricPlan(
             core_metrics=core_metrics,
@@ -363,9 +388,11 @@ class MetricPlanner:
     def _generate_measurement_plan(
         metrics: list[str],
         experiment_type: str,
+        physics_params: dict[str, Any] | None = None,
     ) -> MeasurementPlan:
         """根据指标列表生成测量计划。"""
         metric_set = set(metrics)
+        physics_params = physics_params or {}
 
         required_fields = [
             FieldOutputSpec(field_name="U", write_interval=100),
@@ -442,6 +469,8 @@ class MetricPlanner:
             ))
 
         # 出口速度均匀性 → 出口截面速度采样
+        # CV = sigma_u / mean_u = sqrt(mean(U^2) - mean(U)^2) / mean(U)
+        # 需要 areaAverage(U) 和 areaAverage(mag(U)) 来计算 CV
         if "outlet_velocity_uniformity" in metric_set:
             outlet_id = "outlet_uniformity_section"
             spatial_sampling.append(SpatialSamplingSpec(
@@ -449,17 +478,26 @@ class MetricPlanner:
                 type=SpatialSamplingType.SURFACE,
                 description="出口速度均匀性截面",
             ))
+            # Need both average and RMS for CV calculation
+            # CV = sigma_u / mean_u = sqrt(mean(U^2) - mean(U)^2) / mean(U)
             function_objects.append(FunctionObjectSpec(
                 type=FunctionObjectType.SURFACE_FIELD_VALUE,
-                name="velocity_outlet",
+                name="velocity_outlet_mean",
                 field="U",
+                operation="areaAverage",
+                surface=outlet_id,
+            ))
+            function_objects.append(FunctionObjectSpec(
+                type=FunctionObjectType.SURFACE_FIELD_VALUE,
+                name="velocity_outlet_magnitude",
+                field="mag(U)",
                 operation="areaAverage",
                 surface=outlet_id,
             ))
             metric_bindings.append(MetricBinding(
                 metric_id="outlet_velocity_uniformity",
                 source=outlet_id,
-                function_object="velocity_outlet",
+                function_object="velocity_outlet_mean",
             ))
 
         # 速度剖面 → 线采样
@@ -475,19 +513,72 @@ class MetricPlanner:
                 source=line_id,
             ))
 
-        # 时间采样配置
-        time_sampling = TimeSamplingSpec(
-            start_time=20.0,
-            end_time=100.0,
-            interval=0.01,
-        )
-        # 瞬态指标（如 Strouhal）需要更密集的时间采样
-        if "strouhal_number" in metric_set:
+        # 时间采样配置 — 动态计算或回退到默认值
+        # Extract physical parameters for dynamic time sampling
+        diameter = physics_params.get("diameter")
+        velocity = physics_params.get("velocity")
+        viscosity = physics_params.get("kinematic_viscosity")
+        is_transient = physics_params.get("is_transient", True)
+        char_length = diameter or physics_params.get("length")
+
+        if velocity and char_length and velocity > 0 and char_length > 0:
+            # Use dynamic time sampling based on physical characteristics
+            estimated_freq = None
+            if "strouhal_number" in metric_set and diameter:
+                # Estimate vortex shedding frequency for Strouhal metrics
+                reynolds = None
+                if viscosity and viscosity > 0:
+                    reynolds = velocity * diameter / viscosity
+                estimated_freq = estimate_vortex_shedding_frequency(
+                    diameter, velocity, reynolds
+                )
+
+            ctx = PhysicalContext(
+                characteristic_length=char_length,
+                characteristic_velocity=velocity,
+                kinematic_viscosity=viscosity,
+                estimated_frequency=estimated_freq,
+                is_transient=is_transient,
+            )
+            time_sampling = TimeSampler().calculate(ctx)
+        else:
+            # Fall back to hardcoded defaults when no physics params available
             time_sampling = TimeSamplingSpec(
                 start_time=20.0,
-                end_time=200.0,
-                interval=0.005,
+                end_time=100.0,
+                interval=0.01,
             )
+            # 瞬态指标（如 Strouhal）需要更密集的时间采样
+            if "strouhal_number" in metric_set:
+                time_sampling = TimeSamplingSpec(
+                    start_time=20.0,
+                    end_time=200.0,
+                    interval=0.005,
+                )
+
+        # Storage estimate
+        estimated_bytes = 0
+        breakdown: dict[str, int] = {}
+        for fo in function_objects:
+            fo_bytes = 1000 * 100  # rough estimate per timestep
+            estimated_bytes += fo_bytes
+            breakdown[f"fo_{fo.name}"] = fo_bytes
+        for field in required_fields:
+            field_bytes = 5000 * 100  # field output per timestep
+            estimated_bytes += field_bytes
+            breakdown[f"field_{field.field_name}"] = field_bytes
+        num_timesteps = int(
+            (time_sampling.end_time - time_sampling.start_time)
+            / max(time_sampling.interval, 1e-10)
+        )
+        estimated_bytes *= max(num_timesteps, 1)
+
+        storage_estimate = StorageEstimate(
+            estimated_bytes=estimated_bytes,
+            breakdown=breakdown,
+            exceeds_budget=False,
+            budget_bytes=None,
+        )
 
         return MeasurementPlan(
             required_fields=required_fields,
@@ -495,6 +586,7 @@ class MetricPlanner:
             spatial_sampling=spatial_sampling,
             time_sampling=time_sampling,
             metric_bindings=metric_bindings,
+            storage_estimate=storage_estimate,
         )
 
 
