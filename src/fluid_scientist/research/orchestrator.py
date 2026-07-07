@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from fluid_scientist.compat import UTC
+from fluid_scientist.experiment_spec.models import ExperimentStatus
 from fluid_scientist.research.intent_engine import IntentEngine
 from fluid_scientist.research.models import (
     ClarificationRequired,
@@ -372,6 +373,55 @@ class ResearchOrchestrator:
                 }
             ]
             updated_spec = spec.model_copy(update={"metrics": new_metrics})
+
+            # Detect missing capabilities via the unified CapabilityResolver
+            from fluid_scientist.capabilities.resolver import CapabilityResolver
+
+            resolver = CapabilityResolver()
+            missing_caps = resolver.resolve(
+                metric_plan=metric_plan,
+                experiment_spec_id=updated_spec.experiment_id,
+                research_session_id=session.session_id,
+            )
+
+            if missing_caps:
+                # Create extensions for blocking capabilities
+                extensions = resolver.create_extensions(
+                    missing_caps,
+                    research_session_id=session.session_id,
+                    experiment_spec_id=updated_spec.experiment_id,
+                )
+
+                # Add to spec
+                extension_dicts = [ext.model_dump() for ext in extensions]
+                missing_cap_dicts = [cap.model_dump() for cap in missing_caps]
+
+                cap_metrics = list(updated_spec.metrics) + [
+                    {
+                        "kind": "missing_capabilities",
+                        "capabilities": missing_cap_dicts,
+                    },
+                ]
+
+                # Update spec with code_extensions
+                updated_code_extensions = (
+                    list(updated_spec.code_extensions) + extension_dicts
+                )
+                updated_spec = updated_spec.model_copy(
+                    update={
+                        "metrics": cap_metrics,
+                        "code_extensions": updated_code_extensions,
+                    }
+                )
+
+                # If any blocking capabilities, mark spec as awaiting_code_approval
+                if any(cap.is_blocking() for cap in missing_caps):
+                    updated_spec = updated_spec.model_copy(
+                        update={
+                            "status": ExperimentStatus.AWAITING_CODE_APPROVAL,
+                        }
+                    )
+
             return updated_spec, metric_plan.unknown_metrics
         except Exception:
             # MetricPlanner 失败不应阻塞草稿生成
