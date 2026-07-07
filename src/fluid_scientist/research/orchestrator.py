@@ -19,6 +19,7 @@ from fluid_scientist.research.models import (
     ConfirmedFact,
     DraftReady,
     ExtractedFact,
+    FactConflict,
     IntentAssessment,
     MissingCapability,
     ResearchContext,
@@ -162,10 +163,24 @@ class ResearchOrchestrator:
         extracted_facts = self._extract_facts(user_message, intent, turn_id)
         turn = turn.model_copy(update={"extracted_facts": extracted_facts})
 
+        # 3.5 检测事实冲突（在合并之前）
+        new_conflicts = self._detect_fact_conflicts(
+            session.confirmed_facts, extracted_facts
+        )
+
         # 4. 更新会话的累积事实和意图评估（按 category+key 去重，保留最新）
         all_facts = self._merge_facts(session.confirmed_facts, extracted_facts)
         physics_spec = self._build_physics_spec(session, all_facts)
         prev_messages = session.accumulated_context.get("all_messages", "")
+
+        # 累积事实冲突（跨轮次保留）
+        existing_conflicts: list[FactConflict] = (
+            session.accumulated_context.get("fact_conflicts", [])
+        )
+        all_conflicts: list[FactConflict] = [
+            *existing_conflicts,
+            *new_conflicts,
+        ]
 
         # 构建研究上下文（多轮累积）
         research_context = self._build_research_context(
@@ -184,6 +199,7 @@ class ResearchOrchestrator:
                 "turn_count": len(session.turns) + 1,
                 "all_messages": f"{prev_messages} {user_message}".strip(),
                 "research_objective": intent.research_objective,
+                "fact_conflicts": all_conflicts,
             },
             research_context=research_context,
             updated_at=now,
@@ -670,6 +686,52 @@ class ResearchOrchestrator:
             unresolved_questions=[],
             source_turn_ids=[*source_turn_ids, turn_id],
         )
+
+    @staticmethod
+    def _detect_fact_conflicts(
+        existing: list[ExtractedFact],
+        new_facts: list[ExtractedFact],
+    ) -> list[FactConflict]:
+        """检测新事实与已有事实之间的语义冲突。
+
+        当新事实与已有事实具有相同的 (category, key) 但不同的 value 时，
+        记录一个 FactConflict，包含旧值、新值及对应的 turn_id。
+
+        Args:
+            existing: 已有的事实列表。
+            new_facts: 本轮新提取的事实列表。
+
+        Returns:
+            检测到的 FactConflict 列表。
+        """
+        # 构建已有事实的索引：(category, key) → ExtractedFact
+        existing_index: dict[tuple[str, str], ExtractedFact] = {}
+        for fact in existing:
+            existing_index[(fact.category, fact.key)] = fact
+
+        conflicts: list[FactConflict] = []
+        for new_fact in new_facts:
+            key_pair = (new_fact.category, new_fact.key)
+            old_fact = existing_index.get(key_pair)
+            if old_fact is not None and old_fact.value != new_fact.value:
+                conflicts.append(
+                    FactConflict(
+                        conflict_id=f"conflict-{uuid4().hex[:12]}",
+                        category=new_fact.category,
+                        key=new_fact.key,
+                        old_value=old_fact.value,
+                        new_value=new_fact.value,
+                        old_turn_id=old_fact.turn_id,
+                        new_turn_id=new_fact.turn_id,
+                        resolution="new_value_wins",
+                        description=(
+                            f"事实冲突: {new_fact.category}/{new_fact.key} "
+                            f"从 '{old_fact.value}' 变为 '{new_fact.value}'"
+                        ),
+                    )
+                )
+
+        return conflicts
 
     @staticmethod
     def _merge_facts(

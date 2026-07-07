@@ -65,6 +65,20 @@ class ConfirmedFact(BaseModel):
     confirmed_at: str | None = None
 
 
+class FactConflict(BaseModel):
+    """检测到的事实冲突。"""
+
+    conflict_id: str
+    category: str
+    key: str
+    old_value: str
+    new_value: str
+    old_turn_id: str | None = None
+    new_turn_id: str | None = None
+    resolution: str = "new_value_wins"  # new_value_wins, old_value_wins, needs_user_confirmation
+    description: str = ""
+
+
 class ClarificationTurn(BaseModel):
     """一轮澄清对话的完整记录。"""
 
@@ -259,6 +273,7 @@ __all__ = [
     "CriticalUnknown",
     "DraftReady",
     "ExtractedFact",
+    "FactConflict",
     "IntentAssessment",
     "MissingCapability",
     "PhysicsUnknown",

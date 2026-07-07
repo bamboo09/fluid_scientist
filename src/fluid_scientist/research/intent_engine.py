@@ -25,6 +25,20 @@ _UNSUPPORTED_KEYWORDS: tuple[tuple[str, str], ...] = (
 INTENT_SYSTEM_PROMPT = """You are a CFD research intent analyzer. \
 Given a user's research request, extract structured intent information.
 
+The user message may contain the following sections to provide multi-turn context:
+- [对话历史]: Previous conversation messages accumulated across turns.
+  Use this to understand the full context of the ongoing research discussion.
+- [已确认事实]: Confirmed facts extracted from earlier turns, each with
+  category, key, value, confidence, and turn_id. Treat these as established
+  facts unless explicitly contradicted by the current user message.
+- [当前用户消息]: The actual user message for the current turn. This is
+  the primary input to analyze.
+
+When the user message contains conversation history and confirmed facts,
+use them to maintain consistency and avoid re-asking already-confirmed
+information. The current user message takes precedence over historical
+context if there is a conflict.
+
 Return a JSON object with these fields:
 - task_type: string
   (new_simulation, parameter_sensitivity, mechanism_analysis,
@@ -139,11 +153,33 @@ class IntentEngine:
     ) -> IntentAssessment:
         """real 模式：调用 LLM 进行结构化意图评估。
 
+        将多轮对话历史和已确认事实注入 LLM 消息，使 LLM 能够理解完整上下文。
         如果 LLM 调用失败或响应校验失败，自动回退到 fake 模式。
         """
+        # Build context section
+        context_parts: list[str] = []
+        all_messages = accumulated_context.get("all_messages", "")
+        if all_messages:
+            context_parts.append(f"[对话历史]\n{all_messages}")
+
+        if confirmed_facts:
+            facts_text = "\n".join(
+                f"- {f.category}/{f.key}: {f.value} "
+                f"(confidence: {f.confidence}, turn: {f.turn_id})"
+                for f in confirmed_facts
+            )
+            context_parts.append(f"[已确认事实]\n{facts_text}")
+
+        context_section = "\n\n".join(context_parts)
+        augmented_user_content = (
+            f"{context_section}\n\n[当前用户消息]\n{user_message}"
+            if context_section
+            else user_message
+        )
+
         messages = [
             {"role": "system", "content": INTENT_SYSTEM_PROMPT},
-            {"role": "user", "content": user_message},
+            {"role": "user", "content": augmented_user_content},
         ]
 
         last_error: Exception | None = None
