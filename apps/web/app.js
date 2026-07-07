@@ -709,6 +709,7 @@ async function continueResearchSession(sessionId, message) {
 // 处理研究会话结果
 function handleResearchTurnResult(result) {
   hideElement(planProgressCard);
+  setStatus("");
   if (result.type === "clarification_required") {
     currentClarificationQuestions = result.questions || [];
     renderClarificationCard(result);
@@ -969,6 +970,7 @@ async function designExperimentFromPrompt(event) {
   } finally {
     if (designExperimentBtn) designExperimentBtn.disabled = false;
     hideElement(planProgressCard);
+    setStatus("");
   }
 }
 

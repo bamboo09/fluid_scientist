@@ -27,6 +27,18 @@ from fluid_scientist.research.models import (
 )
 
 
+def _to_float(value):
+    """安全转换为 float。"""
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    try:
+        return float(str(value).strip())
+    except (ValueError, TypeError):
+        return None
+
+
 class ExperimentSpecFactory:
     """从 Dynamic Schema 生成 ExperimentSpec。"""
 
@@ -40,16 +52,20 @@ class ExperimentSpecFactory:
 
         流程:
         1. 将 ResearchPhysicsSpec 转换为 experiment_spec.PhysicsSpec
-        2. 调用 generate_schema() 生成参数 schema
-        3. 构造 ExperimentSpec
+        2. 从会话事实中提取已有参数值
+        3. 调用 generate_schema() 生成参数 schema（含已有值）
+        4. 构造 ExperimentSpec
         """
         # 1. 转换 PhysicsSpec
         esp_physics = self._convert_physics_spec(physics_spec)
 
-        # 2. 调用 Dynamic Schema Engine
-        schema_result = generate_schema(esp_physics)
+        # 2. 从会话事实中提取参数值
+        existing_params = self._extract_existing_params(session, physics_spec)
 
-        # 3. 构造 ExperimentSpec
+        # 3. 调用 Dynamic Schema Engine（传入已有参数值）
+        schema_result = generate_schema(esp_physics, existing_params=existing_params)
+
+        # 4. 构造 ExperimentSpec
         experiment_id = f"exp-{uuid4().hex[:16]}"
         now = datetime.now(UTC).isoformat()
 
@@ -81,6 +97,98 @@ class ExperimentSpecFactory:
         )
 
         return spec
+
+    @staticmethod
+    def _extract_existing_params(
+        session: ResearchSession,
+        physics_spec: ResearchPhysicsSpec | None,
+    ) -> dict:
+        """从会话的 confirmed_facts 和累积上下文中提取参数值。
+
+        将用户在对话中提到的数值（如管径、流速、密度等）映射到
+        Dynamic Schema Engine 的 existing_params 字典中。
+        """
+        params = {}
+
+        # 从 confirmed_facts 中提取
+        for fact in session.confirmed_facts:
+            key = fact.key
+            value = fact.value
+
+            # 映射事实键到参数 ID
+            key_lower = key.lower() if isinstance(key, str) else str(key).lower()
+
+            # 直接匹配常见参数名
+            if key_lower in ("diameter", "管径", "pipe_diameter"):
+                params["diameter"] = _to_float(value)
+            elif key_lower in ("length", "管长", "pipe_length"):
+                params["length"] = _to_float(value)
+            elif key_lower in ("inlet_velocity", "入口速度", "velocity", "流速"):
+                params["inlet_velocity"] = _to_float(value)
+            elif key_lower in ("mean_velocity", "平均速度"):
+                params["mean_velocity"] = _to_float(value)
+            elif key_lower in ("density", "密度", "fluid_density"):
+                params["density"] = _to_float(value)
+            elif key_lower in ("kinematic_viscosity", "运动粘度", "viscosity"):
+                params["kinematic_viscosity"] = _to_float(value)
+            elif key_lower in ("reynolds_number", "reynolds", "雷诺数"):
+                params["reynolds_number"] = _to_float(value)
+            elif key_lower in ("lid_velocity", "盖板速度"):
+                params["lid_velocity"] = _to_float(value)
+            elif key_lower in ("side_length", "边长"):
+                params["side_length"] = _to_float(value)
+
+        # 从原始请求中提取数值（正则匹配）
+        import re
+
+        full_text = session.accumulated_context.get("all_messages", "") or session.original_request
+
+        # 管径: "管径0.05米" 或 "diameter 0.05m"
+        m = re.search(r"管径\s*([0-9.]+)", full_text)
+        if m and "diameter" not in params:
+            params["diameter"] = float(m.group(1))
+
+        # 流速: "流速0.02米每秒" 或 "流速 0.02 m/s"
+        m = re.search(r"流速\s*([0-9.]+)", full_text)
+        if m and "inlet_velocity" not in params:
+            params["inlet_velocity"] = float(m.group(1))
+
+        # 密度: "密度1000" 或 "density 1000"
+        m = re.search(r"密度\s*([0-9.]+)", full_text)
+        if m and "density" not in params:
+            params["density"] = float(m.group(1))
+
+        # 运动粘度: "粘度1e-6" 或 "viscosity 1e-6"
+        m = re.search(r"粘度\s*([0-9.eE-]+)", full_text)
+        if m and "kinematic_viscosity" not in params:
+            params["kinematic_viscosity"] = float(m.group(1))
+
+        # 从 material_facts 提取
+        if physics_spec and physics_spec.material_facts:
+            mf = physics_spec.material_facts
+            if "density" in mf and "density" not in params:
+                params["density"] = _to_float(mf["density"])
+            if "kinematic_viscosity" in mf and "kinematic_viscosity" not in params:
+                params["kinematic_viscosity"] = _to_float(mf["kinematic_viscosity"])
+
+        # 从 geometry_facts 提取
+        if physics_spec and physics_spec.geometry_facts:
+            gf = physics_spec.geometry_facts
+            if "diameter" in gf and "diameter" not in params:
+                params["diameter"] = _to_float(gf["diameter"])
+            if "length" in gf and "length" not in params:
+                params["length"] = _to_float(gf["length"])
+
+        # 从 operating_conditions 提取
+        if physics_spec and physics_spec.operating_conditions:
+            oc = physics_spec.operating_conditions
+            if "inlet_velocity" in oc and "inlet_velocity" not in params:
+                params["inlet_velocity"] = _to_float(oc["inlet_velocity"])
+            if "mean_velocity" in oc and "mean_velocity" not in params:
+                params["mean_velocity"] = _to_float(oc["mean_velocity"])
+
+        # 清除 None 值
+        return {k: v for k, v in params.items() if v is not None}
 
     @staticmethod
     def _convert_physics_spec(
