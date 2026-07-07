@@ -6,6 +6,8 @@ files without going through the old ExperimentPlan → compile_plan path.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import platform
 import sys
 from typing import Any, Protocol
@@ -79,7 +81,11 @@ def _int(values: dict[str, Any], key: str, default: int) -> int:
 
 
 class PipeFlowCompiler:
-    """Native compiler for laminar pipe flow experiments."""
+    """Native compiler for laminar pipe flow experiments.
+
+    Generates OpenFOAM case files directly from ExperimentSpec parameters
+    without constructing PipeExperimentPlan or calling compile_pipe_plan.
+    """
 
     compiler_id = "fluid_scientist.native.pipe_flow"
     compiler_version = "1.0.0"
@@ -89,39 +95,84 @@ class PipeFlowCompiler:
         return "length" in ids and "axial_cells" in ids
 
     def compile(self, spec: ExperimentSpec) -> CompiledCase:
-        from fluid_scientist.experiment_planning.compilers import compile_pipe_plan
-        from fluid_scientist.experiment_planning.models import (
-            ConvergenceTargets,
-            LaminarPipeCase,
-            PipeExperimentPlan,
+        from fluid_scientist.adapters.custom_openfoam import (
+            validate_custom_case_archive,
+        )
+        from fluid_scientist.experiment_planning.compilers import (
+            _deterministic_tar_gz,
+            _momentum_transport,
+            _normalize,
+            _physical_properties,
+            _pipe_block_mesh,
+            _pipe_control_dict,
+            _pipe_fv_solution,
+            _pipe_pressure_field,
+            _pipe_velocity_profile_field,
+            _steady_fv_schemes,
+        )
+        from fluid_scientist.experiment_planning.registry import (
+            get_experiment_capability,
         )
 
         v = _param_values(spec)
-        case = LaminarPipeCase(
-            diameter_m=_required_float(v, "diameter"),
-            length_m=_required_float(v, "length"),
-            mean_velocity_m_s=_required_float(v, "mean_velocity"),
-            kinematic_viscosity_m2_s=_required_float(v, "kinematic_viscosity"),
-            density_kg_m3=_required_float(v, "density"),
-            axial_cells=_required_int(v, "axial_cells"),
-            radial_cells=_required_int(v, "radial_cells"),
-        )
-        plan = PipeExperimentPlan(
-            experiment_type="laminar_pipe",
-            experiment_name=spec.research.title,
-            objective=spec.research.objective,
-            rationale="Compiled natively from ExperimentSpec",
-            assumptions=("incompressible flow", "fully developed inlet"),
-            limitations=("laminar regime only",),
-            requested_outputs=("pressure_drop", "residuals"),
-            convergence_targets=ConvergenceTargets(
-                residual_tolerance=1e-4,
-                mass_imbalance_percent=1.0,
+        diameter = _required_float(v, "diameter")
+        length = _required_float(v, "length")
+        mean_velocity = _required_float(v, "mean_velocity")
+        kinematic_viscosity = _required_float(v, "kinematic_viscosity")
+        # density is validated for completeness even though it is not
+        # directly consumed by the OpenFOAM dictionary templates below.
+        _required_float(v, "density")
+        axial_cells = _required_int(v, "axial_cells")
+        radial_cells = _required_int(v, "radial_cells")
+
+        files = {
+            "0/U": _pipe_velocity_profile_field(
+                velocity=mean_velocity, radial_cells=radial_cells
             ),
-            case=case,
+            "0/p": _pipe_pressure_field(),
+            "constant/momentumTransport": _momentum_transport(),
+            "constant/physicalProperties": _physical_properties(
+                kinematic_viscosity
+            ),
+            "system/blockMeshDict": _pipe_block_mesh(
+                diameter=diameter,
+                length=length,
+                axial_cells=axial_cells,
+                radial_cells=radial_cells,
+            ),
+            "system/controlDict": _pipe_control_dict(),
+            "system/fvSchemes": _steady_fv_schemes(),
+            "system/fvSolution": _pipe_fv_solution(1e-4),
+        }
+
+        metadata = {
+            "schema_version": 2,
+            "experiment_type": "laminar_pipe",
+            "source": "native_compiler",
+            "experiment_id": spec.experiment_id,
+            "parameters": {p.parameter_id: p.value for p in spec.parameters},
+            "requested_outputs": ["pressure_drop", "residuals"],
+            "compilation": {"mode": "native", "compiler_id": self.compiler_id},
+        }
+        files["fluidScientist/spec.json"] = json.dumps(
+            metadata,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
         )
-        # Use the existing template rendering but without going through compile_plan
-        return compile_pipe_plan(plan)
+
+        normalized = {name: _normalize(text) for name, text in files.items()}
+        archive = _deterministic_tar_gz(normalized)
+        manifest = validate_custom_case_archive(archive)
+        capability = get_experiment_capability("laminar_pipe")
+        return CompiledCase(
+            archive=archive,
+            archive_sha256="sha256:" + hashlib.sha256(archive).hexdigest(),
+            manifest=manifest,
+            experiment_type="laminar_pipe",
+            preprocessing=capability.preprocessing,
+            required_outputs=("pressure_drop", "residuals"),
+        )
 
 
 class CylinderFlowCompiler:
