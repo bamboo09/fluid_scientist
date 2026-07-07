@@ -105,7 +105,7 @@ class OpenFOAMResultIngestor:
         # 2. Parse postProcessing directory
         post_dir = case_path / "postProcessing"
         if post_dir.exists():
-            self._parse_post_processing(post_dir, data, source_files)
+            self._parse_post_processing(post_dir, data, source_files, measurement_plan)
         else:
             data.missing_data.append("postProcessing")
 
@@ -241,7 +241,7 @@ class OpenFOAMResultIngestor:
             if cont_match:
                 data.continuity_errors.append(float(cont_match.group(1)))
 
-            # Courant number \u2014 prefer the "max" value
+            # Courant number — prefer the "max" value
             cour_match = re.search(
                 r"Courant Number.*?max[:\s]*([\d.eE+-]+)",
                 line,
@@ -280,44 +280,146 @@ class OpenFOAMResultIngestor:
         post_dir: Path,
         data: SimulationData,
         source_files: list[str],
+        measurement_plan: Any | None = None,
     ) -> None:
-        """Parse postProcessing directory for functionObject outputs."""
-        # forceCoeffs
-        fc_dir = post_dir / "forceCoeffs"
-        if fc_dir.exists():
-            source_files.append(str(fc_dir))
-            self._parse_force_coeffs(fc_dir, data)
+        """Parse postProcessing directory for functionObject outputs.
 
-        # forces
-        forces_dir = post_dir / "forces"
-        if forces_dir.exists():
-            source_files.append(str(forces_dir))
-            self._parse_forces(forces_dir, data)
+        When *measurement_plan* is provided, directories are looked up by
+        functionObject name (``post_dir / fo.name``) and the content is
+        verified against the declared type (identity verification).
 
-        # probes
-        probes_dir = post_dir / "probes"
-        if probes_dir.exists():
-            source_files.append(str(probes_dir))
-            self._parse_probes(probes_dir, data)
+        Without a plan the method falls back to scanning all subdirectories
+        and detecting the type from the directory name (backward compat).
+        """
+        if measurement_plan is not None:
+            # Plan-driven: read by functionObject name
+            for fo in measurement_plan.function_objects:
+                fo_type = (
+                    fo.type.value if hasattr(fo.type, "value") else str(fo.type)
+                )
+                effective_name = fo.name if fo.name else fo_type
+                fo_dir = post_dir / effective_name
+                if fo_dir.exists():
+                    source_files.append(str(fo_dir))
+                    self._verify_and_parse(fo_dir, fo_type, effective_name, data)
+                else:
+                    if fo.name:
+                        data.missing_data.append(f"{fo.name} ({fo_type})")
+                    else:
+                        data.missing_data.append(fo_type)
+        else:
+            # Fallback: scan all directories (backward compatibility)
+            for fo_dir in sorted(post_dir.iterdir()):
+                if not fo_dir.is_dir():
+                    continue
+                source_files.append(str(fo_dir))
+                fo_name = fo_dir.name
+                fo_type = self._detect_fo_type(fo_name)
+                if fo_type:
+                    self._verify_and_parse(fo_dir, fo_type, fo_name, data)
+                else:
+                    data.warnings.append(
+                        f"Unknown functionObject type for directory '{fo_name}'",
+                    )
 
-        # surfaceFieldValue
-        sfv_dir = post_dir / "surfaceFieldValue"
-        if sfv_dir.exists():
-            source_files.append(str(sfv_dir))
-            self._parse_surface_field_value(sfv_dir, data)
+    def _verify_and_parse(
+        self,
+        fo_dir: Path,
+        fo_type: str,
+        fo_name: str,
+        data: SimulationData,
+    ) -> None:
+        """Verify directory content matches expected type and parse data."""
+        # Identity verification: check that expected files are present
+        self._verify_identity(fo_dir, fo_type, fo_name, data)
 
-        # fieldAverage
-        fa_dir = post_dir / "fieldAverage"
-        if fa_dir.exists():
-            source_files.append(str(fa_dir))
-            self._parse_field_average(fa_dir, data)
+        if fo_type == "forceCoeffs":
+            self._parse_force_coeffs(fo_dir, data, fo_name)
+        elif fo_type == "forces":
+            self._parse_forces(fo_dir, data, fo_name)
+        elif fo_type == "probes":
+            self._parse_probes(fo_dir, data, fo_name)
+        elif fo_type == "surfaceFieldValue":
+            self._parse_surface_field_value(fo_dir, data, fo_name)
+        elif fo_type == "fieldAverage":
+            self._parse_field_average(fo_dir, data, fo_name)
+        else:
+            data.warnings.append(
+                f"Unknown functionObject type '{fo_type}' for '{fo_name}'",
+            )
 
-    def _parse_force_coeffs(self, fc_dir: Path, data: SimulationData) -> None:
+    def _verify_identity(
+        self,
+        fo_dir: Path,
+        fo_type: str,
+        fo_name: str,
+        data: SimulationData,
+    ) -> None:
+        """Verify that directory content matches the expected functionObject type.
+
+        Checks for the presence of type-specific file names (e.g.
+        ``coefficient.dat`` for *forceCoeffs*).  When the expected file is
+        missing a warning is recorded so callers can detect mismatches
+        between the declared type and the actual data on disk.
+        """
+        # Collect all .dat files inside time sub-directories
+        dat_files = list(fo_dir.glob("*/" + "*.dat"))
+        if not dat_files:
+            return  # nothing to verify — let the type-specific parser handle it
+
+        expected_filenames: dict[str, list[str]] = {
+            "forceCoeffs": ["coefficient.dat"],
+            "surfaceFieldValue": ["surfaceFieldValue.dat"],
+            "fieldAverage": ["fieldAverage.dat"],
+        }
+
+        expected = expected_filenames.get(fo_type)
+        if expected is None:
+            return  # no specific filename requirement for this type
+
+        found_names = {f.name for f in dat_files}
+        if not any(ef in found_names for ef in expected):
+            data.warnings.append(
+                f"Identity mismatch: '{fo_name}' declared as '{fo_type}' "
+                f"but expected file(s) {expected} not found",
+            )
+
+    def _detect_fo_type(self, dir_name: str) -> str | None:
+        """Detect functionObject type from directory name (fallback mode)."""
+        name_lower = dir_name.lower()
+        if "forcecoeffs" in name_lower:
+            return "forceCoeffs"
+        if "forces" in name_lower:
+            return "forces"
+        if "probes" in name_lower:
+            return "probes"
+        if "surfacefieldvalue" in name_lower:
+            return "surfaceFieldValue"
+        if "fieldaverage" in name_lower:
+            return "fieldAverage"
+        return None
+
+    def _parse_force_coeffs(
+        self,
+        fc_dir: Path,
+        data: SimulationData,
+        fo_name: str = "",
+    ) -> None:
         """Parse forceCoeffs output."""
         # Look for time directories
         for time_dir in sorted(fc_dir.iterdir()):
             if not time_dir.is_dir():
                 continue
+
+            # Store time values for Strouhal / frequency calculations
+            try:
+                time_val = float(time_dir.name)
+                if fo_name not in data.time_values:
+                    data.time_values[fo_name] = []
+                data.time_values[fo_name].append(time_val)
+            except ValueError:
+                pass
+
             data_file = time_dir / "coefficient.dat"
             if not data_file.exists():
                 # Try alternative names
@@ -351,11 +453,26 @@ class OpenFOAMResultIngestor:
             except Exception:
                 pass
 
-    def _parse_forces(self, forces_dir: Path, data: SimulationData) -> None:
+    def _parse_forces(
+        self,
+        forces_dir: Path,
+        data: SimulationData,
+        fo_name: str = "",
+    ) -> None:
         """Parse forces output."""
         for time_dir in sorted(forces_dir.iterdir()):
             if not time_dir.is_dir():
                 continue
+
+            # Store time values
+            try:
+                time_val = float(time_dir.name)
+                if fo_name not in data.time_values:
+                    data.time_values[fo_name] = []
+                data.time_values[fo_name].append(time_val)
+            except ValueError:
+                pass
+
             dat_files = list(time_dir.glob("*.dat"))
             if dat_files:
                 try:
@@ -377,11 +494,26 @@ class OpenFOAMResultIngestor:
                 except Exception:
                     pass
 
-    def _parse_probes(self, probes_dir: Path, data: SimulationData) -> None:
+    def _parse_probes(
+        self,
+        probes_dir: Path,
+        data: SimulationData,
+        fo_name: str = "",
+    ) -> None:
         """Parse probes output."""
         for time_dir in sorted(probes_dir.iterdir()):
             if not time_dir.is_dir():
                 continue
+
+            # Store time values
+            try:
+                time_val = float(time_dir.name)
+                if fo_name not in data.time_values:
+                    data.time_values[fo_name] = []
+                data.time_values[fo_name].append(time_val)
+            except ValueError:
+                pass
+
             for probe_file in time_dir.glob("*.dat"):
                 field_name = probe_file.stem  # e.g., "U" or "p"
                 try:
@@ -405,12 +537,25 @@ class OpenFOAMResultIngestor:
                     pass
 
     def _parse_surface_field_value(
-        self, sfv_dir: Path, data: SimulationData,
+        self,
+        sfv_dir: Path,
+        data: SimulationData,
+        fo_name: str = "",
     ) -> None:
         """Parse surfaceFieldValue output."""
         for time_dir in sorted(sfv_dir.iterdir()):
             if not time_dir.is_dir():
                 continue
+
+            # Store time values
+            try:
+                time_val = float(time_dir.name)
+                if fo_name not in data.time_values:
+                    data.time_values[fo_name] = []
+                data.time_values[fo_name].append(time_val)
+            except ValueError:
+                pass
+
             for sv_file in time_dir.glob("*.dat"):
                 name = sv_file.stem
                 try:
@@ -434,11 +579,26 @@ class OpenFOAMResultIngestor:
                 except Exception:
                     pass
 
-    def _parse_field_average(self, fa_dir: Path, data: SimulationData) -> None:
+    def _parse_field_average(
+        self,
+        fa_dir: Path,
+        data: SimulationData,
+        fo_name: str = "",
+    ) -> None:
         """Parse fieldAverage output."""
         for time_dir in sorted(fa_dir.iterdir()):
             if not time_dir.is_dir():
                 continue
+
+            # Store time values
+            try:
+                time_val = float(time_dir.name)
+                if fo_name not in data.time_values:
+                    data.time_values[fo_name] = []
+                data.time_values[fo_name].append(time_val)
+            except ValueError:
+                pass
+
             for fa_file in time_dir.glob("*.dat"):
                 name = fa_file.stem
                 try:
@@ -511,23 +671,38 @@ class OpenFOAMResultIngestor:
         measurement_plan: Any,
         data: SimulationData,
     ) -> None:
-        """Validate that expected functionObjects have corresponding data."""
-        expected_types = set()
+        """Validate that each expected functionObject has corresponding data.
+
+        Each functionObject in the plan is checked individually (by name and
+        type).  Missing entries are recorded in ``data.missing_data`` using
+        the format ``"<name> (<type>)"`` when a name is set, or just
+        ``"<type>"`` as a fallback.
+        """
         for fo in getattr(measurement_plan, "function_objects", []):
             fo_type = fo.type.value if hasattr(fo.type, "value") else str(fo.type)
-            expected_types.add(fo_type)
 
-        # Check which ones have data
-        if "forceCoeffs" in expected_types and not data.force_coefficients:
-            data.missing_data.append("forceCoeffs")
-        if "forces" in expected_types and not data.forces:
-            data.missing_data.append("forces")
-        if "probes" in expected_types and not data.probe_data:
-            data.missing_data.append("probes")
-        if "surfaceFieldValue" in expected_types and not data.surface_field_values:
-            data.missing_data.append("surfaceFieldValue")
-        if "fieldAverage" in expected_types and not data.field_averages:
-            data.missing_data.append("fieldAverage")
+            # Check if this functionObject has data
+            has_data = False
+            if fo_type == "forceCoeffs" and data.force_coefficients:
+                has_data = True
+            elif fo_type == "forces" and data.forces:
+                has_data = True
+            elif fo_type == "probes" and data.probe_data:
+                has_data = True
+            elif fo_type == "surfaceFieldValue" and data.surface_field_values:
+                has_data = True
+            elif fo_type == "fieldAverage" and data.field_averages:
+                has_data = True
+
+            if not has_data:
+                if fo.name:
+                    missing_entry = f"{fo.name} ({fo_type})"
+                else:
+                    missing_entry = fo_type
+                # Avoid duplicate entries (may already be recorded by
+                # _parse_post_processing when the directory was absent)
+                if missing_entry not in data.missing_data:
+                    data.missing_data.append(missing_entry)
 
 
 __all__ = ["OpenFOAMResultIngestor"]
