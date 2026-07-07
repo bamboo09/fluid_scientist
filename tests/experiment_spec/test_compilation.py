@@ -259,8 +259,12 @@ class TestCompileSpec:
         compiled, manifest = compile_spec(spec)
         assert manifest.experiment_id == spec.experiment_id
         assert manifest.experiment_version == spec.experiment_version
-        assert manifest.compiler_id == COMPILER_ID
-        assert manifest.compiler_version == COMPILER_VERSION
+        # compile_spec now uses the native CompilerRegistry path for pipe specs,
+        # so compiler_id/version come from the native compiler, not COMPILER_ID.
+        assert manifest.compiler_id == "fluid_scientist.native.pipe_flow"
+        assert manifest.compiler_id != COMPILER_ID
+        assert manifest.compiler_version == "1.0.0"
+        assert manifest.compiler_version != COMPILER_VERSION
         assert manifest.generated_files == list(compiled.manifest.members)
         assert manifest.template_versions == TEMPLATE_VERSIONS
         # spec_hash and case_hash are 16-char hex digests

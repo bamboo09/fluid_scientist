@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 import platform
 import sys
+import warnings
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -264,8 +265,8 @@ def compile_confirmed_spec(spec: ExperimentSpec) -> CompiledCase:
     """[DEPRECATED] 从已确认的 ExperimentSpec 编译 OpenFOAM 算例。
 
     .. deprecated::
-        使用 :func:`compile_spec` 代替。此函数保留用于向后兼容，
-        新代码应直接调用 ``compile_spec`` 以同时获取编译产物与清单。
+        使用 :func:`compile_spec` 或 :func:`compile_spec_native` 代替。
+        新代码应使用原生编译路径，不经过 ExperimentPlan 中间层。
 
     Compile a confirmed ExperimentSpec into a runnable OpenFOAM case.
 
@@ -274,6 +275,11 @@ def compile_confirmed_spec(spec: ExperimentSpec) -> CompiledCase:
         ValueError: if the experiment type cannot be detected or the
             reconstructed plan fails validation.
     """
+    warnings.warn(
+        "compile_confirmed_spec is deprecated; use compile_spec or compile_spec_native",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     status_val = spec.status.value if hasattr(spec.status, "value") else str(spec.status)
     if status_val != ExperimentStatus.CONFIRMED.value:
         raise SpecNotConfirmedError(
@@ -292,8 +298,9 @@ def compile_confirmed_spec(spec: ExperimentSpec) -> CompiledCase:
 def compile_spec(spec: ExperimentSpec) -> tuple[CompiledCase, CompilationManifest]:
     """直接从 ExperimentSpec 编译 OpenFOAM 算例。
 
-    这是正式的编译接口，不经过 ExperimentPlan 中间层（从调用者视角而言）。
-    旧接口 :func:`compile_confirmed_spec` 保留为兼容层。
+    Uses native compilation path (CompilerRegistry) when available.
+    Falls back to legacy compile_confirmed_spec only if no native compiler
+    can handle the spec.
 
     Args:
         spec: 必须处于 ``confirmed`` 状态的 ExperimentSpec。
@@ -304,8 +311,16 @@ def compile_spec(spec: ExperimentSpec) -> tuple[CompiledCase, CompilationManifes
     Raises:
         SpecNotConfirmedError: 如果 spec 不是 confirmed 状态。
     """
-    # 复用现有编译逻辑；compile_confirmed_spec 会先校验 confirmed 状态，
-    # 非 confirmed 时抛出 SpecNotConfirmedError。
+    from fluid_scientist.experiment_spec.native_compiler import (
+        CompilerRegistry,
+        compile_spec_native,
+    )
+
+    registry = CompilerRegistry()
+    if registry.resolve(spec) is not None:
+        return compile_spec_native(spec, registry)
+
+    # Fallback: legacy path (with deprecation warning)
     compiled = compile_confirmed_spec(spec)
 
     spec_hash = compute_spec_hash(spec)
