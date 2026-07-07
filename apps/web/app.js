@@ -1,4 +1,4 @@
-import {
+﻿import {
   buildPlanRequest,
   canStartExperiment,
   restoredPlanForProject,
@@ -1331,6 +1331,12 @@ function renderPropagation(propagation) {
 async function updateSpecParameter(parameterId, newValue) {
   if (!currentSpec || !isSpecEditable(currentSpec)) return;
   const coerced = newValue === "" ? null : (isNaN(Number(newValue)) ? newValue : Number(newValue));
+
+  // 记录滚动位置和焦点，防止页面跳动
+  const savedScrollY = window.scrollY;
+  const activeParamRow = document.querySelector(`.spec-param-row[data-param-id="${parameterId}"]`);
+  const activeInput = activeParamRow?.querySelector("input");
+
   try {
     const response = await requestJson(
       `/api/projects/${currentProject.project_id}/experiment-specs/${currentSpec.experiment_id}/parameters/${parameterId}`,
@@ -1342,13 +1348,45 @@ async function updateSpecParameter(parameterId, newValue) {
     );
     const propagation = response._propagation;
     currentSpec = response;
-    renderSpecWorkbench(currentSpec);
+
+    // 局部更新参数行，不重建整个工作台
+    updateParameterRowInPlace(parameterId, currentSpec);
+
     if (propagation) renderPropagation(propagation);
-    appendConversation("assistant", `参数 ${parameterId} 已更新。`, "workflow-event");
+
+    // 恢复滚动位置，防止页面跳动
+    window.scrollTo({ top: savedScrollY, behavior: "instant" });
+
+    // 恢复输入焦点
+    if (activeInput) {
+      const newInput = document.querySelector(`.spec-param-row[data-param-id="${parameterId}"] input`);
+      if (newInput) newInput.focus();
+    }
   } catch (error) {
     renderError("参数更新", error);
-    renderSpecWorkbench(currentSpec);
+    updateParameterRowInPlace(parameterId, currentSpec);
+    window.scrollTo({ top: savedScrollY, behavior: "instant" });
   }
+}
+
+function updateParameterRowInPlace(parameterId, spec) {
+  // 只更新参数行，不重建整个工作台
+  for (const p of spec.parameters) {
+    const existingRow = document.querySelector(
+      `.spec-param-row[data-param-id="${p.parameter_id}"]`
+    );
+    if (existingRow) {
+      const freshRow = renderParameterRow(p, spec);
+      existingRow.replaceWith(freshRow);
+    }
+  }
+
+  // 更新版本号
+  const versionLabel = document.querySelector(".spec-version-label");
+  if (versionLabel) versionLabel.textContent = `v${spec.experiment_version}`;
+
+  // 更新控件状态
+  updateSpecControls(spec);
 }
 
 async function transitionSpec(targetStatus) {
