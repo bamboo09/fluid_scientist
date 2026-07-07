@@ -2315,6 +2315,329 @@ def create_app(
             "message": "Use POST /analyze to generate metric results",
         }
 
+    # ------------------------------------------------------------------ #
+    # Code Extension user loop (Commit 9)
+    # ------------------------------------------------------------------ #
+
+    @application.get(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions",
+        tags=["experiment-specs"],
+    )
+    def list_code_extensions(
+        project_id: str,
+        experiment_id: str,
+    ) -> dict:
+        """List all code extensions for an experiment spec."""
+        stored_spec = workflow_repository.load_experiment_spec(experiment_id)
+        if stored_spec is None or stored_spec.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="ExperimentSpec not found"
+            )
+        spec = ExperimentSpec.model_validate_json(stored_spec.spec_json)
+        return {
+            "experiment_id": experiment_id,
+            "code_extensions": spec.code_extensions,
+        }
+
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions",
+        status_code=status.HTTP_201_CREATED,
+        tags=["experiment-specs"],
+    )
+    def create_code_extension(
+        project_id: str,
+        experiment_id: str,
+        extension_data: dict = Body(...),  # noqa: B008
+    ) -> dict:
+        """Create a new code extension for an experiment spec."""
+        from fluid_scientist.code_extension.models import (
+            CodeExtensionSpec,
+            CodeExtensionType,
+            ExtensionStatus,
+        )
+
+        stored_spec = workflow_repository.load_experiment_spec(experiment_id)
+        if stored_spec is None or stored_spec.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="ExperimentSpec not found"
+            )
+
+        spec = ExperimentSpec.model_validate_json(stored_spec.spec_json)
+
+        # Create extension
+        extension = CodeExtensionSpec(
+            extension_id=extension_data.get(
+                "extension_id", f"ext-{uuid4().hex[:12]}"
+            ),
+            name=extension_data["name"],
+            description=extension_data.get("description", ""),
+            extension_type=CodeExtensionType(extension_data["extension_type"]),
+            code=extension_data.get("source_code")
+            or extension_data.get("code", "def placeholder():\n    pass\n"),
+            status=ExtensionStatus.DRAFT,
+        )
+
+        # Add to spec
+        spec.code_extensions.append(extension.model_dump(mode="json"))
+
+        # Save
+        workflow_repository.replace_experiment_spec(
+            experiment_id,
+            spec_json=spec.model_dump_json(),
+            experiment_version=stored_spec.experiment_version,
+            status=stored_spec.status,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+
+        return {
+            "experiment_id": experiment_id,
+            "code_extension": extension.model_dump(mode="json"),
+        }
+
+    @application.get(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/{extension_id}",
+        tags=["experiment-specs"],
+    )
+    def get_code_extension(
+        project_id: str,
+        experiment_id: str,
+        extension_id: str,
+    ) -> dict:
+        """Get a specific code extension."""
+        stored_spec = workflow_repository.load_experiment_spec(experiment_id)
+        if stored_spec is None or stored_spec.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="ExperimentSpec not found"
+            )
+        spec = ExperimentSpec.model_validate_json(stored_spec.spec_json)
+
+        for ext in spec.code_extensions:
+            if ext.get("extension_id") == extension_id:
+                return {
+                    "experiment_id": experiment_id,
+                    "code_extension": ext,
+                }
+        raise HTTPException(
+            status_code=404,
+            detail=f"CodeExtension '{extension_id}' not found",
+        )
+
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/{extension_id}/approve",
+        tags=["experiment-specs"],
+    )
+    def approve_code_extension(
+        project_id: str,
+        experiment_id: str,
+        extension_id: str,
+        reviewer: str = Body(..., embed=True),  # noqa: B008
+        notes: str = Body("", embed=True),  # noqa: B008
+    ) -> dict:
+        """Approve a code extension that has passed auto-testing.
+
+        Transitions the extension from auto_tested to approved.
+        If the spec was in AWAITING_CODE_APPROVAL status and all extensions
+        are approved, transitions the spec back to confirmed.
+        """
+        from fluid_scientist.code_extension.models import ExtensionStatus
+
+        stored_spec = workflow_repository.load_experiment_spec(experiment_id)
+        if stored_spec is None or stored_spec.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="ExperimentSpec not found"
+            )
+        spec = ExperimentSpec.model_validate_json(stored_spec.spec_json)
+
+        # Find and update the extension
+        found = False
+        for i, ext in enumerate(spec.code_extensions):
+            if ext.get("extension_id") == extension_id:
+                if ext.get("status") != ExtensionStatus.AUTO_TESTED.value:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Extension must be in auto_tested status, "
+                            f"got {ext.get('status')}"
+                        ),
+                    )
+                ext["status"] = ExtensionStatus.APPROVED.value
+                ext["review_notes"] = f"Approved by {reviewer}. {notes}".strip()
+                spec.code_extensions[i] = ext
+                found = True
+                break
+
+        if not found:
+            raise HTTPException(
+                status_code=404,
+                detail=f"CodeExtension '{extension_id}' not found",
+            )
+
+        # State recovery: if all extensions are approved, transition
+        # spec back to confirmed
+        all_approved = all(
+            ext.get("status")
+            in (
+                ExtensionStatus.APPROVED.value,
+                ExtensionStatus.REGISTERED.value,
+            )
+            for ext in spec.code_extensions
+        )
+        if all_approved and spec.status == ExperimentStatus.AWAITING_CODE_APPROVAL:
+            spec = spec.model_copy(
+                update={"status": ExperimentStatus.CONFIRMED}
+            )
+
+        new_status = (
+            spec.status.value
+            if hasattr(spec.status, "value")
+            else str(spec.status)
+        )
+        workflow_repository.replace_experiment_spec(
+            experiment_id,
+            spec_json=spec.model_dump_json(),
+            experiment_version=stored_spec.experiment_version,
+            status=new_status,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+
+        return {
+            "experiment_id": experiment_id,
+            "code_extension": spec.code_extensions,
+            "spec_status": new_status,
+        }
+
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/{extension_id}/reject",
+        tags=["experiment-specs"],
+    )
+    def reject_code_extension(
+        project_id: str,
+        experiment_id: str,
+        extension_id: str,
+        reason: str = Body(..., embed=True),  # noqa: B008
+    ) -> dict:
+        """Reject a code extension."""
+        from fluid_scientist.code_extension.models import ExtensionStatus
+
+        stored_spec = workflow_repository.load_experiment_spec(experiment_id)
+        if stored_spec is None or stored_spec.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="ExperimentSpec not found"
+            )
+        spec = ExperimentSpec.model_validate_json(stored_spec.spec_json)
+
+        found = False
+        for i, ext in enumerate(spec.code_extensions):
+            if ext.get("extension_id") == extension_id:
+                ext["status"] = ExtensionStatus.REJECTED.value
+                ext["review_notes"] = f"Rejected: {reason}"
+                spec.code_extensions[i] = ext
+                found = True
+                break
+
+        if not found:
+            raise HTTPException(
+                status_code=404,
+                detail=f"CodeExtension '{extension_id}' not found",
+            )
+
+        workflow_repository.replace_experiment_spec(
+            experiment_id,
+            spec_json=spec.model_dump_json(),
+            experiment_version=stored_spec.experiment_version,
+            status=stored_spec.status,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+
+        return {
+            "experiment_id": experiment_id,
+            "code_extension": spec.code_extensions,
+        }
+
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/{extension_id}/register",
+        tags=["experiment-specs"],
+    )
+    def register_code_extension(
+        project_id: str,
+        experiment_id: str,
+        extension_id: str,
+    ) -> dict:
+        """Register an approved code extension as an active plugin."""
+        from fluid_scientist.code_extension.models import ExtensionStatus
+
+        stored_spec = workflow_repository.load_experiment_spec(experiment_id)
+        if stored_spec is None or stored_spec.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="ExperimentSpec not found"
+            )
+        spec = ExperimentSpec.model_validate_json(stored_spec.spec_json)
+
+        found = False
+        for i, ext in enumerate(spec.code_extensions):
+            if ext.get("extension_id") == extension_id:
+                if ext.get("status") != ExtensionStatus.APPROVED.value:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Extension must be in approved status, "
+                            f"got {ext.get('status')}"
+                        ),
+                    )
+                ext["status"] = ExtensionStatus.REGISTERED.value
+                spec.code_extensions[i] = ext
+                found = True
+                break
+
+        if not found:
+            raise HTTPException(
+                status_code=404,
+                detail=f"CodeExtension '{extension_id}' not found",
+            )
+
+        workflow_repository.replace_experiment_spec(
+            experiment_id,
+            spec_json=spec.model_dump_json(),
+            experiment_version=stored_spec.experiment_version,
+            status=stored_spec.status,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+
+        return {
+            "experiment_id": experiment_id,
+            "code_extension": spec.code_extensions,
+        }
+
+    @application.get(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/{extension_id}/history",
+        tags=["experiment-specs"],
+    )
+    def get_extension_history(
+        project_id: str,
+        experiment_id: str,
+        extension_id: str,
+    ) -> dict:
+        """Get the change history for a code extension."""
+        stored_spec = workflow_repository.load_experiment_spec(experiment_id)
+        if stored_spec is None or stored_spec.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="ExperimentSpec not found"
+            )
+        spec = ExperimentSpec.model_validate_json(stored_spec.spec_json)
+
+        for ext in spec.code_extensions:
+            if ext.get("extension_id") == extension_id:
+                history = ext.get("history", [])
+                return {
+                    "experiment_id": experiment_id,
+                    "extension_id": extension_id,
+                    "history": history,
+                }
+        raise HTTPException(
+            status_code=404,
+            detail=f"CodeExtension '{extension_id}' not found",
+        )
+
     return application
 
 
