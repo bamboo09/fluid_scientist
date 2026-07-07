@@ -7,7 +7,7 @@ from concurrent.futures import Executor
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException, status
@@ -444,6 +444,31 @@ def _openai_model_configuration(
     )
 
 
+def _build_llm_client(settings: AppSettings) -> Any:
+    """构建 LLM 客户端，如果未配置则返回 None。"""
+    if not settings.provider or not settings.provider.api_key:
+        return None
+    provider = settings.provider.provider
+    if provider in ("glm", "deepseek"):
+        from openai import OpenAI
+
+        base_urls = {
+            "glm": "https://open.bigmodel.cn/api/paas/v4/",
+            "deepseek": "https://api.deepseek.com",
+        }
+        return OpenAI(
+            api_key=settings.provider.api_key.get_secret_value(),
+            base_url=base_urls[provider],
+            timeout=settings.provider.timeout_seconds,
+            max_retries=0,
+        )
+    elif provider == "openai" and settings.openai.api_key:
+        from openai import OpenAI
+
+        return OpenAI(api_key=settings.openai.api_key.get_secret_value())
+    return None
+
+
 def create_app(
     repository: WorkflowRepository | None = None,
     execution_targets: tuple[ExecutionTargetAdapter, ...] | None = None,
@@ -537,7 +562,11 @@ def create_app(
     extension_registry = ExtensionRegistry()
     research_orchestrator = ResearchOrchestrator(
         session_store=research_session_store,
-        intent_engine=IntentEngine(),
+        intent_engine=IntentEngine(
+            llm_client=_build_llm_client(runtime_settings),
+            model_name=runtime_settings.openai.planner_model,
+            provider_name=runtime_settings.provider.provider if runtime_settings.provider else None,
+        ),
         scope_engine=ScopeEngine(),
         spec_factory=ExperimentSpecFactory(),
         workflow_repository=workflow_repository,

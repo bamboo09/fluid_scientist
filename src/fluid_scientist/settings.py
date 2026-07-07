@@ -101,6 +101,7 @@ class AppSettings(BaseSettings):
     app_mode: AppMode = AppMode.FAKE
     research_workflow_v2: bool = True  # Feature flag for new workflow
     openai: OpenAISettings = Field(default_factory=OpenAISettings)
+    provider: ProviderSettings | None = None  # 用于真实 LLM 集成
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     data_node: NodeSettings = Field(default_factory=NodeSettings)
     login_node: NodeSettings = Field(default_factory=NodeSettings)

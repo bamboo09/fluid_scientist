@@ -2,19 +2,17 @@
 
 支持两种模式：
 - fake 模式（无 LLM）：基于关键词的规则匹配
-- real 模式（有 LLM provider）：调用 LLM 进行结构化意图评估
+- real 模式（有 LLM client）：调用 LLM 进行结构化意图评估
 
-在 Commit 1 中仅实现 fake 模式，real 模式留 TODO 标记。
+在 real 模式下，如果 LLM 调用失败或响应校验失败，会自动回退到 fake 模式。
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+import json
+from typing import Any
 
 from fluid_scientist.research.models import ExtractedFact, IntentAssessment
-
-if TYPE_CHECKING:
-    from fluid_scientist.experiment_planning.providers import ExperimentDesigner
 
 # 不支持的物理类型关键词
 _UNSUPPORTED_KEYWORDS: tuple[tuple[str, str], ...] = (
@@ -24,32 +22,88 @@ _UNSUPPORTED_KEYWORDS: tuple[tuple[str, str], ...] = (
     ("可压缩", "compressible flow"),
 )
 
+INTENT_SYSTEM_PROMPT = """You are a CFD research intent analyzer. \
+Given a user's research request, extract structured intent information.
+
+Return a JSON object with these fields:
+- task_type: string
+  (new_simulation, parameter_sensitivity, mechanism_analysis,
+  benchmark_validation)
+- research_objective: string
+  (clear statement of what the user wants to investigate)
+- physical_system: string or null
+  (internal_flow, external_flow, cavity_flow, heat_transfer,
+  multiphase, combustion)
+- target_phenomena: array of strings
+  (e.g. ["vortex shedding", "pressure drop", "secondary flow"])
+- comparison_dimensions: array of strings
+- explicitly_requested_metrics: array of strings
+  (metrics the user explicitly mentioned)
+- inferred_candidate_metrics: array of strings
+  (metrics that would be relevant but weren't mentioned)
+- confirmed_physics: object
+  (physics parameters the user has confirmed, e.g.
+  {"flow_regime": "laminar", "fluid": "water"})
+- uncertain_physics: object
+  (physics parameters that are uncertain, e.g.
+  {"turbulence_model": "unknown"})
+- critical_unknowns: array of objects with fields:
+  field_id, reason, scientific_impact, options,
+  recommended_option, recommendation_reason,
+  require_explicit_confirmation
+- assumptions: array of objects with fields:
+  assumption_id, description, rationale, impact_level, field_id
+- confidence: float (0-1)
+- missing_critical_information: array of strings
+- ready_for_draft: boolean
+  (true if enough information to generate a draft ExperimentSpec)
+- unsupported_reason: string or null
+
+Rules:
+1. If the request is too vague (e.g. just "研究弯管流动"),
+   set ready_for_draft=false and list what's missing
+   in missing_critical_information
+2. High-risk physics (flow_regime, dimensions, compressibility,
+   temporal_type) must be in confirmed_physics only if explicitly
+   stated by the user; otherwise put in uncertain_physics
+   or critical_unknowns
+3. For each critical_unknown, provide a recommendation
+   with reasoning
+4. Do NOT silently default flow_regime to laminar
+   or dimensions to 2D
+5. Extract metrics from the user's description, even if they
+   use non-standard names
+6. Respond in the same language as the user's message
+"""
+
 
 class IntentEngine:
     """意图评估引擎，从用户消息中提取研究意图和物理信息。"""
 
     def __init__(
         self,
-        plan_designer: ExperimentDesigner | None = None,
-        provider_name: str | None = None,
+        llm_client: Any | None = None,
         model_name: str | None = None,
+        provider_name: str | None = None,
+        max_retries: int = 2,
     ) -> None:
         """初始化意图引擎。
 
         Args:
-            plan_designer: 现有的 ExperimentDesigner Protocol 实例，
-                在 fake 模式下为 None。
-            provider_name: LLM provider 名称（如 "openai"、"glm"）。
+            llm_client: OpenAI 兼容的 LLM 客户端实例。如果为 None，则使用 fake 模式。
             model_name: LLM 模型名称。
+            provider_name: LLM provider 名称（如 "openai"、"glm"、"deepseek"）。
+            max_retries: LLM 响应校验失败时的最大重试次数。
         """
-        self._plan_designer = plan_designer
-        self._provider_name = provider_name
+        self._llm_client = llm_client
         self._model_name = model_name
+        self._provider_name = provider_name
+        self._max_retries = max_retries
 
     @property
     def is_real_mode(self) -> bool:
-        """是否处于 real 模式（有 LLM provider）。"""
-        return self._plan_designer is not None
+        """是否处于 real 模式（有 LLM 客户端）。"""
+        return self._llm_client is not None
 
     def assess_intent(
         self,
@@ -68,13 +122,61 @@ class IntentEngine:
             意图评估结果。
         """
         if self.is_real_mode:
-            # TODO(Commit 2+): 实现 real 模式的 LLM 调用
-            # 构造 system prompt 让 LLM 返回 JSON 格式的 IntentAssessment
-            # 如果 LLM 调用失败，fallback 到 fake 模式
-            return self._assess_intent_fake(
+            return self._assess_intent_with_llm(
                 user_message, accumulated_context, confirmed_facts
             )
-        return self._assess_intent_fake(user_message, accumulated_context, confirmed_facts)
+        result = self._assess_intent_fake(
+            user_message, accumulated_context, confirmed_facts
+        )
+        result.fallback_reason = "No LLM client configured"
+        return result
+
+    def _assess_intent_with_llm(
+        self,
+        user_message: str,
+        accumulated_context: dict[str, Any],
+        confirmed_facts: list[ExtractedFact],
+    ) -> IntentAssessment:
+        """real 模式：调用 LLM 进行结构化意图评估。
+
+        如果 LLM 调用失败或响应校验失败，自动回退到 fake 模式。
+        """
+        messages = [
+            {"role": "system", "content": INTENT_SYSTEM_PROMPT},
+            {"role": "user", "content": user_message},
+        ]
+
+        last_error: Exception | None = None
+        for _attempt in range(self._max_retries + 1):
+            try:
+                response = self._llm_client.chat.completions.create(
+                    model=self._model_name,
+                    messages=messages,
+                    response_format={"type": "json_object"},
+                )
+            except Exception as e:
+                # LLM 调用异常（网络错误等），立即回退
+                result = self._assess_intent_fake(
+                    user_message, accumulated_context, confirmed_facts
+                )
+                result.fallback_reason = f"LLM call failed: {e}"
+                return result
+
+            try:
+                content = response.choices[0].message.content
+                data = json.loads(content)
+                assessment = IntentAssessment.model_validate(data)
+                return assessment
+            except Exception as e:
+                last_error = e
+                continue
+
+        # 重试次数耗尽，回退到 fake 模式
+        result = self._assess_intent_fake(
+            user_message, accumulated_context, confirmed_facts
+        )
+        result.fallback_reason = f"LLM validation failed: {last_error}"
+        return result
 
     def _assess_intent_fake(
         self,
@@ -99,6 +201,7 @@ class IntentEngine:
                     confidence=0.0,
                     ready_for_draft=False,
                     unsupported_reason=f"当前系统暂不支持{cn_kw}相关模拟",
+                    fallback_used=True,
                 )
 
         physical_system: str | None = None
@@ -189,6 +292,7 @@ class IntentEngine:
             missing_critical_information=missing_info,
             ready_for_draft=ready_for_draft,
             unsupported_reason=None,
+            fallback_used=True,
         )
 
     @staticmethod

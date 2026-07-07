@@ -81,6 +81,28 @@ class PhysicsUnknown(BaseModel):
     requires_user_input: bool = True
 
 
+class CriticalUnknown(BaseModel):
+    """高风险未知项，需要用户确认。"""
+
+    field_id: str
+    reason: str
+    scientific_impact: str
+    options: list[str] = Field(default_factory=list)
+    recommended_option: str | None = None
+    recommendation_reason: str | None = None
+    require_explicit_confirmation: bool = True
+
+
+class ProposedAssumption(BaseModel):
+    """系统提出的假设，待用户确认。"""
+
+    assumption_id: str
+    description: str
+    rationale: str
+    impact_level: Literal["high", "medium", "low"] = "medium"
+    field_id: str | None = None
+
+
 class IntentAssessment(BaseModel):
     """意图评估结果，描述用户的研究目标和物理系统。"""
 
@@ -94,6 +116,15 @@ class IntentAssessment(BaseModel):
     missing_critical_information: list[str] = Field(default_factory=list)
     ready_for_draft: bool = False
     unsupported_reason: str | None = None
+    # 新增字段
+    explicitly_requested_metrics: list[str] = Field(default_factory=list)
+    inferred_candidate_metrics: list[str] = Field(default_factory=list)
+    confirmed_physics: dict[str, Any] = Field(default_factory=dict)
+    uncertain_physics: dict[str, Any] = Field(default_factory=dict)
+    critical_unknowns: list[CriticalUnknown] = Field(default_factory=list)
+    assumptions: list[ProposedAssumption] = Field(default_factory=list)
+    fallback_used: bool = False  # 标记是否使用了规则回退
+    fallback_reason: str | None = None
 
 
 class ResearchPhysicsSpec(BaseModel):
@@ -187,11 +218,13 @@ __all__ = [
     "ClarificationQuestion",
     "ClarificationRequired",
     "ClarificationTurn",
+    "CriticalUnknown",
     "DraftReady",
     "ExtractedFact",
     "IntentAssessment",
     "MissingCapability",
     "PhysicsUnknown",
+    "ProposedAssumption",
     "ResearchPhysicsSpec",
     "ResearchSession",
     "ResearchSessionStatus",
