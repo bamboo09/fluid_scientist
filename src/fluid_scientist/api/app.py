@@ -2019,6 +2019,302 @@ def create_app(
             "entry_point": "system/controlDict",
         }
 
+    # ------------------------------------------------------------------ #
+    # Analysis main flow: Ingestor -> MetricExecutor -> ScientificAnalyzer
+    # ------------------------------------------------------------------ #
+
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/ingest",
+        tags=["experiment-specs"],
+    )
+    def ingest_experiment_results(
+        project_id: str,
+        experiment_id: str,
+        case_path: str = Body(..., embed=True),
+    ) -> dict:
+        """Ingest OpenFOAM results from a case directory.
+
+        Calls OpenFOAMResultIngestor to parse real result files.
+        """
+        from pathlib import Path
+
+        from fluid_scientist.results.ingestor import OpenFOAMResultIngestor
+
+        stored_spec = workflow_repository.load_experiment_spec(experiment_id)
+        if stored_spec is None or stored_spec.project_id != project_id:
+            raise HTTPException(
+                status_code=404,
+                detail=f"ExperimentSpec '{experiment_id}' not found",
+            )
+
+        spec = ExperimentSpec.model_validate_json(stored_spec.spec_json)
+
+        # Reconstruct MeasurementPlan if available
+        measurement_plan = None
+        if spec.metrics:
+            from fluid_scientist.measurement.models import MeasurementPlan
+
+            try:
+                measurement_plan = MeasurementPlan.model_validate(spec.metrics[0])
+            except Exception:
+                pass
+
+        # Ingest results
+        ingestor = OpenFOAMResultIngestor()
+        try:
+            sim_data = ingestor.ingest(
+                case_path=Path(case_path),
+                measurement_plan=measurement_plan,
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(
+                status_code=404, detail=str(error)
+            ) from error
+        except Exception as error:
+            raise HTTPException(
+                status_code=500, detail=f"Ingestion failed: {error}"
+            ) from error
+
+        return {
+            "experiment_id": experiment_id,
+            "simulation_data": sim_data.model_dump(),
+            "missing_data": sim_data.missing_data,
+            "warnings": sim_data.warnings,
+        }
+
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/analyze",
+        tags=["experiment-specs"],
+    )
+    def analyze_experiment_results(
+        project_id: str,
+        experiment_id: str,
+        case_path: str = Body(..., embed=True),
+        metric_ids: list[str] | None = Body(None, embed=True),
+    ) -> dict:
+        """Calculate metrics from simulation results.
+
+        Calls OpenFOAMResultIngestor then MetricExecutor.
+        """
+        from pathlib import Path
+
+        from fluid_scientist.results.ingestor import OpenFOAMResultIngestor
+        from fluid_scientist.results.metric_executor import MetricExecutor
+
+        stored_spec = workflow_repository.load_experiment_spec(experiment_id)
+        if stored_spec is None or stored_spec.project_id != project_id:
+            raise HTTPException(
+                status_code=404,
+                detail=f"ExperimentSpec '{experiment_id}' not found",
+            )
+
+        spec = ExperimentSpec.model_validate_json(stored_spec.spec_json)
+
+        # Reconstruct MeasurementPlan
+        measurement_plan = None
+        if spec.metrics:
+            from fluid_scientist.measurement.models import MeasurementPlan
+
+            try:
+                measurement_plan = MeasurementPlan.model_validate(spec.metrics[0])
+            except Exception:
+                pass
+
+        # Ingest
+        ingestor = OpenFOAMResultIngestor()
+        try:
+            sim_data = ingestor.ingest(
+                case_path=Path(case_path),
+                measurement_plan=measurement_plan,
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(
+                status_code=404, detail=str(error)
+            ) from error
+        except Exception as error:
+            raise HTTPException(
+                status_code=500, detail=f"Ingestion failed: {error}"
+            ) from error
+
+        # Determine which metrics to calculate
+        if metric_ids is None:
+            # Extract from spec's metric plan
+            metric_ids = []
+            if measurement_plan:
+                metric_ids = [
+                    b.metric_id for b in measurement_plan.metric_bindings
+                ]
+            if not metric_ids:
+                # Default based on experiment type
+                param_ids = {p.parameter_id for p in spec.parameters}
+                if "reynolds_number" in param_ids:
+                    metric_ids = [
+                        "drag_coefficient",
+                        "lift_coefficient",
+                        "strouhal_number",
+                    ]
+                elif "length" in param_ids:
+                    metric_ids = [
+                        "pressure_drop",
+                        "friction_factor",
+                        "mass_flow_rate",
+                    ]
+                else:
+                    metric_ids = ["residual_tolerance", "max_courant"]
+
+        # Extract parameters for metric calculation
+        parameters = {p.parameter_id: p.value for p in spec.parameters}
+
+        # Execute metrics
+        executor = MetricExecutor()
+        try:
+            results = executor.execute_all(
+                metric_ids, sim_data, parameters=parameters
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Metric execution failed: {error}",
+            ) from error
+
+        return {
+            "experiment_id": experiment_id,
+            "metric_results": [r.model_dump() for r in results],
+            "missing_data": sim_data.missing_data,
+        }
+
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/scientific-report",
+        tags=["experiment-specs"],
+    )
+    def generate_scientific_report(
+        project_id: str,
+        experiment_id: str,
+        case_path: str = Body(..., embed=True),
+    ) -> dict:
+        """Generate full scientific report: ingest -> metrics -> analysis.
+
+        Calls OpenFOAMResultIngestor -> MetricExecutor -> ScientificAnalyzer.
+        """
+        from pathlib import Path
+
+        from fluid_scientist.results.ingestor import OpenFOAMResultIngestor
+        from fluid_scientist.results.metric_executor import MetricExecutor
+        from fluid_scientist.results.analysis import ScientificAnalyzer
+
+        stored_spec = workflow_repository.load_experiment_spec(experiment_id)
+        if stored_spec is None or stored_spec.project_id != project_id:
+            raise HTTPException(
+                status_code=404,
+                detail=f"ExperimentSpec '{experiment_id}' not found",
+            )
+
+        spec = ExperimentSpec.model_validate_json(stored_spec.spec_json)
+
+        # Reconstruct MeasurementPlan
+        measurement_plan = None
+        if spec.metrics:
+            from fluid_scientist.measurement.models import MeasurementPlan
+
+            try:
+                measurement_plan = MeasurementPlan.model_validate(spec.metrics[0])
+            except Exception:
+                pass
+
+        # Step 1: Ingest
+        ingestor = OpenFOAMResultIngestor()
+        try:
+            sim_data = ingestor.ingest(
+                case_path=Path(case_path),
+                measurement_plan=measurement_plan,
+            )
+        except FileNotFoundError as error:
+            raise HTTPException(
+                status_code=404, detail=str(error)
+            ) from error
+        except Exception as error:
+            raise HTTPException(
+                status_code=500, detail=f"Ingestion failed: {error}"
+            ) from error
+
+        # Step 2: Calculate metrics
+        metric_ids = []
+        if measurement_plan:
+            metric_ids = [
+                b.metric_id for b in measurement_plan.metric_bindings
+            ]
+        if not metric_ids:
+            param_ids = {p.parameter_id for p in spec.parameters}
+            if "reynolds_number" in param_ids:
+                metric_ids = [
+                    "drag_coefficient",
+                    "lift_coefficient",
+                    "strouhal_number",
+                ]
+            elif "length" in param_ids:
+                metric_ids = [
+                    "pressure_drop",
+                    "friction_factor",
+                    "mass_flow_rate",
+                ]
+            else:
+                metric_ids = ["residual_tolerance", "max_courant"]
+
+        parameters = {p.parameter_id: p.value for p in spec.parameters}
+
+        executor = MetricExecutor()
+        try:
+            metric_results = executor.execute_all(
+                metric_ids, sim_data, parameters=parameters
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Metric execution failed: {error}",
+            ) from error
+
+        # Step 3: Scientific analysis
+        analyzer = ScientificAnalyzer()
+        try:
+            analysis = analyzer.analyze(
+                metric_results=metric_results,
+                simulation_data=sim_data,
+                experiment_spec=spec,
+            )
+        except Exception as error:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Scientific analysis failed: {error}",
+            ) from error
+
+        return {
+            "experiment_id": experiment_id,
+            "metric_results": [r.model_dump() for r in metric_results],
+            "scientific_analysis": analysis.model_dump(),
+            "missing_data": sim_data.missing_data,
+            "warnings": sim_data.warnings,
+        }
+
+    @application.get(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/metric-results",
+        tags=["experiment-specs"],
+    )
+    def get_metric_results(
+        project_id: str,
+        experiment_id: str,
+    ) -> dict:
+        """Retrieve stored metric results for an experiment."""
+        stored_spec = workflow_repository.load_experiment_spec(experiment_id)
+        if stored_spec is None or stored_spec.project_id != project_id:
+            raise HTTPException(
+                status_code=404,
+                detail=f"ExperimentSpec '{experiment_id}' not found",
+            )
+        return {
+            "experiment_id": experiment_id,
+            "message": "Use POST /analyze to generate metric results",
+        }
+
     return application
 
 
