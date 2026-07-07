@@ -28,6 +28,174 @@ from fluid_scientist.experiment_spec.models import (
 )
 
 
+# ---------------------------------------------------------------------------
+# MeasurementPlan integration helpers
+# ---------------------------------------------------------------------------
+
+# Patches available per experiment type (extracted from blockMeshDict boundary).
+_EXPERIMENT_PATCHES: dict[str, list[str]] = {
+    "laminar_pipe": ["inlet", "outlet", "wall", "walls", "side1", "side2"],
+    "cylinder_flow": ["inlet", "outlet", "cylinder", "mirrorPlane", "frontAndBack"],
+    "lid_driven_cavity": ["movingLid", "fixedWalls", "frontAndBack"],
+}
+
+
+def _format_openfoam_value(value: Any, indent: int = 4) -> str:
+    """Format a Python value as an OpenFOAM dict value string."""
+    if isinstance(value, str):
+        return value
+    elif isinstance(value, bool):
+        return "yes" if value else "no"
+    elif isinstance(value, int):
+        return str(value)
+    elif isinstance(value, float):
+        # Use same format as _number() in compilers.py
+        return f"{value:.12g}"
+    elif isinstance(value, list):
+        return "(" + " ".join(_format_openfoam_value(v, indent) for v in value) + ")"
+    elif isinstance(value, dict):
+        inner_lines = []
+        for k, v in value.items():
+            inner_lines.append(
+                " " * (indent + 4) + k + " " + _format_openfoam_value(v, indent + 4) + ";"
+            )
+        inner = "\n".join(inner_lines)
+        return "{\n" + inner + "\n" + " " * indent + "}"
+    return str(value)
+
+
+def _render_fo_dict_to_openfoam(name: str, fo_dict: dict[str, Any], indent: int = 4) -> str:
+    """Render a functionObject dict as OpenFOAM dict format string."""
+    spaces = " " * indent
+    lines = [spaces + name, spaces + "{"]
+    for key, value in fo_dict.items():
+        lines.append(
+            spaces + "    " + key + " " + _format_openfoam_value(value, indent + 4) + ";"
+        )
+    lines.append(spaces + "}")
+    return "\n".join(lines)
+
+
+def _remove_existing_fo_block(control_dict_text: str, fo_name: str) -> str:
+    """Remove a named functionObject block from the functions section.
+
+    Scans for a line whose stripped content equals *fo_name* followed by
+    a ``{`` line inside the functions block and removes everything up to
+    the matching closing brace.  This ensures that MeasurementPlan
+    functionObjects replace (not duplicate) existing ones.
+    """
+    lines = control_dict_text.split("\n")
+    i = 0
+    while i < len(lines):
+        stripped = lines[i].strip()
+        if stripped == fo_name:
+            # Check that the next non-empty line is "{"
+            j = i + 1
+            while j < len(lines) and lines[j].strip() == "":
+                j += 1
+            if j < len(lines) and lines[j].strip() == "{":
+                # Found the block start.  Find the matching closing brace.
+                depth = 1
+                k = j + 1
+                while k < len(lines) and depth > 0:
+                    for ch in lines[k]:
+                        if ch == "{":
+                            depth += 1
+                        elif ch == "}":
+                            depth -= 1
+                    k += 1
+                # Remove lines[i:k] (the entire FO block including name line)
+                del lines[i:k]
+                return "\n".join(lines)
+        i += 1
+    return control_dict_text
+
+
+def _merge_measurement_plan_into_control_dict(
+    control_dict_text: str,
+    additional_fos: dict[str, dict[str, Any]],
+) -> str:
+    """Merge MeasurementPlan functionObjects into the controlDict's functions block.
+
+    If a functionObject with the same name already exists in the controlDict,
+    the existing one is removed and replaced by the MeasurementPlan version.
+    """
+    if not additional_fos:
+        return control_dict_text
+
+    text = control_dict_text
+
+    # Remove any existing FOs that share names with the new ones.
+    for fo_name in additional_fos:
+        text = _remove_existing_fo_block(text, fo_name)
+
+    # Render the additional functionObjects as OpenFOAM dict text.
+    fo_entries = []
+    for name, fo_dict in additional_fos.items():
+        fo_entries.append(_render_fo_dict_to_openfoam(name, fo_dict))
+    fo_text = "\n".join(fo_entries)
+
+    # Find the closing of the functions block (the last standalone "}")
+    # and insert the new FOs before it.
+    lines = text.rstrip().split("\n")
+    insert_idx = None
+    for i in range(len(lines) - 1, -1, -1):
+        if lines[i].strip() == "}":
+            insert_idx = i
+            break
+
+    if insert_idx is not None:
+        for j, fo_line in enumerate(fo_text.split("\n")):
+            lines.insert(insert_idx + j, fo_line)
+        return "\n".join(lines) + "\n"
+
+    return control_dict_text
+
+
+def _integrate_measurement_plan(
+    spec: ExperimentSpec,
+    experiment_type: str,
+    files: dict[str, str],
+) -> None:
+    """If *spec* carries a MeasurementPlan in ``spec.metrics``, compile it
+    and merge the resulting functionObjects into the ``system/controlDict`` file.
+
+    This mutates *files* in-place by updating ``files["system/controlDict"]``.
+    If the MeasurementPlan cannot be parsed or compilation fails, the original
+    controlDict is left untouched.
+    """
+    if not spec.metrics:
+        return
+
+    try:
+        from fluid_scientist.measurement.compiler import compile_measurement_plan
+        from fluid_scientist.measurement.models import MeasurementPlan
+
+        plan_data = spec.metrics[0]
+        if not isinstance(plan_data, dict):
+            return
+        measurement_plan = MeasurementPlan.model_validate(plan_data)
+
+        patches = _EXPERIMENT_PATCHES.get(experiment_type, [])
+        result = compile_measurement_plan(
+            measurement_plan,
+            available_patches=patches,
+            solver_output_fields=["U", "p"],
+        )
+
+        if result.success:
+            additional_fos = result.control_dict_additions.get("functions", {})
+            if additional_fos:
+                files["system/controlDict"] = _merge_measurement_plan_into_control_dict(
+                    files["system/controlDict"],
+                    additional_fos,
+                )
+    except Exception:
+        # If MeasurementPlan parsing or compilation fails, continue with
+        # the base controlDict -- measurement plan is advisory, not blocking.
+        pass
+
+
 class ExperimentCompiler(Protocol):
     """Protocol for native ExperimentSpec compilers."""
 
@@ -160,6 +328,9 @@ class PipeFlowCompiler:
             sort_keys=True,
             separators=(",", ":"),
         )
+
+        # Integrate MeasurementPlan functionObjects if present in spec.metrics.
+        _integrate_measurement_plan(spec, "laminar_pipe", files)
 
         normalized = {name: _normalize(text) for name, text in files.items()}
         archive = _deterministic_tar_gz(normalized)
@@ -314,6 +485,9 @@ class CylinderFlowCompiler:
             separators=(",", ":"),
         )
 
+        # Integrate MeasurementPlan functionObjects if present in spec.metrics.
+        _integrate_measurement_plan(spec, "cylinder_flow", files)
+
         normalized = {name: _normalize(text) for name, text in files.items()}
         archive = _deterministic_tar_gz(normalized)
         manifest = validate_custom_case_archive(archive)
@@ -423,6 +597,9 @@ class CavityFlowCompiler:
             sort_keys=True,
             separators=(",", ":"),
         )
+
+        # Integrate MeasurementPlan functionObjects if present in spec.metrics.
+        _integrate_measurement_plan(spec, "lid_driven_cavity", files)
 
         normalized = {name: _normalize(text) for name, text in files.items()}
         archive = _deterministic_tar_gz(normalized)
