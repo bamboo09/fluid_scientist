@@ -138,13 +138,14 @@ class TestPressureDrop:
 class TestDragCoefficient:
     """Test 2: drag_coefficient extraction from forceCoeffs."""
 
-    def test_drag_coefficient_returns_last_cd(self):
-        """Cd is the last value from forceCoeffs."""
+    def test_drag_coefficient_time_averaged(self):
+        """Cd is the time-averaged value from forceCoeffs."""
         data = _make_force_coeffs_data(cd_values=[1.2, 1.3, 1.25])
         executor = MetricExecutor()
         result = executor.execute("drag_coefficient", data)
 
         assert result.metric_id == "drag_coefficient"
+        # mean of [1.2, 1.3, 1.25] = 1.25
         assert result.value == pytest.approx(1.25)
         assert result.unit == "dimensionless"
         assert not result.data_missing
@@ -167,13 +168,14 @@ class TestDragCoefficient:
 class TestLiftCoefficient:
     """Test 3: lift_coefficient extraction from forceCoeffs."""
 
-    def test_lift_coefficient_returns_last_cl(self):
-        """Cl is the last value from forceCoeffs."""
+    def test_lift_coefficient_time_averaged(self):
+        """Cl is the time-averaged value from forceCoeffs."""
         data = _make_force_coeffs_data(cl_values=[0.4, 0.5, 0.45])
         executor = MetricExecutor()
         result = executor.execute("lift_coefficient", data)
 
         assert result.metric_id == "lift_coefficient"
+        # mean of [0.4, 0.5, 0.45] = 0.45
         assert result.value == pytest.approx(0.45)
         assert result.unit == "dimensionless"
         assert result.confidence == "high"
@@ -271,12 +273,12 @@ class TestStrouhalNumber:
 class TestVelocityUniformity:
     """Test 6: velocity_uniformity CV = sigma_u / mean_u."""
 
-    def test_velocity_uniformity_with_magnitude(self):
-        """CV calculated from mean and magnitude data."""
+    def test_velocity_uniformity_proper_cv(self):
+        """CV calculated as std/mean from velocity time series."""
+        vel = [1.0, 1.1, 0.9, 1.05, 0.95, 1.0, 1.02, 0.98, 1.01, 0.99]
         data = SimulationData(
             surface_field_values={
-                "velocity_mean_outlet": [1.0],
-                "velocity_magnitude_outlet": [1.5],
+                "velocity_mean_outlet": vel,
             },
         )
         executor = MetricExecutor()
@@ -284,9 +286,10 @@ class TestVelocityUniformity:
 
         assert result.metric_id == "velocity_uniformity"
         assert result.value is not None
-        # variance = mag^2 - mean^2 = 2.25 - 1.0 = 1.25
-        # std = sqrt(1.25), cv = sqrt(1.25) / 1.0
-        expected_cv = math.sqrt(1.25) / 1.0
+        # CV = std(u) / |mean(u)| computed over steady-state portion
+        from fluid_scientist.results.metric_executor import _time_averaged_stats
+        mean_u, std_u, _ = _time_averaged_stats(vel)
+        expected_cv = std_u / abs(mean_u)
         assert result.value == pytest.approx(expected_cv, rel=0.01)
         assert result.unit == "dimensionless"
         assert result.confidence == "high"
@@ -302,10 +305,10 @@ class TestVelocityUniformity:
 
     def test_outlet_velocity_uniformity_alias(self):
         """outlet_velocity_uniformity is handled as an alias."""
+        vel = [1.0, 1.1, 0.9, 1.05, 0.95, 1.0, 1.02, 0.98, 1.01, 0.99]
         data = SimulationData(
             surface_field_values={
-                "velocity_mean_outlet": [1.0],
-                "velocity_magnitude_outlet": [1.5],
+                "velocity_mean_outlet": vel,
             },
         )
         executor = MetricExecutor()

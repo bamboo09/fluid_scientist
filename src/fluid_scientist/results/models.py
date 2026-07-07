@@ -73,6 +73,10 @@ class SimulationData(BaseModel):
     surface_field_values: dict[str, list[float]] = Field(default_factory=dict)
     # e.g., {"pressure_inlet_average": [...]}
 
+    # Time values from postProcessing (maps functionObject name to time column)
+    time_values: dict[str, list[float]] = Field(default_factory=dict)
+    # e.g., {"forceCoeffs": [0.0, 0.1, 0.2, ...]}
+
     # Field averages
     field_averages: dict[str, float] = Field(default_factory=dict)
 
@@ -114,6 +118,8 @@ class MetricResult(BaseModel):
     algorithm_version: str = "1.0.0"
     data_missing: bool = False
     missing_reason: str | None = None
+    # Detailed statistics for time-averaged metrics (mean, std, ci, n_samples, ...)
+    statistics: dict[str, Any] = Field(default_factory=dict)
 
 
 __all__ = ["MetricResult", "ResultManifest", "SimulationData"]

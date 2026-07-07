@@ -25,6 +25,38 @@ from typing import Any
 from fluid_scientist.results.models import MetricResult, SimulationData
 
 
+def _time_averaged_stats(
+    values: list[float], discard_fraction: float = 0.2
+) -> tuple[float, float, float]:
+    """Compute time-averaged statistics, discarding initial transient.
+
+    Args:
+        values: Time series of values.
+        discard_fraction: Fraction of initial values to discard (transient period).
+
+    Returns:
+        (mean, std, confidence_interval_95)
+    """
+    n = len(values)
+    if n == 0:
+        return (0.0, 0.0, 0.0)
+    start_idx = int(n * discard_fraction)
+    if start_idx >= n - 1:
+        start_idx = 0
+    steady = values[start_idx:]
+    m = len(steady)
+    mean_val = sum(steady) / m
+    if m > 1:
+        variance = sum((v - mean_val) ** 2 for v in steady) / (m - 1)
+        std_val = math.sqrt(variance)
+        # 95% confidence interval (t-distribution approximated with z=1.96 for large samples)
+        ci_95 = 1.96 * std_val / math.sqrt(m)
+    else:
+        std_val = 0.0
+        ci_95 = 0.0
+    return (mean_val, std_val, ci_95)
+
+
 class QualityCheckResult:
     """Result of a single quality check."""
     def __init__(self, name: str, passed: bool, message: str = "") -> None:
@@ -126,7 +158,7 @@ class MetricExecutor:
         data: SimulationData,
         mdef: dict[str, Any] | None,
     ) -> MetricResult:
-        """Calculate pressure drop: p_inlet - p_outlet."""
+        """Calculate pressure drop: p_inlet - p_outlet using time-averaged values."""
         quality_checks: list[dict[str, Any]] = []
         warnings: list[str] = []
 
@@ -162,24 +194,40 @@ class MetricExecutor:
                 missing_reason="Empty pressure values",
             )
 
-        # Use last values (steady state)
-        inlet_p = inlet_vals[-1]
-        outlet_p = outlet_vals[-1]
-        pressure_drop = inlet_p - outlet_p
+        # Time-averaged statistics (discard initial transient)
+        inlet_mean, inlet_std, inlet_ci = _time_averaged_stats(inlet_vals)
+        outlet_mean, outlet_std, outlet_ci = _time_averaged_stats(outlet_vals)
+        pressure_drop = inlet_mean - outlet_mean
 
-        # Quality check: values should be stable
-        if len(inlet_vals) > 5:
-            recent = inlet_vals[-5:]
-            mean_v = sum(recent) / len(recent)
-            max_dev = max(abs(v - mean_v) for v in recent) / max(abs(mean_v), 1e-10)
-            check = QualityCheckResult(
-                "inlet_pressure_stability",
-                max_dev < 0.05,
-                f"Max deviation: {max_dev*100:.1f}%",
-            )
-            quality_checks.append(check.to_dict())
-            if not check.passed:
-                warnings.append(f"入口压力不稳定，偏差 {max_dev*100:.1f}%")
+        # Quality check: steady state achieved (CV < threshold)
+        inlet_cv = inlet_std / max(abs(inlet_mean), 1e-10)
+        outlet_cv = outlet_std / max(abs(outlet_mean), 1e-10)
+        steady_passed = inlet_cv < 0.05 and outlet_cv < 0.05
+        check = QualityCheckResult(
+            "steady_state_achieved",
+            steady_passed,
+            f"inlet CV: {inlet_cv:.4f}, outlet CV: {outlet_cv:.4f}",
+        )
+        quality_checks.append(check.to_dict())
+        if not check.passed:
+            warnings.append("压力未达到稳态，建议增加仿真时间")
+
+        statistics = {
+            "inlet": {
+                "mean": inlet_mean,
+                "std": inlet_std,
+                "ci_95": inlet_ci,
+                "n_samples": len(inlet_vals),
+            },
+            "outlet": {
+                "mean": outlet_mean,
+                "std": outlet_std,
+                "ci_95": outlet_ci,
+                "n_samples": len(outlet_vals),
+            },
+            "pressure_drop": pressure_drop,
+            "discard_fraction": 0.2,
+        }
 
         return MetricResult(
             metric_id="pressure_drop",
@@ -188,6 +236,7 @@ class MetricExecutor:
             quality_checks=quality_checks,
             confidence="high" if all(q["passed"] for q in quality_checks) else "medium",
             warnings=warnings,
+            statistics=statistics,
         )
 
     def _calc_drag_coefficient(
@@ -195,7 +244,7 @@ class MetricExecutor:
         data: SimulationData,
         mdef: dict[str, Any] | None,
     ) -> MetricResult:
-        """Extract Cd from forceCoeffs data."""
+        """Extract time-averaged Cd from forceCoeffs data."""
         if "Cd" not in data.force_coefficients or not data.force_coefficients["Cd"]:
             return MetricResult(
                 metric_id="drag_coefficient",
@@ -206,28 +255,33 @@ class MetricExecutor:
             )
 
         cd_values = data.force_coefficients["Cd"]
-        # Use time-averaged value for steady, or last value
-        cd = cd_values[-1]
+        cd_mean, cd_std, cd_ci = _time_averaged_stats(cd_values)
 
         quality_checks = []
-        if len(cd_values) > 10:
-            recent = cd_values[-10:]
-            mean_cd = sum(recent) / len(recent)
-            std_cd = math.sqrt(sum((v - mean_cd)**2 for v in recent) / len(recent))
-            cv = std_cd / max(abs(mean_cd), 1e-10)
-            check = QualityCheckResult(
-                "cd_statistical_stability",
-                cv < 0.1,
-                f"CV of last 10 samples: {cv:.4f}",
-            )
-            quality_checks.append(check.to_dict())
+        # Statistical stability check
+        cv = cd_std / max(abs(cd_mean), 1e-10)
+        check = QualityCheckResult(
+            "cd_statistical_stability",
+            cv < 0.1,
+            f"CV of steady-state Cd: {cv:.4f}",
+        )
+        quality_checks.append(check.to_dict())
+
+        statistics = {
+            "mean": cd_mean,
+            "std": cd_std,
+            "ci_95": cd_ci,
+            "n_samples": len(cd_values),
+            "discard_fraction": 0.2,
+        }
 
         return MetricResult(
             metric_id="drag_coefficient",
-            value=cd,
+            value=cd_mean,
             unit="dimensionless",
             quality_checks=quality_checks,
             confidence="high" if all(q["passed"] for q in quality_checks) else "medium",
+            statistics=statistics,
         )
 
     def _calc_lift_coefficient(
@@ -235,7 +289,7 @@ class MetricExecutor:
         data: SimulationData,
         mdef: dict[str, Any] | None,
     ) -> MetricResult:
-        """Extract Cl from forceCoeffs data."""
+        """Extract time-averaged Cl from forceCoeffs data."""
         if "Cl" not in data.force_coefficients or not data.force_coefficients["Cl"]:
             return MetricResult(
                 metric_id="lift_coefficient",
@@ -246,13 +300,22 @@ class MetricExecutor:
             )
 
         cl_values = data.force_coefficients["Cl"]
-        cl = cl_values[-1]
+        cl_mean, cl_std, cl_ci = _time_averaged_stats(cl_values)
+
+        statistics = {
+            "mean": cl_mean,
+            "std": cl_std,
+            "ci_95": cl_ci,
+            "n_samples": len(cl_values),
+            "discard_fraction": 0.2,
+        }
 
         return MetricResult(
             metric_id="lift_coefficient",
-            value=cl,
+            value=cl_mean,
             unit="dimensionless",
             confidence="high",
+            statistics=statistics,
         )
 
     def _calc_strouhal_number(
@@ -263,7 +326,8 @@ class MetricExecutor:
     ) -> MetricResult:
         """Calculate Strouhal number: St = f * D / U.
 
-        Requires FFT of Cl or U probe data to find shedding frequency.
+        Requires spectral analysis of Cl or U probe data to find shedding frequency.
+        Uses the real time column from postProcessing when available.
         """
         quality_checks: list[dict[str, Any]] = []
         warnings: list[str] = []
@@ -291,13 +355,62 @@ class MetricExecutor:
         if not check1.passed:
             warnings.append("数据长度不足，频率分辨率可能不够")
 
-        # 2. Time step uniformity (assumed uniform from OpenFOAM)
-        check2 = QualityCheckResult(
-            "time_step_uniformity",
-            True,
-            "OpenFOAM output assumed uniformly sampled",
-        )
-        quality_checks.append(check2.to_dict())
+        # Determine dt from real time column if available
+        time_column = None
+        if data.time_values:
+            # Try common functionObject names for force coefficients
+            for candidate_key in (
+                "forceCoeffs",
+                "force_coeffs",
+                "forces",
+                "forceCoefficients",
+            ):
+                if candidate_key in data.time_values:
+                    time_column = data.time_values[candidate_key]
+                    break
+            # If only one entry exists, use it
+            if time_column is None and len(data.time_values) == 1:
+                time_column = next(iter(data.time_values.values()))
+
+        used_real_time = False
+        if time_column is not None and len(time_column) >= 2:
+            # Compute average dt from the actual time column
+            dt = (time_column[-1] - time_column[0]) / (len(time_column) - 1)
+            used_real_time = True
+            # 2. Time step uniformity — verify the time column is uniform
+            if len(time_column) > 2:
+                sample_dts = [
+                    time_column[i + 1] - time_column[i]
+                    for i in range(min(len(time_column) - 1, 20))
+                ]
+                dt_max_dev = (
+                    max(abs(d - dt) for d in sample_dts) / max(abs(dt), 1e-10)
+                )
+                check2 = QualityCheckResult(
+                    "time_step_uniformity",
+                    dt_max_dev < 0.01,
+                    f"Max dt deviation: {dt_max_dev * 100:.2f}%",
+                )
+                quality_checks.append(check2.to_dict())
+            else:
+                check2 = QualityCheckResult(
+                    "time_step_uniformity",
+                    True,
+                    "Insufficient time data to verify uniformity",
+                )
+                quality_checks.append(check2.to_dict())
+        else:
+            # Fall back to parameter dt
+            dt = parameters.get("time_step", parameters.get("interval", 0.01))
+            warnings.append(
+                "未找到真实时间列 (time_values)，使用参数 time_step 作为时间步长"
+            )
+            check2 = QualityCheckResult(
+                "time_step_uniformity",
+                True,
+                "Using parameter dt (assumed uniform)",
+            )
+            quality_checks.append(check2.to_dict())
 
         # 3. Signal stationarity (check if mean is stable in first vs second half)
         n = len(cl_values)
@@ -314,28 +427,45 @@ class MetricExecutor:
         if not check3.passed:
             warnings.append("信号非平稳，频谱分析结果可能不可靠")
 
-        # Perform FFT to find dominant frequency
+        # Perform spectral analysis to find dominant frequency
         N = len(cl_values)
-        # Remove mean
+        # Remove mean (detrend)
         mean_cl = sum(cl_values) / N
         detrended = [v - mean_cl for v in cl_values]
 
-        # Simple DFT (for production, use numpy.fft)
+        frequency = 0.0
+        spectral_method = "none"
         try:
             import numpy as np
-            fft_result = np.fft.rfft(detrended)
-            magnitudes = np.abs(fft_result)
-            # Find peak (skip DC component)
-            peak_idx = 1 + np.argmax(magnitudes[1:])
-            # Need time step to get frequency
-            # Estimate from parameters or time_sampling
-            dt = parameters.get("time_step", parameters.get("interval", 0.01))
-            frequency = peak_idx / (N * dt)
+
+            # Convert to numpy array (scipy.signal.welch requires ndarray)
+            detrended_np = np.array(detrended)
+
+            try:
+                from scipy.signal import welch
+
+                fs = 1.0 / dt
+                freqs, psd = welch(detrended_np, fs=fs)
+                # Skip DC component (index 0)
+                if len(psd) > 1:
+                    peak_idx = 1 + int(np.argmax(psd[1:]))
+                else:
+                    peak_idx = 0
+                frequency = float(freqs[peak_idx])
+                magnitudes = psd
+                spectral_method = "welch"
+            except ImportError:
+                # Fallback to numpy FFT
+                fft_result = np.fft.rfft(detrended_np)
+                magnitudes = np.abs(fft_result)
+                peak_idx = 1 + int(np.argmax(magnitudes[1:]))
+                frequency = peak_idx / (N * dt)
+                spectral_method = "fft"
 
             # 4. Peak prominence
             if len(magnitudes) > peak_idx + 2:
-                local_mean = np.mean(magnitudes[1:])
-                prominence = magnitudes[peak_idx] / max(local_mean, 1e-10)
+                local_mean = float(np.mean(magnitudes[1:]))
+                prominence = float(magnitudes[peak_idx]) / max(local_mean, 1e-10)
                 check4 = QualityCheckResult(
                     "peak_prominence",
                     prominence > 5.0,
@@ -374,8 +504,7 @@ class MetricExecutor:
             if not check6.passed:
                 warnings.append(f"统计周期数不足 ({num_cycles:.1f} < 10)")
         except ImportError:
-            # Fallback without numpy
-            frequency = 0.0
+            # numpy not available — cannot perform spectral analysis
             warnings.append("numpy not available, FFT quality checks skipped")
 
         # Calculate Strouhal
@@ -393,8 +522,17 @@ class MetricExecutor:
 
         strouhal = frequency * diameter / velocity
 
+        statistics = {
+            "frequency": frequency,
+            "dt": dt,
+            "used_real_time_column": used_real_time,
+            "spectral_method": spectral_method,
+            "n_samples": N,
+        }
+
         all_passed = all(q["passed"] for q in quality_checks)
-        confidence = "high" if all_passed else ("medium" if sum(1 for q in quality_checks if q["passed"]) >= 4 else "low")
+        passed_count = sum(1 for q in quality_checks if q["passed"])
+        confidence = "high" if all_passed else ("medium" if passed_count >= 4 else "low")
 
         return MetricResult(
             metric_id="strouhal_number",
@@ -403,6 +541,7 @@ class MetricExecutor:
             quality_checks=quality_checks,
             confidence=confidence,
             warnings=warnings,
+            statistics=statistics,
         )
 
     def _calc_velocity_uniformity(
@@ -410,20 +549,16 @@ class MetricExecutor:
         data: SimulationData,
         mdef: dict[str, Any] | None,
     ) -> MetricResult:
-        """Calculate velocity uniformity: CV = sigma_u / mean_u.
+        """Calculate velocity uniformity: CV = std(u) / |mean(u)|.
 
-        CV = sqrt(mean(U^2) - mean(U)^2) / mean(U)
-
-        Requires both mean(U) and mean(mag(U)) from surfaceFieldValue.
+        Uses proper time-averaged coefficient of variation computed over
+        the steady-state portion of the velocity time series.
         """
-        # Look for velocity mean and magnitude
+        # Look for velocity mean time series
         mean_u_key = None
-        mag_u_key = None
         for key in data.surface_field_values:
             if "velocity" in key.lower() and "mean" in key.lower():
                 mean_u_key = key
-            if "velocity" in key.lower() and ("magnitude" in key.lower() or "mag" in key.lower()):
-                mag_u_key = key
 
         if mean_u_key is None:
             return MetricResult(
@@ -444,23 +579,8 @@ class MetricExecutor:
                 missing_reason="Empty velocity mean values",
             )
 
-        mean_u = mean_u_vals[-1]
-
-        if mag_u_key and mag_u_key in data.surface_field_values:
-            mag_u = data.surface_field_values[mag_u_key][-1]
-            # CV = sqrt(mean(U^2) - mean(U)^2) / mean(U)
-            # mean(U^2) ≈ mag_u^2 (if mag(U) = |U|)
-            # This is an approximation
-            variance = max(mag_u ** 2 - mean_u ** 2, 0)
-            std_u = math.sqrt(variance)
-        else:
-            # Use time variation as proxy
-            if len(mean_u_vals) > 5:
-                recent = mean_u_vals[-5:]
-                mean_val = sum(recent) / len(recent)
-                std_u = math.sqrt(sum((v - mean_val)**2 for v in recent) / len(recent))
-            else:
-                std_u = 0.0
+        # Time-averaged statistics (discard initial transient)
+        mean_u, std_u, ci_u = _time_averaged_stats(mean_u_vals)
 
         if abs(mean_u) < 1e-10:
             return MetricResult(
@@ -470,20 +590,34 @@ class MetricExecutor:
                 missing_reason="Mean velocity is zero, cannot calculate CV",
             )
 
+        # CV = std(u) / |mean(u)|
         cv = std_u / abs(mean_u)
 
-        quality_checks = [{
-            "name": "has_magnitude_data",
-            "passed": mag_u_key is not None,
-            "message": "Magnitude data available for proper CV calculation" if mag_u_key else "Using time variation as proxy",
-        }]
+        # Quality check: sufficient samples for statistical reliability
+        n_samples = len(mean_u_vals)
+        check = QualityCheckResult(
+            "sufficient_samples",
+            n_samples >= 10,
+            f"Samples: {n_samples} (recommended: >=10)",
+        )
+        quality_checks = [check.to_dict()]
+
+        statistics = {
+            "mean": mean_u,
+            "std": std_u,
+            "ci_95": ci_u,
+            "cv": cv,
+            "n_samples": n_samples,
+            "discard_fraction": 0.2,
+        }
 
         return MetricResult(
             metric_id="velocity_uniformity",
             value=cv,
             unit="dimensionless",
             quality_checks=quality_checks,
-            confidence="high" if mag_u_key else "medium",
+            confidence="high" if n_samples >= 10 else "medium",
+            statistics=statistics,
         )
 
     def _calc_reynolds_number(
@@ -523,8 +657,11 @@ class MetricExecutor:
         mdef: dict[str, Any] | None,
         parameters: dict[str, Any],
     ) -> MetricResult:
-        """Calculate friction factor: f = dp / (0.5 * rho * U^2 * L / D)."""
-        # Get pressure drop from surface field values or metric
+        """Calculate friction factor: f = dp / (0.5 * rho * U^2 * L / D).
+
+        Uses time-averaged pressure drop from surface field values.
+        """
+        # Get pressure drop from surface field values
         inlet_key = None
         outlet_key = None
         for key in data.surface_field_values:
@@ -542,7 +679,22 @@ class MetricExecutor:
                 missing_reason="Need inlet and outlet pressure for friction factor",
             )
 
-        dp = data.surface_field_values[inlet_key][-1] - data.surface_field_values[outlet_key][-1]
+        inlet_vals = data.surface_field_values[inlet_key]
+        outlet_vals = data.surface_field_values[outlet_key]
+
+        if not inlet_vals or not outlet_vals:
+            return MetricResult(
+                metric_id="friction_factor",
+                value=None,
+                confidence="failed",
+                data_missing=True,
+                missing_reason="Empty pressure values",
+            )
+
+        # Time-averaged pressure drop
+        inlet_mean, inlet_std, inlet_ci = _time_averaged_stats(inlet_vals)
+        outlet_mean, outlet_std, outlet_ci = _time_averaged_stats(outlet_vals)
+        dp = inlet_mean - outlet_mean
 
         rho = parameters.get("density", 998.2)
         velocity = parameters.get("mean_velocity", 0.1)
@@ -559,11 +711,24 @@ class MetricExecutor:
 
         f = dp / (0.5 * rho * velocity**2 * length / diameter)
 
+        # Propagate std for pressure drop (assuming independence)
+        dp_std = math.sqrt(inlet_std**2 + outlet_std**2)
+
+        statistics = {
+            "dp_mean": dp,
+            "dp_std": dp_std,
+            "inlet_mean": inlet_mean,
+            "outlet_mean": outlet_mean,
+            "n_samples": min(len(inlet_vals), len(outlet_vals)),
+            "discard_fraction": 0.2,
+        }
+
         return MetricResult(
             metric_id="friction_factor",
             value=f,
             unit="dimensionless",
             confidence="high",
+            statistics=statistics,
         )
 
     def _calc_mass_flow_rate(
@@ -648,4 +813,4 @@ class MetricExecutor:
         )
 
 
-__all__ = ["MetricExecutor", "QualityCheckResult"]
+__all__ = ["MetricExecutor", "QualityCheckResult", "_time_averaged_stats"]
