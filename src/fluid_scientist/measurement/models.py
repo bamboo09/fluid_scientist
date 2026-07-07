@@ -13,10 +13,14 @@ class FunctionObjectType(StrEnum):
     """OpenFOAM functionObject types supported for metric extraction."""
 
     FORCE_COEFFS = "forceCoeffs"
+    FORCES = "forces"
     SURFACE_FIELD_VALUE = "surfaceFieldValue"
     FIELD_VALUE = "fieldValue"
     PROBES = "probes"
     FIELD_AVERAGE = "fieldAverage"
+    SAMPLED_SURFACES = "sampledSurfaces"
+    SETS = "sets"
+    RESIDUALS = "residuals"
 
 
 class SpatialSamplingType(StrEnum):
