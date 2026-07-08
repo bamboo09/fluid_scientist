@@ -1148,3 +1148,118 @@ select, input[type="text"], input[type="password"] {
   font-size: 13px;
   line-height: 1.5;
 }
+
+/* Edit Proposal Diff */
+.edit-proposal {
+  border: 1px solid var(--border-color, #ddd);
+  border-radius: 8px;
+  padding: 12px;
+  margin-top: 8px;
+  background: var(--bg-secondary, #f9f9f9);
+}
+.edit-proposal.clarification {
+  border-color: #2196F3;
+  background: #E3F2FD;
+}
+.proposal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+  font-weight: 600;
+}
+.proposal-intent {
+  font-size: 0.8em;
+  padding: 2px 8px;
+  border-radius: 4px;
+  background: var(--accent-bg, #e0e0e0);
+  color: var(--text-secondary, #666);
+}
+.clarification-question {
+  padding: 8px;
+  color: #1565C0;
+  font-style: italic;
+}
+.proposal-operations {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 8px 0;
+}
+.edit-operation {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--bg-primary, #fff);
+  border: 1px solid var(--border-color, #eee);
+}
+.op-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.op-icon {
+  font-size: 1.1em;
+}
+.op-type {
+  font-weight: 500;
+  font-size: 0.9em;
+}
+.op-reason-inline {
+  color: var(--text-secondary, #888);
+  font-size: 0.85em;
+}
+.op-detail {
+  margin-left: 24px;
+  font-size: 0.9em;
+  color: var(--text-primary, #333);
+}
+.op-status {
+  font-size: 0.8em;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--accent-bg, #e0e0e0);
+}
+.op-reason {
+  color: var(--text-secondary, #888);
+  font-size: 0.85em;
+  margin-top: 2px;
+}
+.edit-invalidates {
+  margin: 8px 0;
+  font-size: 0.85em;
+}
+.invalidate-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  margin: 0 4px;
+  border-radius: 3px;
+  background: #FFF3E0;
+  color: #E65100;
+  font-size: 0.85em;
+}
+.edit-warnings {
+  margin: 8px 0;
+  font-size: 0.85em;
+}
+.warning-item {
+  color: #F57C00;
+  padding: 2px 0;
+}
+.proposal-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+.nl-loading {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-secondary, #888);
+}
+.nl-error {
+  padding: 12px;
+  color: #D32F2F;
+}

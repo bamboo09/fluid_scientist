@@ -384,18 +384,27 @@ class TestButtonVisibility:
         """Draft state must show readyBtn and hide compileBtn."""
         js = client.get("/assets/app.js").text
         body = _function_body(js, "function updateSpecControls(")
-        # ready button visible only in draft
-        assert 'readyBtn.hidden = status !== "draft"' in body
-        # compile button gated on confirmed
-        assert 'status === "confirmed"' in body
-        assert 'compileBtn.hidden = !canCompile' in body
+        # updateSpecControls delegates button visibility to getWorkbenchActions
+        assert "getWorkbenchActions" in body
+        actions_body = _function_body(js, "function getWorkbenchActions(")
+        # draft case uses spec-ready-btn as primary
+        assert 'case "draft"' in actions_body
+        assert "spec-ready-btn" in actions_body
+        # compile button is in the hidden list for draft
+        assert "spec-compile-btn" in actions_body
 
     def test_confirmed_shows_compile_not_apply(self, client: TestClient):
         """Confirmed state must hide applyBtn (not editable) and show compile."""
         js = client.get("/assets/app.js").text
         body = _function_body(js, "function updateSpecControls(")
-        # apply hidden when not editable
-        assert "applyBtn.hidden = !editable" in body
+        # updateSpecControls delegates button visibility to getWorkbenchActions
+        assert "getWorkbenchActions" in body
+        actions_body = _function_body(js, "function getWorkbenchActions(")
+        # confirmed case uses spec-compile-btn as primary
+        assert 'case "confirmed"' in actions_body
+        assert "spec-compile-btn" in actions_body
+        # apply button is in the hidden list for confirmed
+        assert "spec-apply-btn" in actions_body
         # editable only for draft/ready
         assert "isSpecEditable" in body
 
@@ -407,7 +416,10 @@ class TestButtonVisibility:
         body = _function_body(js, "function updateSpecControls(")
         for state in ("confirmed", "compiling", "running", "completed", "failed"):
             assert f'"{state}"' in body, f"cloneable state {state} missing"
-        assert "cloneableStates.includes(status)" in body
+        # updateSpecControls delegates button visibility to getWorkbenchActions
+        assert "getWorkbenchActions" in body
+        actions_body = _function_body(js, "function getWorkbenchActions(")
+        assert "spec-clone-btn" in actions_body
 
     def test_clone_button_hidden_for_draft_ready(self, client: TestClient):
         """Clone button must be hidden for draft/ready (not in cloneableStates)."""

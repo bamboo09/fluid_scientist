@@ -81,6 +81,7 @@ async function loadSystemVersion() {
 let currentPlan = null;
 let currentCompilation = null;
 let currentSpec = null;
+let currentEditProposal = null;
 let specCompiling = false;
 let activeTask = null;
 let latestResults = null;
@@ -129,6 +130,16 @@ function text(value, fallback = "—") {
   if (value === undefined || value === null || value === "") return fallback;
   if (typeof value === "object") return JSON.stringify(value, null, 2);
   return String(value);
+}
+
+function escapeHtml(str) {
+  if (str === null || str === undefined) return "";
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
 }
 
 function safeDetail(payload, status) {
@@ -1194,97 +1205,169 @@ function renderParameterRow(param, spec) {
   return row;
 }
 
+function getWorkbenchActions(status) {
+  const actions = {
+    primary: null,
+    primaryId: null,
+    secondary: [],
+    hidden: [],
+  };
+
+  switch (status) {
+    case "draft":
+      actions.primary = "接受推荐并校验";
+      actions.primaryId = "spec-ready-btn";
+      actions.secondary = [
+        { id: "spec-save-btn", text: "保存草案" },
+        { id: "spec-apply-btn", text: "应用修改" },
+        { id: "spec-discard-btn", text: "放弃修改" },
+        { id: "spec-accept-rec-btn", text: "接受推荐值" },
+      ];
+      actions.hidden = [
+        "spec-compile-btn", "spec-submit-btn", "spec-clone-btn",
+        "spec-run-status-btn", "spec-report-btn", "spec-capability-btn",
+      ];
+      break;
+    case "ready":
+      actions.primary = "确认实验版本";
+      actions.primaryId = "spec-confirm-btn";
+      actions.secondary = [
+        { id: "spec-save-btn", text: "保存草案" },
+        { id: "spec-ready-btn", text: "继续修改" },
+      ];
+      actions.hidden = [
+        "spec-compile-btn", "spec-submit-btn", "spec-clone-btn",
+        "spec-apply-btn", "spec-discard-btn", "spec-accept-rec-btn",
+      ];
+      break;
+    case "confirmed":
+      actions.primary = "生成 Case";
+      actions.primaryId = "spec-compile-btn";
+      actions.secondary = [
+        { id: "spec-clone-btn", text: "克隆并修改参数" },
+      ];
+      actions.hidden = [
+        "spec-apply-btn", "spec-discard-btn", "spec-accept-rec-btn",
+        "spec-ready-btn", "spec-confirm-btn", "spec-submit-btn",
+        "spec-save-btn",
+      ];
+      break;
+    case "compiled":
+      actions.primary = "提交运行";
+      actions.primaryId = "spec-submit-btn";
+      actions.secondary = [
+        { id: "spec-clone-btn", text: "克隆新版本" },
+      ];
+      actions.hidden = [
+        "spec-apply-btn", "spec-confirm-btn", "spec-compile-btn",
+        "spec-ready-btn", "spec-save-btn",
+      ];
+      break;
+    case "running":
+      actions.primary = "查看运行状态";
+      actions.primaryId = "spec-run-status-btn";
+      actions.secondary = [];
+      actions.hidden = [
+        "spec-apply-btn", "spec-compile-btn", "spec-confirm-btn",
+        "spec-clone-btn", "spec-save-btn",
+      ];
+      break;
+    case "completed":
+      actions.primary = "查看分析报告";
+      actions.primaryId = "spec-report-btn";
+      actions.secondary = [
+        { id: "spec-clone-btn", text: "克隆新实验" },
+      ];
+      actions.hidden = [
+        "spec-apply-btn", "spec-compile-btn", "spec-confirm-btn",
+        "spec-save-btn",
+      ];
+      break;
+    case "awaiting_code_approval":
+      actions.primary = "查看缺失能力";
+      actions.primaryId = "spec-capability-btn";
+      actions.secondary = [];
+      actions.hidden = [
+        "spec-compile-btn", "spec-submit-btn", "spec-clone-btn",
+        "spec-apply-btn", "spec-save-btn",
+      ];
+      break;
+    case "failed":
+      actions.primary = "创建修复版本";
+      actions.primaryId = "spec-clone-btn";
+      actions.secondary = [];
+      actions.hidden = [
+        "spec-compile-btn", "spec-submit-btn", "spec-apply-btn",
+        "spec-save-btn",
+      ];
+      break;
+    default:
+      break;
+  }
+  return actions;
+}
+
 function updateSpecControls(spec) {
-  const saveBtn = byId("spec-save-btn");
-  const applyBtn = byId("spec-apply-btn");
-  const discardBtn = byId("spec-discard-btn");
-  const acceptRecBtn = byId("spec-accept-rec-btn");
-  const readyBtn = byId("spec-ready-btn");
-  const confirmBtn = byId("spec-confirm-btn");
-  const compileBtn = byId("spec-compile-btn");
-  const submitBtn = byId("spec-submit-btn");
-  const runStatusBtn = byId("spec-run-status-btn");
-  const reportBtn = byId("spec-report-btn");
-  const capabilityBtn = byId("spec-capability-btn");
-  const cloneBtn = byId("spec-clone-btn");
-  if (!readyBtn || !confirmBtn) return;
   const status = spec?.status;
   const editable = isSpecEditable(spec);
   const hasCompilation = !!currentCompilation;
   const submitted = ["running", "completed", "failed", "rejected"].includes(status);
   // States where the spec is locked and a new version can be cloned.
   const cloneableStates = ["confirmed", "compiling", "running", "completed", "failed"];
+  const actions = getWorkbenchActions(status);
 
-  // 保存草案 / 应用修改 / 放弃修改 / 接受推荐值：仅 draft/ready 可编辑
-  if (saveBtn) {
-    saveBtn.hidden = !editable;
-    saveBtn.disabled = !editable;
-  }
-  if (applyBtn) {
-    applyBtn.hidden = !editable;
-    applyBtn.disabled = !editable || pendingParameterChanges.size === 0;
-  }
-  if (discardBtn) {
-    discardBtn.hidden = !editable;
-    discardBtn.disabled = !editable || pendingParameterChanges.size === 0;
-  }
-  if (acceptRecBtn) {
-    acceptRecBtn.hidden = !editable;
-    acceptRecBtn.disabled = !editable;
-  }
+  const allButtonIds = [
+    "spec-save-btn", "spec-ready-btn", "spec-confirm-btn", "spec-compile-btn",
+    "spec-submit-btn", "spec-apply-btn", "spec-discard-btn",
+    "spec-accept-rec-btn", "spec-clone-btn", "spec-run-status-btn",
+    "spec-report-btn", "spec-capability-btn",
+  ];
 
-  // 接受推荐并校验（准备就绪）：draft → ready
-  readyBtn.hidden = status !== "draft";
-  readyBtn.disabled = status !== "draft";
+  // Hide all first
+  allButtonIds.forEach((id) => {
+    const btn = byId(id);
+    if (btn) btn.style.display = "none";
+  });
 
-  // 确认实验版本：ready → confirmed
-  confirmBtn.hidden = status !== "ready";
-  confirmBtn.disabled = status !== "ready";
-
-  // 生成 Case：confirmed 时编译；编译进行中显示"正在编译..."
-  if (compileBtn) {
-    if (specCompiling) {
-      compileBtn.hidden = false;
-      compileBtn.disabled = true;
-      compileBtn.textContent = "正在编译...";
-    } else {
-      const canCompile = status === "confirmed" && !hasCompilation;
-      compileBtn.hidden = !canCompile;
-      compileBtn.disabled = !canCompile;
-      compileBtn.textContent = "生成 Case";
+  // Show primary
+  if (actions.primaryId) {
+    const btn = byId(actions.primaryId);
+    if (btn) {
+      btn.style.display = "";
+      btn.classList.add("button-primary");
+      btn.classList.remove("button-secondary");
     }
   }
 
-  // 提交运行：已有编译产物且尚未进入运行态
-  if (submitBtn) {
-    const canSubmit = hasCompilation && !submitted && !specCompiling;
-    submitBtn.hidden = !canSubmit;
-    submitBtn.disabled = !canSubmit;
+  // Show secondary
+  actions.secondary.forEach((s) => {
+    const btn = byId(s.id);
+    if (btn) {
+      btn.style.display = "";
+      btn.classList.remove("button-primary");
+      btn.classList.add("button-secondary");
+    }
+  });
+
+  // Handle compile button text during compilation
+  const compileBtn = byId("spec-compile-btn");
+  if (compileBtn && specCompiling) {
+    compileBtn.style.display = "";
+    compileBtn.disabled = true;
+    compileBtn.textContent = "正在编译...";
+  } else if (compileBtn) {
+    compileBtn.disabled = false;
+    compileBtn.textContent = "生成 Case";
   }
 
-  // 查看运行状态：running
-  if (runStatusBtn) {
-    runStatusBtn.hidden = status !== "running";
-    runStatusBtn.disabled = status !== "running";
+  // Handle apply/discard disabled state based on pending changes
+  const applyBtn = byId("spec-apply-btn");
+  if (applyBtn && applyBtn.style.display !== "none") {
+    applyBtn.disabled = !editable || pendingParameterChanges.size === 0;
   }
-
-  // 查看分析报告：completed
-  if (reportBtn) {
-    reportBtn.hidden = status !== "completed";
-    reportBtn.disabled = status !== "completed";
-  }
-
-  // 查看缺失能力：awaiting_code_approval
-  if (capabilityBtn) {
-    capabilityBtn.hidden = status !== "awaiting_code_approval";
-    capabilityBtn.disabled = status !== "awaiting_code_approval";
-  }
-
-  // 修改参数（创建新版本）：confirmed/compiling/running/completed/failed
-  if (cloneBtn) {
-    const canClone = cloneableStates.includes(status);
-    cloneBtn.hidden = !canClone;
-    cloneBtn.disabled = !canClone;
+  const discardBtn = byId("spec-discard-btn");
+  if (discardBtn && discardBtn.style.display !== "none") {
+    discardBtn.disabled = !editable || pendingParameterChanges.size === 0;
   }
 
   // Disabled reason display
@@ -1409,19 +1492,19 @@ function renderSpecWorkbench(spec) {
   nlSection.className = "spec-nl-edit";
   nlSection.id = "spec-nl-edit";
   const nlLabel = document.createElement("label");
-  nlLabel.textContent = "自然语言批量修改参数";
+  nlLabel.textContent = "对当前实验草案提出修改";
   nlLabel.htmlFor = "spec-nl-input";
   const nlInput = document.createElement("input");
   nlInput.type = "text";
   nlInput.id = "spec-nl-input";
-  nlInput.placeholder = "例如：把管径改成50毫米，长度改成5米";
+  nlInput.placeholder = "对当前实验草案提出修改";
   nlInput.className = "spec-nl-input";
   const nlBtn = document.createElement("button");
   nlBtn.type = "button";
   nlBtn.className = "button button-secondary";
   nlBtn.id = "spec-nl-btn";
-  nlBtn.textContent = "解析指令";
-  nlBtn.addEventListener("click", () => parseNaturalLanguageEdit());
+  nlBtn.textContent = "生成修改建议";
+  nlBtn.addEventListener("click", () => processWorkbenchTurn());
   const nlPreview = document.createElement("div");
   nlPreview.className = "spec-nl-preview";
   nlPreview.id = "spec-nl-preview";
@@ -2054,40 +2137,320 @@ function renderBatchPropagation(propagation) {
   }
 }
 
-async function parseNaturalLanguageEdit() {
-  if (!currentProject || !currentSpec) return;
+// WorkbenchTurn: send user message to WorkbenchAgent and render edit proposal
+// Legacy endpoint: /natural-language-edit (replaced by /workbench-turn)
+async function processWorkbenchTurn() {
   const input = byId("spec-nl-input");
-  if (!input || !input.value.trim()) {
+  if (!input) return;
+  const message = input.value.trim();
+  if (!message) {
     showWorkbenchToast("请输入修改指令", "info");
     return;
   }
 
-  const instruction = input.value.trim();
-  const savedScrollY = window.scrollY;
+  if (!currentSpec) {
+    showWorkbenchToast("请先创建实验草案", "warning");
+    return;
+  }
+
+  const sessionId =
+    (currentResearchSession && currentResearchSession.session_id) ||
+    localStorage.getItem(storageKeys.researchSessionId) ||
+    "default";
+  const previewArea = byId("spec-nl-preview");
+  if (previewArea) {
+    previewArea.hidden = false;
+    previewArea.innerHTML = '<div class="nl-loading">正在分析...</div>';
+  }
 
   try {
     const response = await requestJson(
-      `/api/projects/${currentProject.project_id}/experiment-specs/${currentSpec.experiment_id}/natural-language-edit`,
+      `/api/research-sessions/${sessionId}/workbench-turn`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          experiment_id: currentSpec.experiment_id,
+          experiment_version: currentSpec.experiment_version,
+          message: message,
+          current_spec_hash: null,
+        }),
+      },
+    );
+
+    currentEditProposal = response;
+    renderEditProposalDiff(response);
+  } catch (err) {
+    if (previewArea) {
+      previewArea.innerHTML = `<div class="nl-error">请求失败: ${escapeHtml(err.message || String(err))}</div>`;
+    }
+  }
+}
+
+// Backward-compatible alias for parseNaturalLanguageEdit
+// (legacy: natural-language-edit endpoint, now replaced by workbench-turn)
+async function parseNaturalLanguageEdit() {
+  return processWorkbenchTurn();
+}
+
+function renderEditProposalDiff(proposal) {
+  const previewArea = byId("spec-nl-preview");
+  if (!previewArea) return;
+  previewArea.hidden = false;
+  previewArea.replaceChildren();
+
+  // Handle clarification required
+  if (proposal.edit_intent === "clarification_required" && proposal.clarification_question) {
+    const card = document.createElement("div");
+    card.className = "edit-proposal clarification";
+    const header = document.createElement("div");
+    header.className = "proposal-header";
+    const icon = document.createElement("span");
+    icon.className = "proposal-icon";
+    icon.textContent = "\u2753";
+    const summary = document.createElement("span");
+    summary.className = "proposal-summary";
+    summary.textContent = proposal.summary || "";
+    header.append(icon, summary);
+    const question = document.createElement("div");
+    question.className = "clarification-question";
+    question.textContent = proposal.clarification_question;
+    card.append(header, question);
+    previewArea.append(card);
+    return;
+  }
+
+  const card = document.createElement("div");
+  card.className = "edit-proposal";
+
+  // Header
+  const header = document.createElement("div");
+  header.className = "proposal-header";
+  const summary = document.createElement("span");
+  summary.className = "proposal-summary";
+  summary.textContent = proposal.summary || "";
+  const intent = document.createElement("span");
+  intent.className = "proposal-intent";
+  intent.textContent = proposal.edit_intent || "";
+  header.append(summary, intent);
+  card.append(header);
+
+  // Operations
+  if (proposal.proposed_operations && proposal.proposed_operations.length > 0) {
+    const opsContainer = document.createElement("div");
+    opsContainer.className = "proposal-operations";
+    const opIcons = {
+      add_parameter: "\u2795",
+      update_parameter: "\u270F\uFE0F",
+      remove_parameter: "\u{1F5D1}\uFE0F",
+      add_metric: "\u{1F4CA}",
+      remove_metric: "\u{1F4CA}",
+      set_physics: "\u2699\uFE0F",
+      set_boundary_condition: "\u{1F527}",
+      accept_recommendation: "\u2705",
+    };
+    proposal.proposed_operations.forEach((op, idx) => {
+      const opDiv = document.createElement("div");
+      opDiv.className = "edit-operation";
+      opDiv.dataset.opIndex = String(idx);
+
+      const label = document.createElement("label");
+      label.className = "op-checkbox";
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.checked = true;
+      checkbox.dataset.opIdx = String(idx);
+      const opIcon = document.createElement("span");
+      opIcon.className = "op-icon";
+      opIcon.textContent = opIcons[op.operation] || "\u{1F4CB}";
+      const opType = document.createElement("span");
+      opType.className = "op-type";
+      opType.textContent = op.operation || "";
+      label.append(checkbox, opIcon, opType);
+      if (op.reason) {
+        const reasonInline = document.createElement("span");
+        reasonInline.className = "op-reason-inline";
+        reasonInline.textContent = `(${op.reason})`;
+        label.append(reasonInline);
+      }
+      opDiv.append(label);
+
+      // Detail
+      if (op.parameter) {
+        const detail = document.createElement("div");
+        detail.className = "op-detail";
+        const strong = document.createElement("strong");
+        strong.textContent = op.parameter.display_name || op.parameter.parameter_id || "";
+        detail.append(strong);
+        if (op.parameter.value !== null && op.parameter.value !== undefined) {
+          const valSpan = document.createElement("span");
+          valSpan.textContent = ` = ${op.parameter.value} ${op.parameter.unit || ""}`;
+          detail.append(valSpan);
+        }
+        if (op.parameter.status) {
+          const status = document.createElement("span");
+          status.className = "op-status";
+          status.textContent = op.parameter.status;
+          detail.append(status);
+        }
+        if (op.parameter.reason) {
+          const reason = document.createElement("div");
+          reason.className = "op-reason";
+          reason.textContent = op.parameter.reason;
+          detail.append(reason);
+        }
+        opDiv.append(detail);
+      } else if (op.metric) {
+        const detail = document.createElement("div");
+        detail.className = "op-detail";
+        const strong = document.createElement("strong");
+        strong.textContent = op.metric.display_name || op.metric.metric_id || "";
+        detail.append(strong);
+        if (op.metric.required_data && op.metric.required_data.length) {
+          const req = document.createElement("div");
+          req.className = "op-reason";
+          req.textContent = `需要: ${op.metric.required_data.join(", ")}`;
+          detail.append(req);
+        }
+        if (op.metric.reason) {
+          const reason = document.createElement("div");
+          reason.className = "op-reason";
+          reason.textContent = op.metric.reason;
+          detail.append(reason);
+        }
+        opDiv.append(detail);
+      } else if (op.value !== null && op.value !== undefined) {
+        const detail = document.createElement("div");
+        detail.className = "op-detail";
+        detail.textContent = `值: ${op.value} ${op.unit || ""}`;
+        opDiv.append(detail);
+      }
+
+      opsContainer.append(opDiv);
+    });
+    card.append(opsContainer);
+  }
+
+  // Invalidates section
+  if (proposal.invalidates && proposal.invalidates.length > 0) {
+    const invDiv = document.createElement("div");
+    invDiv.className = "edit-invalidates";
+    const invLabel = document.createElement("span");
+    invLabel.className = "invalidates-label";
+    invLabel.textContent = "将失效:";
+    invDiv.append(invLabel);
+    for (const inv of proposal.invalidates) {
+      const tag = document.createElement("span");
+      tag.className = "invalidate-tag";
+      tag.textContent = inv;
+      invDiv.append(tag);
+    }
+    card.append(invDiv);
+  }
+
+  // Warnings section
+  if (proposal.warnings_preview && proposal.warnings_preview.length > 0) {
+    const warnDiv = document.createElement("div");
+    warnDiv.className = "edit-warnings";
+    for (const w of proposal.warnings_preview) {
+      const item = document.createElement("div");
+      item.className = "warning-item";
+      item.textContent = `\u26A0\uFE0F ${w.field || ""}: ${w.message || ""}`;
+      warnDiv.append(item);
+    }
+    card.append(warnDiv);
+  }
+
+  // Action buttons
+  const showApply =
+    proposal.requires_confirmation !== false &&
+    proposal.edit_intent !== "clarification_required" &&
+    proposal.proposed_operations &&
+    proposal.proposed_operations.length > 0;
+
+  if (showApply) {
+    const actions = document.createElement("div");
+    actions.className = "proposal-actions";
+    const applyBtn = document.createElement("button");
+    applyBtn.type = "button";
+    applyBtn.className = "button button-primary";
+    applyBtn.textContent = "确认应用";
+    applyBtn.addEventListener("click", () => applyEditProposal(proposal.proposal_id));
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "button button-secondary";
+    cancelBtn.textContent = "取消";
+    cancelBtn.addEventListener("click", () => cancelEditProposal());
+    actions.append(applyBtn, cancelBtn);
+    card.append(actions);
+  }
+
+  previewArea.append(card);
+}
+
+async function applyEditProposal(proposalId) {
+  if (!currentSpec) return;
+
+  // Get accepted operation indices from checkboxes
+  const checkboxes = document.querySelectorAll(
+    "#spec-nl-preview input[type=\"checkbox\"][data-op-idx]",
+  );
+  const acceptedIndices = Array.from(checkboxes)
+    .filter((cb) => cb.checked)
+    .map((cb) => parseInt(cb.dataset.opIdx, 10));
+
+  if (acceptedIndices.length === 0) {
+    showWorkbenchToast("请至少选择一个操作", "warning");
+    return;
+  }
+
+  try {
+    const response = await requestJson(
+      `/api/experiment-specs/${currentSpec.experiment_id}/apply-edit`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           experiment_version: currentSpec.experiment_version,
-          instruction: instruction,
+          proposal_id: proposalId,
+          accepted_operation_indices: acceptedIndices,
         }),
       },
     );
 
-    renderNLPreview(response);
-    window.scrollTo({ top: savedScrollY, behavior: "instant" });
-  } catch (error) {
-    if (error.status === 409) {
-      showWorkbenchToast("版本冲突：请刷新后重试", "error");
-    } else {
-      showWorkbenchToast(`解析失败：${error.message || error}`, "error");
+    // Update spec
+    currentSpec = response.updated_spec || response.spec;
+    renderSpecWorkbench(currentSpec);
+
+    // Show change summary
+    if (response.change_summary) {
+      renderBatchPropagation(response.change_summary);
     }
-    window.scrollTo({ top: savedScrollY, behavior: "instant" });
+
+    // Clear preview
+    const preview = byId("spec-nl-preview");
+    if (preview) {
+      preview.hidden = true;
+      preview.replaceChildren();
+    }
+    const input = byId("spec-nl-input");
+    if (input) input.value = "";
+
+    showWorkbenchToast("修改已应用", "success");
+  } catch (err) {
+    showWorkbenchToast(`应用失败: ${err.message || err}`, "error");
   }
+}
+
+function cancelEditProposal() {
+  const preview = byId("spec-nl-preview");
+  if (preview) {
+    preview.hidden = true;
+    preview.replaceChildren();
+  }
+  const input = byId("spec-nl-input");
+  if (input) input.value = "";
+  currentEditProposal = null;
 }
 
 function renderNLPreview(response) {

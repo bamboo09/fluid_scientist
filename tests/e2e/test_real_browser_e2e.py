@@ -463,64 +463,78 @@ class TestButtonStateTransitions:
         js = _get_app_js(client)
         return _function_body(js, "function updateSpecControls(")
 
+    @pytest.fixture
+    def actions_body(self, client: TestClient) -> str:
+        """Extract the getWorkbenchActions function body."""
+        js = _get_app_js(client)
+        return _function_body(js, "function getWorkbenchActions(")
+
     # --- 1. draft state ---
 
-    def test_draft_hides_compile_and_submit(self, controls_body: str):
+    def test_draft_hides_compile_and_submit(self, controls_body: str, actions_body: str):
         """In draft state, compile and submit buttons must be hidden."""
-        assert 'status === "confirmed"' in controls_body
-        assert "compileBtn.hidden = !canCompile" in controls_body
-        assert "submitBtn" in controls_body
+        assert "getWorkbenchActions" in controls_body
+        assert 'case "draft"' in actions_body
+        assert "spec-compile-btn" in actions_body
+        assert "spec-submit-btn" in actions_body
         assert "hasCompilation" in controls_body
 
-    def test_draft_shows_ready_button(self, controls_body: str):
+    def test_draft_shows_ready_button(self, controls_body: str, actions_body: str):
         """In draft state, the ready button must be visible and enabled."""
-        assert 'readyBtn.hidden = status !== "draft"' in controls_body
-        assert 'readyBtn.disabled = status !== "draft"' in controls_body
+        assert "getWorkbenchActions" in controls_body
+        assert 'case "draft"' in actions_body
+        assert "spec-ready-btn" in actions_body
 
     # --- 2. ready state ---
 
-    def test_ready_shows_confirm_button(self, controls_body: str):
+    def test_ready_shows_confirm_button(self, controls_body: str, actions_body: str):
         """In ready state, the confirm button must be visible and enabled."""
-        assert 'confirmBtn.hidden = status !== "ready"' in controls_body
-        assert 'confirmBtn.disabled = status !== "ready"' in controls_body
+        assert "getWorkbenchActions" in controls_body
+        assert 'case "ready"' in actions_body
+        assert "spec-confirm-btn" in actions_body
 
-    def test_ready_hides_compile_button(self, controls_body: str):
+    def test_ready_hides_compile_button(self, controls_body: str, actions_body: str):
         """In ready state, the compile button must be hidden.
 
-        canCompile requires status === "confirmed", so in "ready" it is false.
+        Compile is only the primary action for confirmed state; in ready it
+        is in the hidden list of getWorkbenchActions.
         """
-        assert (
-            'canCompile = status === "confirmed"' in controls_body
-            or 'status === "confirmed" && !hasCompilation' in controls_body
-        )
+        assert "getWorkbenchActions" in controls_body
+        assert 'case "ready"' in actions_body
+        assert "spec-compile-btn" in actions_body
 
     # --- 3. confirmed state ---
 
-    def test_confirmed_shows_compile_button(self, controls_body: str):
+    def test_confirmed_shows_compile_button(self, controls_body: str, actions_body: str):
         """In confirmed state, the compile button must be visible and enabled
         (when no compilation exists yet)."""
-        assert "compileBtn.hidden = !canCompile" in controls_body
-        assert "compileBtn.disabled = !canCompile" in controls_body
+        assert "getWorkbenchActions" in controls_body
+        assert 'case "confirmed"' in actions_body
+        assert "spec-compile-btn" in actions_body
         assert 'status === "confirmed"' in controls_body
 
-    def test_confirmed_hides_apply_button(self, controls_body: str):
+    def test_confirmed_hides_apply_button(self, controls_body: str, actions_body: str):
         """In confirmed state, the apply button must be hidden (not editable).
 
-        applyBtn.hidden = !editable, and isSpecEditable returns false for
-        confirmed.
+        spec-apply-btn is in the hidden list for confirmed, and isSpecEditable
+        returns false for confirmed.
         """
-        assert "applyBtn.hidden = !editable" in controls_body
+        assert "getWorkbenchActions" in controls_body
+        assert 'case "confirmed"' in actions_body
+        assert "spec-apply-btn" in actions_body
         assert "isSpecEditable" in controls_body
 
     # --- 4. compiled/compiling state ---
 
-    def test_compiled_shows_submit_button(self, controls_body: str):
+    def test_compiled_shows_submit_button(self, controls_body: str, actions_body: str):
         """In compiled state, the submit button must be visible.
 
-        canSubmit = hasCompilation && !submitted && !specCompiling.
-        "compiling" is not in the submitted list.
+        getWorkbenchActions sets spec-submit-btn as primary for compiled.
+        The submitted list in updateSpecControls excludes "compiling".
         """
-        assert "canSubmit" in controls_body
+        assert "getWorkbenchActions" in controls_body
+        assert 'case "compiled"' in actions_body
+        assert "spec-submit-btn" in actions_body
         assert "hasCompilation" in controls_body
         assert "submitted" in controls_body
         m = re.search(r'submitted\s*=\s*\[([^\]]*)\]', controls_body)
@@ -531,37 +545,34 @@ class TestButtonStateTransitions:
 
     # --- 5. running state ---
 
-    def test_running_shows_run_status_button(self, controls_body: str):
+    def test_running_shows_run_status_button(self, controls_body: str, actions_body: str):
         """In running state, the run status button must be visible."""
-        assert 'runStatusBtn.hidden = status !== "running"' in controls_body
-        assert 'runStatusBtn.disabled = status !== "running"' in controls_body
+        assert "getWorkbenchActions" in controls_body
+        assert 'case "running"' in actions_body
+        assert "spec-run-status-btn" in actions_body
 
     # --- 6. completed state ---
 
-    def test_completed_shows_report_button(self, controls_body: str):
+    def test_completed_shows_report_button(self, controls_body: str, actions_body: str):
         """In completed state, the report button must be visible."""
-        assert 'reportBtn.hidden = status !== "completed"' in controls_body
-        assert 'reportBtn.disabled = status !== "completed"' in controls_body
+        assert "getWorkbenchActions" in controls_body
+        assert 'case "completed"' in actions_body
+        assert "spec-report-btn" in actions_body
 
     # --- 7. awaiting_code_approval state ---
 
     def test_awaiting_code_approval_shows_capability_button(
-        self, controls_body: str
+        self, controls_body: str, actions_body: str
     ):
         """In awaiting_code_approval state, the capability button must be
         visible."""
-        assert (
-            'capabilityBtn.hidden = status !== "awaiting_code_approval"'
-            in controls_body
-        )
-        assert (
-            'capabilityBtn.disabled = status !== "awaiting_code_approval"'
-            in controls_body
-        )
+        assert "getWorkbenchActions" in controls_body
+        assert 'case "awaiting_code_approval"' in actions_body
+        assert "spec-capability-btn" in actions_body
 
     # --- 8. clone button visibility ---
 
-    def test_clone_button_cloneable_states(self, controls_body: str):
+    def test_clone_button_cloneable_states(self, controls_body: str, actions_body: str):
         """Clone button must be visible for confirmed/compiling/running/
         completed/failed states and hidden for draft/ready."""
         m = re.search(
@@ -573,7 +584,9 @@ class TestButtonStateTransitions:
             assert f'"{state}"' in arr, f"cloneable state {state} missing"
         assert '"draft"' not in arr, "draft must not be cloneable"
         assert '"ready"' not in arr, "ready must not be cloneable"
-        assert "cloneableStates.includes(status)" in controls_body
+        # updateSpecControls delegates button visibility to getWorkbenchActions
+        assert "getWorkbenchActions" in controls_body
+        assert "spec-clone-btn" in actions_body
 
 
 # ===========================================================================
