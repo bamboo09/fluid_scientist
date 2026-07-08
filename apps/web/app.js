@@ -1227,6 +1227,11 @@ function renderSpecWorkbench(spec) {
   statusBar.append(statusLabel, versionLabel);
   card.append(statusBar);
 
+  const toastHost = document.createElement("div");
+  toastHost.id = "workbench-toast-host";
+  toastHost.className = "workbench-toast-host";
+  card.append(toastHost);
+
   if (spec.research) {
     const research = document.createElement("section");
     research.className = "spec-research";
@@ -1346,6 +1351,21 @@ function renderPropagation(propagation) {
   }
 }
 
+function showWorkbenchToast(message, type = "success") {
+  const host = document.getElementById("workbench-toast-host");
+  if (!host) return;
+  const toast = document.createElement("div");
+  toast.className = `workbench-toast workbench-toast-${type}`;
+  toast.textContent = message;
+  toast.setAttribute("role", type === "error" ? "alert" : "status");
+  host.append(toast);
+  // Auto-remove after 3 seconds
+  window.setTimeout(() => {
+    toast.classList.add("workbench-toast-fading");
+    window.setTimeout(() => toast.remove(), 300);
+  }, 2700);
+}
+
 async function updateSpecParameter(parameterId, newValue) {
   if (!currentSpec || !isSpecEditable(currentSpec)) return;
   const coerced = newValue === "" ? null : (isNaN(Number(newValue)) ? newValue : Number(newValue));
@@ -1381,7 +1401,7 @@ async function updateSpecParameter(parameterId, newValue) {
       if (newInput) newInput.focus();
     }
   } catch (error) {
-    renderError("参数更新", error);
+    showWorkbenchToast(`参数更新失败：${error.message || error}`, "error");
     updateParameterRowInPlace(parameterId, currentSpec);
     window.scrollTo({ top: savedScrollY, behavior: "instant" });
   }
@@ -1421,11 +1441,20 @@ async function transitionSpec(targetStatus) {
       },
     );
     currentSpec = response;
-    renderSpecWorkbench(currentSpec);
+    // Partial update: update status chip, parameter rows, and controls without full re-render
+    const statusChip = document.querySelector(".spec-status-chip");
+    if (statusChip) {
+      statusChip.dataset.status = response.status;
+      statusChip.textContent = specStatusLabels[response.status] || response.status;
+    }
+    for (const p of response.parameters) {
+      updateParameterRowInPlace(p.parameter_id, response);
+    }
+    updateSpecControls(response);
     const label = specStatusLabels[targetStatus] || targetStatus;
-    appendConversation("assistant", `实验规格已转换到「${label}」状态。`, "workflow-event");
+    showWorkbenchToast(`实验规格已转换到「${label}」状态`, "success");
   } catch (error) {
-    renderError("状态转换", error);
+    showWorkbenchToast(`状态转换失败：${error.message || error}`, "error");
     if (button) button.disabled = false;
   }
 }
@@ -1456,10 +1485,14 @@ async function saveSpecDraft() {
       `/api/projects/${currentProject.project_id}/experiment-specs/${currentSpec.experiment_id}`,
     );
     currentSpec = spec;
-    renderSpecWorkbench(currentSpec);
-    appendConversation("assistant", "实验草案已保存。", "workflow-event");
+    // Partial update: refresh parameter rows and controls without full re-render
+    for (const p of spec.parameters) {
+      updateParameterRowInPlace(p.parameter_id, spec);
+    }
+    updateSpecControls(spec);
+    showWorkbenchToast("实验草案已保存", "success");
   } catch (error) {
-    renderError("保存草案", error);
+    showWorkbenchToast(`保存失败：${error.message || error}`, "error");
   }
 }
 

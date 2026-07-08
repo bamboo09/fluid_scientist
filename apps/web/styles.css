@@ -894,3 +894,61 @@ select, input[type="text"], input[type="password"] {
 }
 .ws-btn:hover { border-color: var(--teal); color: var(--teal); }
 .ws-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* Workbench Toast */
+.workbench-toast-host {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.75rem;
+  min-height: 0;
+}
+
+.workbench-toast {
+  padding: 0.625rem 1rem;
+  border-radius: 0.5rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  line-height: 1.4;
+  animation: workbench-toast-in 0.2s ease-out;
+  transition: opacity 0.3s ease-out;
+}
+
+.workbench-toast-success {
+  background: var(--success-bg, #ecfdf5);
+  color: var(--success-fg, #065f46);
+  border: 1px solid var(--success-border, #a7f3d0);
+}
+
+.workbench-toast-warning {
+  background: var(--warning-bg, #fffbeb);
+  color: var(--warning-fg, #92400e);
+  border: 1px solid var(--warning-border, #fde68a);
+}
+
+.workbench-toast-error {
+  background: var(--error-bg, #fef2f2);
+  color: var(--error-fg, #991b1b);
+  border: 1px solid var(--error-border, #fecaca);
+}
+
+.workbench-toast-info {
+  background: var(--info-bg, #eff6ff);
+  color: var(--info-fg, #1e40af);
+  border: 1px solid var(--info-border, #bfdbfe);
+}
+
+.workbench-toast-fading {
+  opacity: 0;
+}
+
+@keyframes workbench-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(-0.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
