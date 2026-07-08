@@ -2164,6 +2164,79 @@ def create_app(
         return response
 
     @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/natural-language-edit",
+        tags=["experiment-specs"],
+    )
+    def natural_language_edit(
+        project_id: str,
+        experiment_id: str,
+        body: dict,
+    ) -> dict:
+        """Parse a natural language instruction into proposed parameter changes.
+
+        Does NOT apply changes — returns proposed changes for user confirmation.
+        User confirms by calling the batch PATCH endpoint.
+        """
+        stored = workflow_repository.load_experiment_spec(experiment_id)
+        if stored is None or stored.project_id != project_id:
+            raise HTTPException(status_code=404, detail="experiment spec not found")
+
+        spec = ExperimentSpec.model_validate_json(stored.spec_json)
+
+        # Version check
+        client_version = body.get("experiment_version")
+        if client_version is not None and client_version != stored.experiment_version:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "version_conflict",
+                    "current_version": stored.experiment_version,
+                    "client_version": client_version,
+                    "message": "实验参数已被其他操作修改，请刷新后再提交。",
+                },
+            )
+
+        instruction = body.get("instruction", "").strip()
+        if not instruction:
+            raise HTTPException(status_code=422, detail="instruction is required")
+
+        from fluid_scientist.experiment_spec.nl_parser import parse_nl_instruction
+        result = parse_nl_instruction(instruction, spec)
+
+        # Build preview of derived updates (without applying)
+        derived_preview: list[dict[str, Any]] = []
+        for change in result.proposed_changes:
+            param = spec.get_parameter(change.parameter_id)
+            if param:
+                for p in spec.parameters:
+                    if change.parameter_id in p.dependencies.depends_on:
+                        derived_preview.append({
+                            "parameter_id": p.parameter_id,
+                            "display_name": p.display_name,
+                            "current_value": p.value,
+                            "reason": f"依赖 {change.parameter_id} 的修改",
+                        })
+
+        return {
+            "experiment_id": experiment_id,
+            "experiment_version": stored.experiment_version,
+            "proposed_changes": [
+                {
+                    "parameter_id": c.parameter_id,
+                    "display_name": c.display_name,
+                    "old_value": c.old_value,
+                    "new_value": c.new_value,
+                    "unit": c.unit,
+                    "matched_term": c.matched_term,
+                }
+                for c in result.proposed_changes
+            ],
+            "derived_updates_preview": derived_preview,
+            "unmatched_segments": result.unmatched_segments,
+            "requires_confirmation": result.requires_confirmation,
+        }
+
+    @application.post(
         "/api/projects/{project_id}/experiment-specs/{experiment_id}/transition",
         tags=["experiment-specs"],
     )

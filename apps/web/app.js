@@ -1278,6 +1278,31 @@ function renderSpecWorkbench(spec) {
     card.append(group);
   }
 
+  // Natural language edit section
+  const nlSection = document.createElement("div");
+  nlSection.className = "spec-nl-edit";
+  nlSection.id = "spec-nl-edit";
+  const nlLabel = document.createElement("label");
+  nlLabel.textContent = "自然语言批量修改参数";
+  nlLabel.htmlFor = "spec-nl-input";
+  const nlInput = document.createElement("input");
+  nlInput.type = "text";
+  nlInput.id = "spec-nl-input";
+  nlInput.placeholder = "例如：把管径改成50毫米，长度改成5米";
+  nlInput.className = "spec-nl-input";
+  const nlBtn = document.createElement("button");
+  nlBtn.type = "button";
+  nlBtn.className = "button button-secondary";
+  nlBtn.id = "spec-nl-btn";
+  nlBtn.textContent = "解析指令";
+  nlBtn.addEventListener("click", () => parseNaturalLanguageEdit());
+  const nlPreview = document.createElement("div");
+  nlPreview.className = "spec-nl-preview";
+  nlPreview.id = "spec-nl-preview";
+  nlPreview.hidden = true;
+  nlSection.append(nlLabel, nlInput, nlBtn, nlPreview);
+  card.append(nlSection);
+
   const propagation = document.createElement("div");
   propagation.className = "spec-propagation";
   propagation.id = "spec-propagation";
@@ -1833,6 +1858,138 @@ function renderBatchPropagation(propagation) {
       node.append(item);
     }
   }
+}
+
+async function parseNaturalLanguageEdit() {
+  if (!currentProject || !currentSpec) return;
+  const input = byId("spec-nl-input");
+  if (!input || !input.value.trim()) {
+    showWorkbenchToast("请输入修改指令", "info");
+    return;
+  }
+
+  const instruction = input.value.trim();
+  const savedScrollY = window.scrollY;
+
+  try {
+    const response = await requestJson(
+      `/api/projects/${currentProject.project_id}/experiment-specs/${currentSpec.experiment_id}/natural-language-edit`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          experiment_version: currentSpec.experiment_version,
+          instruction: instruction,
+        }),
+      },
+    );
+
+    renderNLPreview(response);
+    window.scrollTo({ top: savedScrollY, behavior: "instant" });
+  } catch (error) {
+    if (error.status === 409) {
+      showWorkbenchToast("版本冲突：请刷新后重试", "error");
+    } else {
+      showWorkbenchToast(`解析失败：${error.message || error}`, "error");
+    }
+    window.scrollTo({ top: savedScrollY, behavior: "instant" });
+  }
+}
+
+function renderNLPreview(response) {
+  const preview = byId("spec-nl-preview");
+  if (!preview) return;
+  preview.hidden = false;
+  preview.replaceChildren();
+
+  if (!response.proposed_changes?.length) {
+    const msg = document.createElement("p");
+    msg.className = "spec-nl-no-match";
+    msg.textContent = "未识别到可修改的参数";
+    preview.append(msg);
+    return;
+  }
+
+  const heading = document.createElement("p");
+  heading.className = "spec-nl-preview-title";
+  heading.textContent = `识别到 ${response.proposed_changes.length} 个参数修改：`;
+  preview.append(heading);
+
+  for (const change of response.proposed_changes) {
+    const row = document.createElement("div");
+    row.className = "spec-change-row spec-change-direct";
+    const label = document.createElement("span");
+    label.className = "spec-change-label";
+    label.textContent = `${change.display_name} (${change.parameter_id})`;
+    const diff = document.createElement("span");
+    diff.className = "spec-change-diff";
+    const oldVal = document.createElement("span");
+    oldVal.className = "spec-change-old";
+    oldVal.textContent = text(change.old_value, "空");
+    const arrow = document.createElement("span");
+    arrow.className = "spec-change-arrow";
+    arrow.textContent = " → ";
+    const newVal = document.createElement("span");
+    newVal.className = "spec-change-new";
+    newVal.textContent = `${change.new_value}${change.unit ? " " + change.unit : ""}`;
+    diff.append(oldVal, arrow, newVal);
+    row.append(label, diff);
+    preview.append(row);
+  }
+
+  if (response.derived_updates_preview?.length) {
+    const derivedHeading = document.createElement("p");
+    derivedHeading.className = "spec-nl-preview-derived";
+    derivedHeading.textContent = "将联动更新：";
+    preview.append(derivedHeading);
+    for (const d of response.derived_updates_preview) {
+      const row = document.createElement("div");
+      row.className = "spec-change-row spec-change-derived";
+      const label = document.createElement("span");
+      label.className = "spec-change-label";
+      label.textContent = d.display_name;
+      const note = document.createElement("span");
+      note.className = "spec-change-reason";
+      note.textContent = d.reason;
+      row.append(label, note);
+      preview.append(row);
+    }
+  }
+
+  if (response.unmatched_segments?.length) {
+    const unmatched = document.createElement("p");
+    unmatched.className = "spec-propagation-warning";
+    unmatched.textContent = `未识别：${response.unmatched_segments.join("；")}`;
+    preview.append(unmatched);
+  }
+
+  // Add apply button
+  const applyBtn = document.createElement("button");
+  applyBtn.type = "button";
+  applyBtn.className = "button button-primary";
+  applyBtn.textContent = "应用这些修改";
+  applyBtn.addEventListener("click", () => applyNLChanges(response.proposed_changes));
+  preview.append(applyBtn);
+}
+
+async function applyNLChanges(proposedChanges) {
+  if (!proposedChanges?.length) return;
+  // Populate pendingParameterChanges from proposed changes
+  for (const change of proposedChanges) {
+    pendingParameterChanges.set(change.parameter_id, {
+      parameter_id: change.parameter_id,
+      value: change.new_value,
+      unit: change.unit,
+    });
+  }
+  updateDirtyRowStyles();
+  renderPendingChangeSummary();
+  // Clear NL input and preview
+  const input = byId("spec-nl-input");
+  if (input) input.value = "";
+  const preview = byId("spec-nl-preview");
+  if (preview) { preview.hidden = true; preview.replaceChildren(); }
+  showWorkbenchToast(`已解析 ${proposedChanges.length} 个修改，请点击「应用修改」保存`, "info");
 }
 
 // 生成 Case：将已确认的实验规格编译为可运行的算例归档

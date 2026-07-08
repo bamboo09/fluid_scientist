@@ -778,6 +778,65 @@ select, input[type="text"], input[type="password"] {
   font-style: italic;
 }
 
+/* Natural language edit section */
+.spec-nl-edit {
+  margin-bottom: 1rem;
+  padding: 0.75rem;
+  background: var(--surface-2, #f9fafb);
+  border-radius: 0.5rem;
+  border: 1px solid var(--border, #e5e7eb);
+}
+
+.spec-nl-edit label {
+  display: block;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  margin-bottom: 0.375rem;
+  color: var(--fg, #1f2937);
+}
+
+.spec-nl-input {
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border, #d1d5db);
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  margin-bottom: 0.5rem;
+  box-sizing: border-box;
+}
+
+.spec-nl-input:focus {
+  outline: 2px solid var(--accent, #3b82f6);
+  outline-offset: -1px;
+}
+
+.spec-nl-preview {
+  margin-top: 0.5rem;
+  padding: 0.5rem;
+  background: var(--surface, #ffffff);
+  border-radius: 0.375rem;
+}
+
+.spec-nl-preview-title {
+  font-size: 0.8125rem;
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+  color: var(--fg, #1f2937);
+}
+
+.spec-nl-preview-derived {
+  font-size: 0.8125rem;
+  font-weight: 500;
+  margin-top: 0.5rem;
+  color: var(--muted, #6b7280);
+}
+
+.spec-nl-no-match {
+  font-size: 0.8125rem;
+  color: var(--muted, #6b7280);
+  font-style: italic;
+}
+
 /* Metric quality checks */
 
 .metric-quality-checks { margin-top: 18px; }
