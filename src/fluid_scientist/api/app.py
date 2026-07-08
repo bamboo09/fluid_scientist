@@ -419,6 +419,24 @@ class ExperimentAnalysisView(BaseModel):
     analysis: ExperimentAnalysis
 
 
+
+class WorkbenchTurnRequest(BaseModel):
+    """Request body for the workbench natural language turn endpoint."""
+
+    experiment_id: str
+    experiment_version: int
+    message: str
+    current_spec_hash: str | None = None
+
+
+class ApplyEditRequest(BaseModel):
+    """Request body for applying a confirmed EditProposal."""
+
+    experiment_version: int
+    proposal_id: str
+    accepted_operation_indices: list[int] = Field(default_factory=list)
+
+
 def _openai_model_configuration(
     settings: OpenAISettings,
     *,
@@ -582,6 +600,7 @@ def create_app(
     application.state.research_session_store = research_session_store
     application.state.research_orchestrator = research_orchestrator
     application.state.metric_results_store: dict[str, list[dict]] = {}
+    application.state.workbench_proposals: dict[str, dict] = {}
     project_service = ProjectService(workflow_repository)
     demo_projects: dict[str, DemoResearchResult] = {}
 
@@ -3459,6 +3478,149 @@ def create_app(
             "code_extension": updated_ext.model_dump(mode="json"),
             "test_results": [r.model_dump() for r in test_results],
         }
+
+
+    # ------------------------------------------------------------------
+    # Workbench Agent API (natural language editing)
+    # ------------------------------------------------------------------
+    @application.post(
+        "/api/research-sessions/{session_id}/workbench-turn",
+        tags=["workbench"],
+    )
+    def workbench_turn(
+        session_id: str,
+        payload: WorkbenchTurnRequest,
+    ) -> dict:
+        """Process a workbench natural language turn.
+
+        Accepts a user message and the current experiment spec, then
+        returns an EditProposal for user confirmation.  The proposal is
+        stored in app state for later apply via /apply-edit.
+        """
+        import json
+
+        from fluid_scientist.workbench.workbench_agent import WorkbenchAgent
+
+        stored = workflow_repository.load_experiment_spec(
+            payload.experiment_id
+        )
+        if stored is None:
+            raise HTTPException(
+                status_code=404, detail="experiment spec not found"
+            )
+
+        # Version check
+        if payload.experiment_version != stored.experiment_version:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "version_conflict",
+                    "current_version": stored.experiment_version,
+                    "client_version": payload.experiment_version,
+                    "message": "实验参数已被其他操作修改，请刷新后再提交。",
+                },
+            )
+
+        spec_dict = json.loads(stored.spec_json)
+
+        # Create WorkbenchAgent (fake mode if no LLM client configured)
+        llm_client = getattr(application.state, "llm_client", None)
+        agent = WorkbenchAgent(llm_client=llm_client)
+
+        # Process the turn
+        proposal = agent.process_turn(
+            payload.message, spec_dict
+        )
+
+        # Store EditProposal in app state for later apply
+        proposal_dict = proposal.model_dump()
+        application.state.workbench_proposals[proposal.proposal_id] = (
+            proposal_dict
+        )
+
+        return proposal_dict
+
+    @application.post(
+        "/api/experiment-specs/{experiment_id}/apply-edit",
+        tags=["workbench"],
+    )
+    def apply_edit(
+        experiment_id: str,
+        payload: ApplyEditRequest,
+    ) -> dict:
+        """Apply a confirmed EditProposal to the experiment spec.
+
+        Loads the stored EditProposal, applies the accepted operations
+        deterministically via SpecEditExecutor, and returns the updated
+        spec with a change summary.
+        """
+        import json
+
+        from fluid_scientist.experiment_spec.state_machine import (
+            is_immutable,
+        )
+        from fluid_scientist.workbench.edit_executor import SpecEditExecutor
+        from fluid_scientist.workbench.edit_models import EditProposal
+
+        # 1. Load proposal from app state
+        proposal_data = application.state.workbench_proposals.get(
+            payload.proposal_id
+        )
+        if proposal_data is None:
+            raise HTTPException(
+                status_code=404, detail="proposal not found"
+            )
+
+        # 2. Load current spec from repository
+        stored = workflow_repository.load_experiment_spec(experiment_id)
+        if stored is None:
+            raise HTTPException(
+                status_code=404, detail="experiment spec not found"
+            )
+
+        # 3. Verify version matches
+        if stored.experiment_version != payload.experiment_version:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "version_conflict",
+                    "current_version": stored.experiment_version,
+                    "client_version": payload.experiment_version,
+                    "message": "实验参数已被其他操作修改，请刷新后再提交。",
+                },
+            )
+
+        spec_dict = json.loads(stored.spec_json)
+        proposal = EditProposal.model_validate(proposal_data)
+
+        # 4. Create SpecEditExecutor, call apply()
+        executor = SpecEditExecutor()
+        updated_spec, change_summary = executor.apply(
+            spec_dict,
+            proposal,
+            payload.accepted_operation_indices,
+        )
+
+        # 5. Save updated spec (increment version if spec was immutable)
+        spec_status = stored.status
+        new_version = (
+            stored.experiment_version + 1
+            if is_immutable(spec_status)
+            else stored.experiment_version
+        )
+        now = datetime.now(UTC).isoformat()
+        updated_stored = workflow_repository.replace_experiment_spec(
+            experiment_id,
+            spec_json=json.dumps(updated_spec, ensure_ascii=False),
+            experiment_version=new_version,
+            status=spec_status,
+            updated_at=now,
+        )
+
+        # 6. Return updated spec + change_summary
+        result = json.loads(updated_stored.spec_json)
+        result["_change_summary"] = change_summary.model_dump()
+        return result
 
     return application
 
