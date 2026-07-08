@@ -58,7 +58,7 @@ class SpatialSamplingSpec(BaseModel):
 
     id: str
     type: SpatialSamplingType
-    location: dict[str, float] = Field(default_factory=dict)  # e.g., {"x": 5.0}
+    location: dict[str, Any] = Field(default_factory=dict)  # e.g., {"x": 5.0} or {"basePoint": [...], "normal": [...]}
     description: str = ""
 
 

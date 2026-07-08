@@ -3261,6 +3261,205 @@ def create_app(
             detail=f"CodeExtension '{extension_id}' not found",
         )
 
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/{extension_id}/sandbox-test",
+        tags=["experiment-specs"],
+    )
+    def sandbox_test_code_extension(
+        project_id: str,
+        experiment_id: str,
+        extension_id: str,
+    ) -> dict:
+        """Run sandbox testing for a code extension.
+
+        Transitions the extension from DRAFT to SANDBOX_TESTED (or REJECTED
+        if the sandbox test fails).  Calls ``sandbox_test_extension()``
+        from the code_extension registry module.
+
+        Returns the updated extension and the sandbox test result.
+        """
+        from fluid_scientist.code_extension.models import (
+            CodeExtensionSpec,
+            CodeExtensionType,
+            ExtensionStatus,
+        )
+        from fluid_scientist.code_extension.registry import (
+            ExtensionRegistry,
+            sandbox_test_extension,
+        )
+
+        stored_spec = workflow_repository.load_experiment_spec(experiment_id)
+        if stored_spec is None or stored_spec.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="ExperimentSpec not found"
+            )
+        spec = ExperimentSpec.model_validate_json(stored_spec.spec_json)
+
+        # Find the extension
+        ext_data = None
+        ext_index = -1
+        for i, ext in enumerate(spec.code_extensions):
+            if ext.get("extension_id") == extension_id:
+                ext_data = ext
+                ext_index = i
+                break
+
+        if ext_data is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"CodeExtension '{extension_id}' not found",
+            )
+
+        # Build a CodeExtensionSpec and run sandbox test via registry
+        extension = CodeExtensionSpec(
+            extension_id=ext_data["extension_id"],
+            name=ext_data["name"],
+            description=ext_data.get("description", ""),
+            extension_type=CodeExtensionType(ext_data["extension_type"]),
+            code=ext_data.get("code", ""),
+            language=ext_data.get("language", "python"),
+            dependencies=tuple(ext_data.get("dependencies", [])),
+            openfoam_files=tuple(ext_data.get("openfoam_files", [])),
+            tests=tuple(ext_data.get("tests", [])),
+            status=ExtensionStatus(ext_data.get("status", "draft")),
+            version=ext_data.get("version", "1.0.0"),
+            author=ext_data.get("author", "system"),
+            review_notes=ext_data.get("review_notes", ""),
+            created_at=ext_data.get("created_at", ""),
+            updated_at=ext_data.get("updated_at", ""),
+        )
+
+        registry = ExtensionRegistry()
+        registry.extensions[extension.extension_id] = extension
+
+        try:
+            updated_ext, sandbox_result = sandbox_test_extension(
+                registry, extension_id
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=str(e),
+            ) from e
+
+        # Persist the updated status back into the spec
+        spec.code_extensions[ext_index] = updated_ext.model_dump(mode="json")
+        workflow_repository.replace_experiment_spec(
+            experiment_id,
+            spec_json=spec.model_dump_json(),
+            experiment_version=stored_spec.experiment_version,
+            status=stored_spec.status,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+
+        return {
+            "experiment_id": experiment_id,
+            "code_extension": updated_ext.model_dump(mode="json"),
+            "sandbox_result": {
+                "success": sandbox_result.success,
+                "error": sandbox_result.error,
+                "execution_time_s": sandbox_result.execution_time_s,
+                "stdout": sandbox_result.stdout,
+            },
+        }
+
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/{extension_id}/auto-test",
+        tags=["experiment-specs"],
+    )
+    def auto_test_code_extension(
+        project_id: str,
+        experiment_id: str,
+        extension_id: str,
+    ) -> dict:
+        """Run automatic tests for a code extension.
+
+        Transitions the extension from SANDBOX_TESTED to AUTO_TESTED (or
+        REJECTED if any test fails).  Calls ``auto_test_extension()``
+        from the code_extension registry module.
+
+        Returns the updated extension and the test results.
+        """
+        from fluid_scientist.code_extension.models import (
+            CodeExtensionSpec,
+            CodeExtensionType,
+            ExtensionStatus,
+        )
+        from fluid_scientist.code_extension.registry import (
+            ExtensionRegistry,
+            auto_test_extension,
+        )
+
+        stored_spec = workflow_repository.load_experiment_spec(experiment_id)
+        if stored_spec is None or stored_spec.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="ExperimentSpec not found"
+            )
+        spec = ExperimentSpec.model_validate_json(stored_spec.spec_json)
+
+        # Find the extension
+        ext_data = None
+        ext_index = -1
+        for i, ext in enumerate(spec.code_extensions):
+            if ext.get("extension_id") == extension_id:
+                ext_data = ext
+                ext_index = i
+                break
+
+        if ext_data is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"CodeExtension '{extension_id}' not found",
+            )
+
+        # Build a CodeExtensionSpec and run auto tests via registry
+        extension = CodeExtensionSpec(
+            extension_id=ext_data["extension_id"],
+            name=ext_data["name"],
+            description=ext_data.get("description", ""),
+            extension_type=CodeExtensionType(ext_data["extension_type"]),
+            code=ext_data.get("code", ""),
+            language=ext_data.get("language", "python"),
+            dependencies=tuple(ext_data.get("dependencies", [])),
+            openfoam_files=tuple(ext_data.get("openfoam_files", [])),
+            tests=tuple(ext_data.get("tests", [])),
+            status=ExtensionStatus(ext_data.get("status", "sandbox_tested")),
+            version=ext_data.get("version", "1.0.0"),
+            author=ext_data.get("author", "system"),
+            review_notes=ext_data.get("review_notes", ""),
+            created_at=ext_data.get("created_at", ""),
+            updated_at=ext_data.get("updated_at", ""),
+        )
+
+        registry = ExtensionRegistry()
+        registry.extensions[extension.extension_id] = extension
+
+        try:
+            updated_ext, test_results = auto_test_extension(
+                registry, extension_id
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=400,
+                detail=str(e),
+            ) from e
+
+        # Persist the updated status back into the spec
+        spec.code_extensions[ext_index] = updated_ext.model_dump(mode="json")
+        workflow_repository.replace_experiment_spec(
+            experiment_id,
+            spec_json=spec.model_dump_json(),
+            experiment_version=stored_spec.experiment_version,
+            status=stored_spec.status,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+
+        return {
+            "experiment_id": experiment_id,
+            "code_extension": updated_ext.model_dump(mode="json"),
+            "test_results": [r.model_dump() for r in test_results],
+        }
+
     return application
 
 

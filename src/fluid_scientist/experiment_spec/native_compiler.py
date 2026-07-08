@@ -27,6 +27,17 @@ from fluid_scientist.experiment_spec.models import (
     ExperimentStatus,
 )
 
+
+class MeasurementCompilationError(Exception):
+    """Raised when MeasurementPlan compilation fails with blocking errors.
+
+    This error blocks case compilation -- unlike warnings, which are
+    non-blocking, error-severity issues or a ``success == False`` result
+    from the measurement compiler must prevent the case from being built
+    with an incomplete measurement configuration.
+    """
+
+
 # ---------------------------------------------------------------------------
 # MeasurementPlan integration helpers
 # ---------------------------------------------------------------------------
@@ -151,6 +162,27 @@ def _merge_measurement_plan_into_control_dict(
     return control_dict_text
 
 
+def _extract_spec_parameters(spec: ExperimentSpec) -> dict[str, float]:
+    """Extract physical parameters from the ExperimentSpec for measurement compilation.
+
+    Returns a dict mapping parameter names to float values.  Keys include:
+    density, inlet_velocity, mean_velocity, diameter, length, extrusion_span.
+    Missing parameters are simply omitted from the dict.
+    """
+    values = {p.parameter_id: p.value for p in spec.parameters}
+    spec_params: dict[str, float] = {}
+    for key in ("density", "inlet_velocity", "mean_velocity",
+                "diameter", "length", "extrusion_span",
+                "side_length", "domain_width", "domain_height"):
+        raw = values.get(key)
+        if raw is not None:
+            try:
+                spec_params[key] = float(raw)
+            except (TypeError, ValueError):
+                pass
+    return spec_params
+
+
 def _integrate_measurement_plan(
     spec: ExperimentSpec,
     experiment_type: str,
@@ -160,39 +192,58 @@ def _integrate_measurement_plan(
     and merge the resulting functionObjects into the ``system/controlDict`` file.
 
     This mutates *files* in-place by updating ``files["system/controlDict"]``.
-    If the MeasurementPlan cannot be parsed or compilation fails, the original
-    controlDict is left untouched.
+
+    **Blocking behaviour**: if ``compile_measurement_plan()`` returns
+    ``success == False`` or produces error-severity issues, a
+    :class:`MeasurementCompilationError` is raised to block case compilation.
+    Only non-blocking exceptions (e.g. MeasurementPlan parsing failures for
+    malformed data) are caught and silently skipped.
+
+    Warning-severity issues are non-blocking and are logged but do not
+    prevent compilation.
     """
     if not spec.metrics:
         return
 
+    from fluid_scientist.measurement.compiler import compile_measurement_plan
+    from fluid_scientist.measurement.models import MeasurementPlan
+
+    plan_data = spec.metrics[0]
+    if not isinstance(plan_data, dict):
+        return
+
+    # Parse the MeasurementPlan — if the data is malformed, this is a
+    # non-blocking issue (the plan simply can't be used).
     try:
-        from fluid_scientist.measurement.compiler import compile_measurement_plan
-        from fluid_scientist.measurement.models import MeasurementPlan
-
-        plan_data = spec.metrics[0]
-        if not isinstance(plan_data, dict):
-            return
         measurement_plan = MeasurementPlan.model_validate(plan_data)
+    except Exception:
+        return
 
-        patches = _EXPERIMENT_PATCHES.get(experiment_type, [])
-        result = compile_measurement_plan(
-            measurement_plan,
-            available_patches=patches,
-            solver_output_fields=["U", "p"],
+    patches = _EXPERIMENT_PATCHES.get(experiment_type, [])
+    spec_parameters = _extract_spec_parameters(spec)
+
+    result = compile_measurement_plan(
+        measurement_plan,
+        available_patches=patches,
+        solver_output_fields=["U", "p"],
+        spec_parameters=spec_parameters,
+    )
+
+    # Blocking: compilation failure or error-severity issues
+    error_issues = [i for i in result.issues if i.severity == "error"]
+    if not result.success or error_issues:
+        messages = "; ".join(i.message for i in error_issues) if error_issues else "compilation failed"
+        raise MeasurementCompilationError(
+            f"MeasurementPlan compilation failed: {messages}"
         )
 
-        if result.success:
-            additional_fos = result.control_dict_additions.get("functions", {})
-            if additional_fos:
-                files["system/controlDict"] = _merge_measurement_plan_into_control_dict(
-                    files["system/controlDict"],
-                    additional_fos,
-                )
-    except Exception:
-        # If MeasurementPlan parsing or compilation fails, continue with
-        # the base controlDict -- measurement plan is advisory, not blocking.
-        pass
+    # Success — merge functionObjects into controlDict
+    additional_fos = result.control_dict_additions.get("functions", {})
+    if additional_fos:
+        files["system/controlDict"] = _merge_measurement_plan_into_control_dict(
+            files["system/controlDict"],
+            additional_fos,
+        )
 
 
 class ExperimentCompiler(Protocol):
@@ -722,6 +773,7 @@ __all__ = [
     "CompilerRegistry",
     "CylinderFlowCompiler",
     "ExperimentCompiler",
+    "MeasurementCompilationError",
     "PipeFlowCompiler",
     "compile_spec_native",
 ]

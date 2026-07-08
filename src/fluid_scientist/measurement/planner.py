@@ -651,7 +651,8 @@ class MetricPlanner:
             )
 
         measurement_plan = self._generate_measurement_plan(
-            plan_metrics, experiment_type, physics_params=physics_params
+            plan_metrics, experiment_type, physics_params=physics_params,
+            spec=physics_spec,
         )
 
         return MetricPlan(
@@ -720,10 +721,43 @@ class MetricPlanner:
         metrics: list[str],
         experiment_type: str,
         physics_params: dict[str, Any] | None = None,
+        spec: Any | None = None,
     ) -> MeasurementPlan:
-        """根据指标列表生成测量计划。"""
+        """根据指标列表生成测量计划。
+
+        Args:
+            metrics: List of metric IDs to plan measurements for.
+            experiment_type: Type of experiment (e.g. "cylinder_flow").
+            physics_params: Physical parameters for time sampling.
+            spec: The ExperimentSpec object, used to extract geometry
+                parameters for generating real probe coordinates and
+                surface definitions.
+        """
         metric_set = set(metrics)
         physics_params = physics_params or {}
+
+        # --- Extract geometry parameters from spec for real coordinates ---
+        # spec is a ResearchPhysicsSpec with geometry_facts, operating_conditions,
+        # material_facts dicts.  We merge all into a flat geom dict.
+        geom: dict[str, float] = {}
+        if spec is not None:
+            for source_dict_name in ("geometry_facts", "operating_conditions",
+                                     "material_facts", "boundary_facts"):
+                source_dict = getattr(spec, source_dict_name, None)
+                if source_dict and isinstance(source_dict, dict):
+                    for key, val in source_dict.items():
+                        if val is not None:
+                            try:
+                                geom[key] = float(val)
+                            except (TypeError, ValueError):
+                                pass
+
+        diameter = geom.get("diameter", 1.0)
+        length = geom.get("length", 1.0)
+        side_length = geom.get("side_length", 1.0)
+        domain_width = geom.get("domain_width", 10.0)
+        domain_height = geom.get("domain_height", 10.0)
+        extrusion_span = geom.get("extrusion_span", diameter * 0.1)
 
         required_fields = [
             FieldOutputSpec(field_name="U", write_interval=100),
@@ -732,6 +766,58 @@ class MetricPlanner:
         function_objects: list[FunctionObjectSpec] = []
         spatial_sampling: list[SpatialSamplingSpec] = []
         metric_bindings: list[MetricBinding] = []
+        probes: list[Any] = []
+
+        # Helper: generate surface location dict based on experiment type
+        def _surface_location(experiment_type: str, surface_name: str) -> dict[str, Any]:
+            """Generate basePoint, normal, fields, surfaceFormat for a surface."""
+            if experiment_type == "laminar_pipe":
+                if surface_name == "inlet":
+                    return {
+                        "basePoint": [0.0, 0.0, 0.0],
+                        "normal": [0.0, 0.0, -1.0],
+                        "fields": ["p", "U"],
+                        "surfaceFormat": "raw",
+                        "writeInterval": 100,
+                    }
+                else:  # outlet
+                    return {
+                        "basePoint": [0.0, 0.0, length],
+                        "normal": [0.0, 0.0, 1.0],
+                        "fields": ["p", "U"],
+                        "surfaceFormat": "raw",
+                        "writeInterval": 100,
+                    }
+            elif experiment_type == "cylinder_flow":
+                if "outlet" in surface_name:
+                    upstream = geom.get("domain_upstream", 10.0) * diameter
+                    return {
+                        "basePoint": [upstream + diameter, 0.0, 0.0],
+                        "normal": [1.0, 0.0, 0.0],
+                        "fields": ["p", "U"],
+                        "surfaceFormat": "raw",
+                        "writeInterval": 100,
+                    }
+                return {
+                    "basePoint": [0.0, 0.0, 0.0],
+                    "normal": [1.0, 0.0, 0.0],
+                    "fields": ["p", "U"],
+                    "surfaceFormat": "raw",
+                    "writeInterval": 100,
+                }
+            elif experiment_type == "lid_driven_cavity":
+                return {
+                    "basePoint": [0.0, 0.0, 0.0],
+                    "normal": [0.0, -1.0, 0.0],
+                    "fields": ["p", "U"],
+                    "surfaceFormat": "raw",
+                    "writeInterval": 100,
+                }
+            return {
+                "fields": ["p", "U"],
+                "surfaceFormat": "raw",
+                "writeInterval": 100,
+            }
 
         # 压降 → 入口/出口截面压力采样
         if "pressure_drop" in metric_set:
@@ -742,11 +828,13 @@ class MetricPlanner:
                     id=inlet_id,
                     type=SpatialSamplingType.SURFACE,
                     description="入口截面",
+                    location=_surface_location(experiment_type, "inlet"),
                 ),
                 SpatialSamplingSpec(
                     id=outlet_id,
                     type=SpatialSamplingType.SURFACE,
                     description="出口截面",
+                    location=_surface_location(experiment_type, "outlet"),
                 ),
             ])
             for surface_id in (inlet_id, outlet_id):
@@ -783,6 +871,23 @@ class MetricPlanner:
                     source="forceCoeffs_1",
                     function_object="forceCoeffs_1",
                 ))
+            # Generate wake probes for cylinder flow
+            if experiment_type == "cylinder_flow":
+                from fluid_scientist.measurement.models import ProbeSpec
+                upstream = geom.get("domain_upstream", 10.0) * diameter
+                wake_x = upstream + 2.0 * diameter  # 2D downstream of cylinder center
+                probe_positions = [
+                    {"x": wake_x, "y": 0.0, "z": 0.0},
+                    {"x": wake_x + diameter, "y": 0.5 * diameter, "z": 0.0},
+                    {"x": wake_x + diameter, "y": -0.5 * diameter, "z": 0.0},
+                    {"x": wake_x + 2 * diameter, "y": 0.0, "z": 0.0},
+                ]
+                probes.append(ProbeSpec(
+                    id="wake_probes",
+                    field="U",
+                    positions=probe_positions,
+                    write_interval=1,
+                ))
 
         # Strouhal 数 → forceCoeffs + 时间序列
         if "strouhal_number" in metric_set:
@@ -808,6 +913,7 @@ class MetricPlanner:
                 id=outlet_id,
                 type=SpatialSamplingType.SURFACE,
                 description="出口速度均匀性截面",
+                location=_surface_location(experiment_type, "outlet"),
             ))
             # Need both average and RMS for CV calculation
             # CV = sigma_u / mean_u = sqrt(mean(U^2) - mean(U)^2) / mean(U)
@@ -831,7 +937,7 @@ class MetricPlanner:
                 function_object="velocity_outlet_mean",
             ))
 
-        # 速度剖面 → 线采样
+        # 速度剖面 → 线采样 + centerline probes
         if "velocity_profile" in metric_set:
             line_id = "velocity_line"
             spatial_sampling.append(SpatialSamplingSpec(
@@ -842,6 +948,32 @@ class MetricPlanner:
             metric_bindings.append(MetricBinding(
                 metric_id="velocity_profile",
                 source=line_id,
+            ))
+            # Generate centerline probes for pipe/cavity
+            from fluid_scientist.measurement.models import ProbeSpec
+            if experiment_type == "laminar_pipe":
+                probe_positions = [
+                    {"x": 0.0, "y": 0.0, "z": length * 0.25},
+                    {"x": 0.0, "y": 0.0, "z": length * 0.50},
+                    {"x": 0.0, "y": 0.0, "z": length * 0.75},
+                ]
+            elif experiment_type == "lid_driven_cavity":
+                probe_positions = [
+                    {"x": side_length * 0.5, "y": side_length * 0.25, "z": 0.0},
+                    {"x": side_length * 0.5, "y": side_length * 0.50, "z": 0.0},
+                    {"x": side_length * 0.5, "y": side_length * 0.75, "z": 0.0},
+                ]
+            else:
+                probe_positions = [
+                    {"x": 0.0, "y": 0.0, "z": 0.0},
+                    {"x": 0.5, "y": 0.0, "z": 0.0},
+                    {"x": 1.0, "y": 0.0, "z": 0.0},
+                ]
+            probes.append(ProbeSpec(
+                id="centerline_probes",
+                field="U",
+                positions=probe_positions,
+                write_interval=10,
             ))
 
         # 时间采样配置 — 动态计算或回退到默认值
@@ -915,6 +1047,7 @@ class MetricPlanner:
             required_fields=required_fields,
             function_objects=function_objects,
             spatial_sampling=spatial_sampling,
+            probes=probes,
             time_sampling=time_sampling,
             metric_bindings=metric_bindings,
             storage_estimate=storage_estimate,
