@@ -395,7 +395,7 @@ def test_ingest_returns_404_for_missing_spec(client, project_id, tmp_path):
 
 
 def test_metric_results_get_endpoint(client, repository, project_id):
-    """GET /metric-results returns a message for an existing spec."""
+    """GET /metric-results returns a (possibly empty) list for an existing spec."""
     experiment_id = _create_spec(repository, project_id)
 
     response = client.get(
@@ -404,7 +404,8 @@ def test_metric_results_get_endpoint(client, repository, project_id):
     assert response.status_code == 200, response.text
     data = response.json()
     assert data["experiment_id"] == experiment_id
-    assert "message" in data
+    assert "metric_results" in data
+    assert isinstance(data["metric_results"], list)
 
 
 # ---------------------------------------------------------------------------
@@ -418,3 +419,19 @@ def test_metric_results_get_returns_404_for_missing_spec(client, project_id):
         f"/api/projects/{project_id}/experiment-specs/non-existent-exp/metric-results"
     )
     assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Test 8: GET /api/system/version endpoint
+# ---------------------------------------------------------------------------
+
+
+def test_system_version_endpoint(client):
+    """GET /api/system/version returns version info."""
+    response = client.get("/api/system/version")
+    assert response.status_code == 200
+    data = response.json()
+    assert "git_commit" in data
+    assert "workflow" in data
+    assert data["workflow"] == "v2"
+    assert data["native_compile_enabled"] is True

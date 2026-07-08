@@ -1,6 +1,7 @@
 """FastAPI application for Fake demos and persistent research projects."""
 
 import contextlib
+import logging
 import re
 from collections.abc import Callable
 from concurrent.futures import Executor
@@ -24,6 +25,7 @@ from pydantic import (
 )
 from sqlalchemy.exc import IntegrityError
 
+from fluid_scientist import __version__
 from fluid_scientist.adapters.custom_openfoam import (
     CustomCaseManifest,
     CustomCaseRejected,
@@ -150,6 +152,8 @@ from fluid_scientist.settings import (
     ProviderSettings,
 )
 from fluid_scientist.worker.service import JobRecord
+
+logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[3]
 WEB_ROOT = ROOT / "apps" / "web"
@@ -577,6 +581,7 @@ def create_app(
     )
     application.state.research_session_store = research_session_store
     application.state.research_orchestrator = research_orchestrator
+    application.state.metric_results_store: dict[str, list[dict]] = {}
     project_service = ProjectService(workflow_repository)
     demo_projects: dict[str, DemoResearchResult] = {}
 
@@ -587,6 +592,30 @@ def create_app(
     @application.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok", "mode": runtime_settings.app_mode.value}
+
+    @application.get("/api/system/version")
+    def get_system_version() -> dict:
+        """Return system version information for deployment verification."""
+        import subprocess
+        try:
+            git_sha = subprocess.check_output(
+                ["git", "rev-parse", "--short", "HEAD"],
+                stderr=subprocess.DEVNULL,
+                cwd=Path(__file__).resolve().parent,
+            ).decode().strip()
+        except Exception:
+            git_sha = "unknown"
+
+        return {
+            "workflow": "v2",
+            "git_commit": git_sha,
+            "api_version": "2.0",
+            "schema_version": "2.0",
+            "native_compile_enabled": True,
+            "measurement_plan_compile_enabled": True,
+            "package_version": __version__,
+            "workflow_v2_enabled": runtime_settings.research_workflow_v2,
+        }
 
     # ===== Research Session API (Workflow V2) =====
 
@@ -1156,6 +1185,11 @@ def create_app(
         plan_id: str,
         request: PlannedExperimentSubmissionRequest,
     ) -> BenchmarkSubmissionView:
+        if runtime_settings.research_workflow_v2:
+            logger.warning(
+                "Old plan-based endpoint called while V2 is enabled: %s",
+                "submit",
+            )
         target = target_registry.get(request.target_id)
         if target is None:
             raise HTTPException(status_code=404, detail="execution target not found")
@@ -1219,6 +1253,11 @@ def create_app(
         target_id: str,
         case_id: str,
     ) -> PlannedExperimentResultsView:
+        if runtime_settings.research_workflow_v2:
+            logger.warning(
+                "Old plan-based endpoint called while V2 is enabled: %s",
+                "results",
+            )
         target, job_id = _bound_benchmark(
             project_service, target_registry, project_id, case_id, target_id
         )
@@ -1275,6 +1314,11 @@ def create_app(
         target_id: str,
         case_id: str,
     ) -> ExperimentAnalysisView:
+        if runtime_settings.research_workflow_v2:
+            logger.warning(
+                "Old plan-based endpoint called while V2 is enabled: %s",
+                "analysis",
+            )
         model_snapshot = application.state.model_configuration
         analyst = model_snapshot.result_analyst
         if analyst is None or model_snapshot.provider is None or model_snapshot.model is None:
@@ -2179,9 +2223,11 @@ def create_app(
                 detail=f"Metric execution failed: {error}",
             ) from error
 
+        stored_metric_results = [r.model_dump() for r in results]
+        application.state.metric_results_store[experiment_id] = stored_metric_results
         return {
             "experiment_id": experiment_id,
-            "metric_results": [r.model_dump() for r in results],
+            "metric_results": stored_metric_results,
             "missing_data": sim_data.missing_data,
         }
 
@@ -2287,9 +2333,11 @@ def create_app(
                 detail=f"Scientific analysis failed: {error}",
             ) from error
 
+        stored_metric_results = [r.model_dump() for r in metric_results]
+        application.state.metric_results_store[experiment_id] = stored_metric_results
         return {
             "experiment_id": experiment_id,
-            "metric_results": [r.model_dump() for r in metric_results],
+            "metric_results": stored_metric_results,
             "scientific_analysis": analysis.model_dump(),
             "missing_data": sim_data.missing_data,
             "warnings": sim_data.warnings,
@@ -2303,16 +2351,24 @@ def create_app(
         project_id: str,
         experiment_id: str,
     ) -> dict:
-        """Retrieve stored metric results for an experiment."""
+        """Retrieve stored metric results for an experiment.
+
+        Metric results are generated on-demand via POST /analyze or
+        POST /scientific-report and cached in memory.  If no analysis
+        has been performed yet, an empty list is returned.
+        """
         stored_spec = workflow_repository.load_experiment_spec(experiment_id)
         if stored_spec is None or stored_spec.project_id != project_id:
             raise HTTPException(
                 status_code=404,
                 detail=f"ExperimentSpec '{experiment_id}' not found",
             )
+        # Results are generated on-demand via POST /analyze and cached
+        # in application.state.metric_results_store.
+        cached = application.state.metric_results_store.get(experiment_id, [])
         return {
             "experiment_id": experiment_id,
-            "message": "Use POST /analyze to generate metric results",
+            "metric_results": cached,
         }
 
     # ------------------------------------------------------------------ #

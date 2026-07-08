@@ -48,6 +48,24 @@ let modelConfiguration = { configured: false, provider: null, model: null };
 let executionTargets = [];
 let selectedTarget = localStorage.getItem(storageKeys.targetId) || "";
 let currentProject = null;
+
+// Fetch and display system version
+async function loadSystemVersion() {
+  try {
+    const response = await fetch('/api/system/version');
+    if (response.ok) {
+      const info = await response.json();
+      const badge = document.getElementById('system-version');
+      if (badge) {
+        const sha = info.git_commit || 'unknown';
+        const wf = info.workflow || 'v2';
+        badge.textContent = Workflow  · ;
+      }
+    }
+  } catch (e) {
+    // Version display is non-critical
+  }
+}
 let currentPlan = null;
 let currentCompilation = null;
 let currentSpec = null;
@@ -2259,7 +2277,8 @@ function openDialog(id) {
   if (dialog?.showModal) dialog.showModal();
 }
 
-function bindEvents() {
+function bindEvents()
+  loadSystemVersion(); {
   const composer = byId("experiment-composer") || byId("research-form");
   composer?.addEventListener("submit", designExperimentFromPrompt);
   if (designButton && (designButton.type !== "submit" || designButton.form !== composer)) {
@@ -2323,7 +2342,8 @@ function bindEvents() {
 }
 
 async function init() {
-  bindEvents();
+  bindEvents()
+  loadSystemVersion();;
   const modelLoad = loadModelConfiguration().catch((error) => {
     renderError("模型配置", error);
   });
