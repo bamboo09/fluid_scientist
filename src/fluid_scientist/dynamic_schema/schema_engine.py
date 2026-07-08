@@ -26,6 +26,49 @@ from fluid_scientist.experiment_spec.models import (
     PhysicsSpec,
 )
 
+# Mapping of experiment types to applicable parameter IDs.
+# Only parameters in this list will be included for each experiment type.
+# "unknown" includes all parameters as a fallback.
+EXPERIMENT_TYPE_PARAMETERS: dict[str, frozenset[str]] = {
+    "cylinder_flow": frozenset({
+        "diameter",
+        "domain_width",
+        "domain_height",
+        "inlet_velocity",
+        "density",
+        "kinematic_viscosity",
+        "reynolds_number",
+        "strouhal_number",
+        "end_time",
+        "time_step",
+        "max_courant",
+        "cells_radial",
+        "cells_wake",
+    }),
+    "laminar_pipe": frozenset({
+        "diameter",
+        "length",
+        "mean_velocity",
+        "mass_flow_rate",
+        "outlet_pressure",
+        "density",
+        "kinematic_viscosity",
+        "reynolds_number",
+        "end_time",
+        "axial_cells",
+        "radial_cells",
+    }),
+    "lid_driven_cavity": frozenset({
+        "side_length",
+        "lid_velocity",
+        "density",
+        "kinematic_viscosity",
+        "reynolds_number",
+        "end_time",
+        "cells_per_side",
+    }),
+}
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, strict=True)
@@ -116,42 +159,39 @@ def _select_parameters(
     ontology: ParameterOntology,
     physics: PhysicsSpec,
     reynolds: float | None,
+    experiment_type: str = "unknown",
 ) -> list[ParameterSpec]:
-    """Select relevant parameters based on physics specification."""
+    """Select relevant parameters based on physics specification and experiment type.
+
+    When experiment_type is known (cylinder_flow, laminar_pipe, lid_driven_cavity),
+    only parameters applicable to that experiment type are included.
+    When experiment_type is "unknown", all parameters are included as a fallback.
+    """
     params: list[ParameterSpec] = []
 
-    # Always include geometry parameters
-    geometry_entries = ontology.by_category(ParameterCategory.GEOMETRY)
-    for entry in geometry_entries:
-        params.append(_entry_to_param(entry))
+    # Determine which parameter IDs are applicable
+    applicable_ids = EXPERIMENT_TYPE_PARAMETERS.get(experiment_type)
+    if applicable_ids is None:
+        # Unknown experiment type: include all parameters as fallback
+        all_entries: list[OntologyEntry] = []
+        for category in ParameterCategory:
+            all_entries.extend(ontology.by_category(category))
+        for entry in all_entries:
+            if entry.parameter_id == "reynolds_number" and reynolds is not None:
+                params.append(_entry_to_param(entry, value=reynolds))
+            else:
+                params.append(_entry_to_param(entry))
+        return params
 
-    # Include boundary conditions
-    bc_entries = ontology.by_category(ParameterCategory.BOUNDARY_CONDITION)
-    for entry in bc_entries:
-        params.append(_entry_to_param(entry))
-
-    # Include material properties
-    mat_entries = ontology.by_category(ParameterCategory.MATERIAL_PROPERTY)
-    for entry in mat_entries:
-        params.append(_entry_to_param(entry))
-
-    # Include Reynolds number (dimensionless)
-    dim_entries = ontology.by_category(ParameterCategory.DIMENSIONLESS)
-    for entry in dim_entries:
+    # Known experiment type: only include applicable parameters
+    for param_id in sorted(applicable_ids):
+        entry = ontology.get(param_id)
+        if entry is None:
+            continue
         if entry.parameter_id == "reynolds_number" and reynolds is not None:
             params.append(_entry_to_param(entry, value=reynolds))
         else:
             params.append(_entry_to_param(entry))
-
-    # Include mesh parameters
-    mesh_entries = ontology.by_category(ParameterCategory.MESH)
-    for entry in mesh_entries:
-        params.append(_entry_to_param(entry))
-
-    # Include time parameters
-    time_entries = ontology.by_category(ParameterCategory.TIME)
-    for entry in time_entries:
-        params.append(_entry_to_param(entry))
 
     return params
 
@@ -196,11 +236,19 @@ def detect_experiment_type(
         geometry_params = {}
 
     # Check for cylinder flow indicators
-    if "diameter" in geometry_params and "cells_wake" in geometry_params:
+    if "diameter" in geometry_params and (
+        "cells_wake" in geometry_params
+        or "domain_width" in geometry_params
+        or "domain_height" in geometry_params
+    ):
         return "cylinder_flow"
 
     # Check for pipe flow indicators
-    if "length" in geometry_params and "axial_cells" in geometry_params:
+    if "length" in geometry_params and (
+        "axial_cells" in geometry_params
+        or "mass_flow_rate" in geometry_params
+        or "mean_velocity" in geometry_params
+    ):
         return "laminar_pipe"
 
     # Check for cavity flow indicators
@@ -209,10 +257,16 @@ def detect_experiment_type(
 
     # Try to infer from physics spec
     flow_regime = getattr(physics, "flow_regime", None)
-    if flow_regime == "internal_pipe":
-        return "laminar_pipe"
-    if flow_regime == "external_flow":
-        return "cylinder_flow"
+    if flow_regime is not None:
+        flow_regime_str = (
+            flow_regime.value if hasattr(flow_regime, "value") else str(flow_regime)
+        )
+        if flow_regime_str in ("internal_pipe", "internal_flow"):
+            return "laminar_pipe"
+        if flow_regime_str in ("external_flow", "external"):
+            return "cylinder_flow"
+        if flow_regime_str in ("cavity_flow", "cavity"):
+            return "lid_driven_cavity"
 
     return "unknown"
 
@@ -288,7 +342,7 @@ def generate_schema(
     turb_model = _recommend_turbulence_model(reynolds, experiment_type)
 
     # Select parameters
-    params = _select_parameters(ontology, physics, reynolds)
+    params = _select_parameters(ontology, physics, reynolds, experiment_type)
 
     # Update with existing values
     if existing_params:

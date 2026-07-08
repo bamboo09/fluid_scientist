@@ -233,6 +233,26 @@ def _geometry_entries() -> list[OntologyEntry]:
             physical_meaning="Side length of square cavity",
             code_bindings=("system/blockMeshDict",),
         ),
+        OntologyEntry(
+            parameter_id="domain_width",
+            display_name="计算域宽度",
+            category=ParameterCategory.GEOMETRY,
+            unit="D", si_unit="D",
+            typical_range_min=5.0,
+            typical_range_max=50.0,
+            physical_meaning="Domain width in cylinder diameters (upstream)",
+            code_bindings=("system/blockMeshDict",),
+        ),
+        OntologyEntry(
+            parameter_id="domain_height",
+            display_name="计算域高度",
+            category=ParameterCategory.GEOMETRY,
+            unit="D", si_unit="D",
+            typical_range_min=5.0,
+            typical_range_max=50.0,
+            physical_meaning="Domain height in cylinder diameters (downstream)",
+            code_bindings=("system/blockMeshDict",),
+        ),
     ]
 
 
@@ -268,6 +288,26 @@ def _boundary_condition_entries() -> list[OntologyEntry]:
             typical_range_max=10.0,
             physical_meaning="Velocity of the moving lid in cavity",
             code_bindings=("0/U",),
+        ),
+        OntologyEntry(
+            parameter_id="mass_flow_rate",
+            display_name="质量流量",
+            category=ParameterCategory.BOUNDARY_CONDITION,
+            unit="kg/s", si_unit="kg/s",
+            typical_range_min=0.001,
+            typical_range_max=1000.0,
+            physical_meaning="Mass flow rate at inlet",
+            code_bindings=("0/U",),
+        ),
+        OntologyEntry(
+            parameter_id="outlet_pressure",
+            display_name="出口压力",
+            category=ParameterCategory.BOUNDARY_CONDITION,
+            unit="Pa", si_unit="Pa",
+            typical_range_min=0.0,
+            typical_range_max=1e7,
+            physical_meaning="Pressure at outlet boundary",
+            code_bindings=("0/p",),
         ),
     ]
 
