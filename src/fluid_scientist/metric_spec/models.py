@@ -108,6 +108,8 @@ class MetricDefinition(StrictModel):
     description: str = Field(default="", max_length=2000)
     target: MetricTarget | None = None
     critical: bool = False
+    required_data: list[str] = Field(default_factory=list, max_length=50)
+    quality_checks: list[str] = Field(default_factory=list, max_length=50)
 
 
 class MetricQualityCheck(StrictModel):

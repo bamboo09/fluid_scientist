@@ -1131,6 +1131,9 @@ function renderParameterRow(param, spec) {
   row.dataset.paramId = param.parameter_id;
   const editable = param.editable && isSpecEditable(spec);
   row.dataset.editable = String(editable);
+  if (param.source?.type === "unknown") {
+    row.classList.add("spec-param-unknown");
+  }
 
   const label = document.createElement("div");
   label.className = "spec-param-label";
@@ -1349,6 +1352,12 @@ function renderSpecWorkbench(spec) {
   discardBtn.textContent = "放弃修改";
   discardBtn.disabled = true;
   discardBtn.addEventListener("click", () => discardPendingParameterChanges());
+  const acceptRecBtn = document.createElement("button");
+  acceptRecBtn.type = "button";
+  acceptRecBtn.className = "button button-secondary";
+  acceptRecBtn.id = "spec-accept-rec-btn";
+  acceptRecBtn.textContent = "接受推荐值";
+  acceptRecBtn.addEventListener("click", () => acceptAllRecommendations());
   const readyBtn = document.createElement("button");
   readyBtn.type = "button";
   readyBtn.className = "button button-secondary";
@@ -1373,7 +1382,7 @@ function renderSpecWorkbench(spec) {
   submitBtn.id = "spec-submit-btn";
   submitBtn.textContent = "提交运行";
   submitBtn.addEventListener("click", () => submitSpec());
-  actions.append(saveBtn, applyBtn, discardBtn, readyBtn, confirmBtn, compileBtn, submitBtn);
+  actions.append(saveBtn, applyBtn, discardBtn, acceptRecBtn, readyBtn, confirmBtn, compileBtn, submitBtn);
   card.append(actions);
 
   updateSpecControls(spec);
@@ -1549,6 +1558,11 @@ function updateParameterRowInPlace(parameterId, spec) {
 
   const editable = param.editable && isSpecEditable(spec);
   row.dataset.editable = String(editable);
+  if (param.source?.type === "unknown") {
+    row.classList.add("spec-param-unknown");
+  } else {
+    row.classList.remove("spec-param-unknown");
+  }
 
   // Update input value without recreating the element
   const input = row.querySelector("input");
@@ -1777,6 +1791,33 @@ function discardPendingParameterChanges() {
   updateDirtyRowStyles();
   renderPendingChangeSummary();
   showWorkbenchToast("已放弃未保存修改", "info");
+}
+
+async function acceptAllRecommendations() {
+  if (!currentProject || !currentSpec) return;
+  const savedScrollY = window.scrollY;
+  try {
+    const response = await requestJson(
+      `/api/projects/${currentProject.project_id}/experiment-specs/${currentSpec.experiment_id}/accept-recommendations`,
+      { method: "POST" },
+    );
+    const summary = response._acceptance_summary;
+    currentSpec = response;
+    // Update all parameter rows
+    for (const p of response.parameters) {
+      updateParameterRowInPlace(p.parameter_id, response);
+    }
+    updateSpecControls(response);
+    if (summary?.summary) {
+      showWorkbenchToast(summary.summary, "success");
+    } else {
+      showWorkbenchToast("已接受所有推荐值", "success");
+    }
+    window.scrollTo({ top: savedScrollY, behavior: "instant" });
+  } catch (error) {
+    showWorkbenchToast(`接受推荐值失败：${error.message || error}`, "error");
+    window.scrollTo({ top: savedScrollY, behavior: "instant" });
+  }
 }
 
 function renderBatchPropagation(propagation) {

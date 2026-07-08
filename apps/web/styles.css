@@ -715,6 +715,13 @@ select, input[type="text"], input[type="password"] {
   padding-left: 0.5rem;
 }
 
+/* Unknown required parameter */
+.spec-param-unknown {
+  background: var(--error-bg, #fef2f2);
+  border-left: 3px solid var(--error-border, #f87171);
+  padding-left: 0.5rem;
+}
+
 .spec-pending-summary {
   padding: 0.5rem 0.75rem;
   background: var(--warning-bg, #fffbeb);

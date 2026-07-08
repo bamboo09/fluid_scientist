@@ -12,9 +12,12 @@ The planning pipeline follows:
 
 1. **Physical quantity decomposition** -- from ``research_objective`` and
    ``physics_spec`` determine which physical quantities are relevant.
-2. **Unknown metric extraction** -- non-standard metric names from natural
+2. **Keyword-based metric inference** -- parse ``research_objective`` text
+   for Chinese/English keywords that map to known metric IDs (e.g. "压降" ->
+   pressure_drop, "阻力" -> drag_coefficient).
+3. **Unknown metric extraction** -- non-standard metric names from natural
    language are captured as :class:`UnknownMetric` objects.
-3. **Metric classification**:
+4. **Metric classification**:
    * **core** -- directly answers the user's research question.
    * **credibility** -- convergence/numerical quality (residuals, mass
      conservation, Courant).
@@ -22,9 +25,9 @@ The planning pipeline follows:
      friction_factor, pressure_coefficient).
    * **extension** -- helpful but not critical.
    * **optional** -- nice-to-have.
-4. **Metric definitions** -- for each known metric, store formula, unit, and
-   category in ``metric_definitions``.
-5. **Required data** -- generate :class:`MeasurementPlan` with the sampling
+5. **Metric definitions** -- for each known metric, store formula, unit,
+   category, required_data, and quality_checks in ``metric_definitions``.
+6. **Required data** -- generate :class:`MeasurementPlan` with the sampling
    configuration needed to extract the selected metrics.
 """
 
@@ -85,7 +88,46 @@ class MetricPlan(BaseModel):
 class MetricPlanner:
     """从研究目标和物理规格生成指标计划。"""
 
-    # Standard metric definitions with formulas
+    # Chinese/English keyword -> metric_id mapping for objective parsing
+    _OBJECTIVE_KEYWORD_MAP: dict[str, str] = {
+        "压降": "pressure_drop",
+        "压力降": "pressure_drop",
+        "压力损失": "pressure_drop",
+        "阻力": "drag_coefficient",
+        "阻力系数": "drag_coefficient",
+        "升力": "lift_coefficient",
+        "升力系数": "lift_coefficient",
+        "涡脱落": "strouhal_number",
+        "涡街": "strouhal_number",
+        "卡门涡": "strouhal_number",
+        "strouhal": "strouhal_number",
+        "速度均匀性": "outlet_velocity_uniformity",
+        "出口均匀性": "outlet_velocity_uniformity",
+        "壁面剪应力": "wall_shear_stress",
+        "壁面剪切": "wall_shear_stress",
+        "摩擦系数": "friction_factor",
+        "摩擦": "friction_factor",
+        "速度剖面": "velocity_profile",
+        "速度场": "velocity_profile",
+        "压力剖面": "pressure_profile",
+        "压力场": "pressure_profile",
+        "压力系数": "pressure_coefficient",
+        "涡心": "vortex_center_x",
+        "压力脉动": "pressure_rms",
+        "压力波动": "pressure_rms",
+        "速度脉动": "velocity_rms",
+        "速度波动": "velocity_rms",
+        "湍流强度": "velocity_rms",
+        "二次流": "secondary_flow_intensity",
+        "旋流": "swirl_number",
+        "旋转流": "swirl_number",
+        "频谱": "frequency_spectrum_peak",
+        "功率谱": "frequency_spectrum_peak",
+        "统计收敛": "statistical_stability",
+        "统计稳定性": "statistical_stability",
+    }
+
+    # Standard metric definitions with formulas, required_data, quality_checks
     _METRIC_DEFINITIONS: dict[str, dict[str, Any]] = {
         "pressure_drop": {
             "formula": "p_inlet - p_outlet",
@@ -93,6 +135,15 @@ class MetricPlanner:
             "category": "physical",
             "display_name": "压降",
             "data_type": "scalar",
+            "required_data": [
+                "inlet/outlet surfaceFieldValue",
+                "inlet_boundary_pressure",
+                "outlet_boundary_pressure",
+            ],
+            "quality_checks": [
+                "mass_balance",
+                "statistical_convergence",
+            ],
         },
         "drag_coefficient": {
             "formula": "Fd / (0.5 * rho * U^2 * A)",
@@ -100,6 +151,17 @@ class MetricPlanner:
             "category": "physical",
             "display_name": "阻力系数 Cd",
             "data_type": "scalar",
+            "required_data": [
+                "forceCoeffs time series",
+                "cylinder_diameter",
+                "inlet_velocity",
+                "fluid_density",
+            ],
+            "quality_checks": [
+                "sampling_frequency",
+                "minimum_cycles",
+                "statistical_convergence",
+            ],
         },
         "lift_coefficient": {
             "formula": "Fl / (0.5 * rho * U^2 * A)",
@@ -107,6 +169,17 @@ class MetricPlanner:
             "category": "physical",
             "display_name": "升力系数 Cl",
             "data_type": "scalar",
+            "required_data": [
+                "forceCoeffs time series",
+                "cylinder_diameter",
+                "inlet_velocity",
+                "fluid_density",
+            ],
+            "quality_checks": [
+                "sampling_frequency",
+                "minimum_cycles",
+                "statistical_convergence",
+            ],
         },
         "strouhal_number": {
             "formula": "f * D / U",
@@ -114,6 +187,16 @@ class MetricPlanner:
             "category": "dimensionless",
             "display_name": "Strouhal 数 St",
             "data_type": "scalar",
+            "required_data": [
+                "lift_coefficient time series",
+                "cylinder_diameter",
+                "inlet_velocity",
+            ],
+            "quality_checks": [
+                "sampling_frequency",
+                "minimum_cycles",
+                "peak_prominence",
+            ],
         },
         "friction_factor": {
             "formula": "dp / (0.5 * rho * U^2 * L / D)",
@@ -121,6 +204,17 @@ class MetricPlanner:
             "category": "dimensionless",
             "display_name": "摩擦系数 f",
             "data_type": "scalar",
+            "required_data": [
+                "pressure_drop",
+                "pipe_diameter",
+                "pipe_length",
+                "mean_velocity",
+                "fluid_density",
+            ],
+            "quality_checks": [
+                "reynolds_number_range",
+                "statistical_convergence",
+            ],
         },
         "reynolds_number": {
             "formula": "rho * U * D / mu",
@@ -128,6 +222,15 @@ class MetricPlanner:
             "category": "dimensionless",
             "display_name": "Reynolds 数",
             "data_type": "scalar",
+            "required_data": [
+                "pipe_diameter",
+                "mean_velocity",
+                "fluid_density",
+                "fluid_viscosity",
+            ],
+            "quality_checks": [
+                "flow_regime_consistency",
+            ],
         },
         "velocity_profile": {
             "formula": "U(x, y, z) at cross-sections",
@@ -135,6 +238,14 @@ class MetricPlanner:
             "category": "physical",
             "display_name": "速度剖面",
             "data_type": "vector",
+            "required_data": [
+                "probes along cross-sections",
+                "axial_velocity_field",
+            ],
+            "quality_checks": [
+                "statistical_convergence",
+                "symmetry_check",
+            ],
         },
         "outlet_velocity_uniformity": {
             "formula": "CV_u = sigma_u / mean_u",
@@ -142,6 +253,14 @@ class MetricPlanner:
             "category": "physical",
             "display_name": "出口速度均匀性",
             "data_type": "scalar",
+            "required_data": [
+                "outlet surface velocity field",
+                "outlet areaAverage(mag(U))",
+                "outlet areaAverage(U)",
+            ],
+            "quality_checks": [
+                "statistical_convergence",
+            ],
         },
         "pressure_coefficient": {
             "formula": "Cp = (p - p_inf) / (0.5 * rho * U^2)",
@@ -149,6 +268,15 @@ class MetricPlanner:
             "category": "dimensionless",
             "display_name": "压力系数 Cp",
             "data_type": "scalar",
+            "required_data": [
+                "surface pressure distribution",
+                "reference_pressure",
+                "inlet_velocity",
+                "fluid_density",
+            ],
+            "quality_checks": [
+                "statistical_convergence",
+            ],
         },
         "mass_flow_rate": {
             "formula": "m_dot = rho * U * A",
@@ -156,6 +284,14 @@ class MetricPlanner:
             "category": "physical",
             "display_name": "质量流量",
             "data_type": "scalar",
+            "required_data": [
+                "inlet/outlet surfaceFieldValue",
+                "fluid_density",
+                "cross_section_area",
+            ],
+            "quality_checks": [
+                "mass_balance",
+            ],
         },
         "residual_tolerance": {
             "formula": "max(initial_residuals)",
@@ -163,6 +299,12 @@ class MetricPlanner:
             "category": "convergence",
             "display_name": "残差容差",
             "data_type": "scalar",
+            "required_data": [
+                "solver residual log",
+            ],
+            "quality_checks": [
+                "residual_tolerance_threshold",
+            ],
         },
         "vortex_center_x": {
             "formula": "argmin(|velocity|) along x",
@@ -170,6 +312,13 @@ class MetricPlanner:
             "category": "physical",
             "display_name": "涡心 X 坐标",
             "data_type": "scalar",
+            "required_data": [
+                "velocity_field",
+                "cavity_geometry",
+            ],
+            "quality_checks": [
+                "statistical_convergence",
+            ],
         },
         "vortex_center_y": {
             "formula": "argmin(|velocity|) along y",
@@ -177,6 +326,13 @@ class MetricPlanner:
             "category": "physical",
             "display_name": "涡心 Y 坐标",
             "data_type": "scalar",
+            "required_data": [
+                "velocity_field",
+                "cavity_geometry",
+            ],
+            "quality_checks": [
+                "statistical_convergence",
+            ],
         },
         "pressure_profile": {
             "formula": "p(x, y, z) along centerlines",
@@ -184,6 +340,136 @@ class MetricPlanner:
             "category": "physical",
             "display_name": "压力剖面",
             "data_type": "vector",
+            "required_data": [
+                "probes along centerlines",
+                "pressure_field",
+            ],
+            "quality_checks": [
+                "statistical_convergence",
+            ],
+        },
+        "wall_shear_stress": {
+            "formula": "tau_w = mu * (dU/dy)_wall",
+            "unit": "Pa",
+            "category": "physical",
+            "display_name": "壁面剪应力",
+            "data_type": "scalar",
+            "required_data": [
+                "wallGradU functionObject",
+                "fluid_viscosity",
+                "wall_patch_ids",
+            ],
+            "quality_checks": [
+                "statistical_convergence",
+            ],
+        },
+        # --- Additional metrics (Change 3) ---
+        "pressure_rms": {
+            "formula": "sqrt(mean((p - mean(p))^2))",
+            "unit": "Pa",
+            "category": "physical",
+            "display_name": "压力脉动 RMS",
+            "data_type": "scalar",
+            "required_data": [
+                "pressure time series at probe points",
+                "statistical sampling window",
+            ],
+            "quality_checks": [
+                "sampling_frequency",
+                "minimum_samples",
+                "statistical_convergence",
+            ],
+        },
+        "velocity_rms": {
+            "formula": "sqrt(mean((u - mean(u))^2))",
+            "unit": "m/s",
+            "category": "physical",
+            "display_name": "速度脉动 RMS",
+            "data_type": "scalar",
+            "required_data": [
+                "velocity time series at probe points",
+                "statistical sampling window",
+            ],
+            "quality_checks": [
+                "sampling_frequency",
+                "minimum_samples",
+                "statistical_convergence",
+            ],
+        },
+        "outlet_velocity_distortion": {
+            "formula": "distortion = max(U) / mean(U) at outlet",
+            "unit": "dimensionless",
+            "category": "physical",
+            "display_name": "出口速度畸变",
+            "data_type": "scalar",
+            "required_data": [
+                "outlet surface velocity field",
+                "outlet areaAverage(U)",
+                "outlet max(U)",
+            ],
+            "quality_checks": [
+                "statistical_convergence",
+            ],
+        },
+        "secondary_flow_intensity": {
+            "formula": "I_sf = sqrt(u_sec^2 + v_sec^2) / U_mean",
+            "unit": "dimensionless",
+            "category": "physical",
+            "display_name": "二次流强度",
+            "data_type": "scalar",
+            "required_data": [
+                "cross-plane velocity field",
+                "mean axial velocity",
+            ],
+            "quality_checks": [
+                "statistical_convergence",
+            ],
+        },
+        "swirl_number": {
+            "formula": "S = integral(rho * U_theta * r * U_z dA) / (R * integral(rho * U_z^2 dA))",
+            "unit": "dimensionless",
+            "category": "dimensionless",
+            "display_name": "旋流数",
+            "data_type": "scalar",
+            "required_data": [
+                "cross-plane velocity field",
+                "tangential velocity profile",
+                "axial velocity profile",
+            ],
+            "quality_checks": [
+                "statistical_convergence",
+            ],
+        },
+        "frequency_spectrum_peak": {
+            "formula": "argmax(PSD(signal))",
+            "unit": "Hz",
+            "category": "physical",
+            "display_name": "频谱主峰频率",
+            "data_type": "scalar",
+            "required_data": [
+                "time series signal (forceCoeffs or probes)",
+                "sampling_frequency",
+            ],
+            "quality_checks": [
+                "sampling_frequency",
+                "minimum_cycles",
+                "peak_prominence",
+            ],
+        },
+        "statistical_stability": {
+            "formula": "CI = 1.96 * sigma / (sqrt(N) * mean)",
+            "unit": "dimensionless",
+            "category": "numerical",
+            "display_name": "统计稳定性指标",
+            "data_type": "scalar",
+            "required_data": [
+                "time series of target metric",
+                "sample_count",
+            ],
+            "quality_checks": [
+                "minimum_samples",
+                "confidence_interval_threshold",
+            ],
         },
     }
 
@@ -204,10 +490,11 @@ class MetricPlanner:
 
         规划流程：
         1. 物理量分解 -- 基于 research_objective 和 physics_spec 确定相关物理量。
-        2. 未知指标提取 -- 将非标准指标名提取为 :class:`UnknownMetric` 对象。
-        3. 指标分类 -- core / credibility / comparison / extension / optional。
-        4. 指标定义 -- 为每个已知指标存储公式、单位、类别。
-        5. 生成 :class:`MeasurementPlan`。
+        2. 关键词推断 -- 从 research_objective 文本中解析指标关键词。
+        3. 未知指标提取 -- 将非标准指标名提取为 :class:`UnknownMetric` 对象。
+        4. 指标分类 -- core / credibility / comparison / extension / optional。
+        5. 指标定义 -- 为每个已知指标存储公式、单位、类别、required_data、quality_checks。
+        6. 生成 :class:`MeasurementPlan`。
 
         Args:
             research_objective: 研究目标描述（用于指标推理和未知指标溯源）。
@@ -231,6 +518,15 @@ class MetricPlanner:
 
         user_set = set(user_metrics)
 
+        # 0. Parse research_objective for metric keywords
+        inferred_metrics = self._infer_metrics_from_objective(research_objective)
+
+        # Merge inferred metrics into user_metrics (avoid duplicates)
+        for m in inferred_metrics:
+            if m not in user_set:
+                user_metrics.append(m)
+                user_set.add(m)
+
         # 1. 从 registry 获取标准指标，进行分类并存储定义
         #    CONVERGENCE 类指标（如 residual_tolerance）优先归入 credibility，
         #    即使被标记为 critical 也不应进入 core。
@@ -238,7 +534,7 @@ class MetricPlanner:
             registry_spec = get_metric_spec(experiment_type)
             for metric_def in registry_spec.metrics:
                 mid = metric_def.metric_id
-                # 存储指标定义
+                # 存储指标定义（包含 required_data 和 quality_checks）
                 metric_definitions[mid] = {
                     "formula": metric_def.formula,
                     "unit": metric_def.unit,
@@ -246,6 +542,8 @@ class MetricPlanner:
                     "display_name": metric_def.display_name,
                     "data_type": metric_def.data_type.value,
                     "critical": metric_def.critical,
+                    "required_data": list(metric_def.required_data),
+                    "quality_checks": list(metric_def.quality_checks),
                 }
 
                 if (
@@ -274,7 +572,7 @@ class MetricPlanner:
             if m in self._METRIC_DEFINITIONS:
                 # 已知标准指标但不在 registry 中
                 core_metrics.append(m)
-                metric_definitions[m] = self._METRIC_DEFINITIONS[m]
+                metric_definitions[m] = dict(self._METRIC_DEFINITIONS[m])
                 known_metrics.add(m)
             else:
                 # 未知指标 -- 提取为结构化记录
@@ -302,7 +600,7 @@ class MetricPlanner:
                 and physics_spec.flow_regime
             ):
                 comparison_metrics.append(cm)
-                metric_definitions[cm] = self._METRIC_DEFINITIONS[cm]
+                metric_definitions[cm] = dict(self._METRIC_DEFINITIONS[cm])
                 known_metrics.add(cm)
 
         # 4. 生成推理摘要
@@ -369,6 +667,24 @@ class MetricPlanner:
             reasoning_summary=reasoning_summary,
         )
 
+    @classmethod
+    def _infer_metrics_from_objective(cls, research_objective: str) -> list[str]:
+        """从研究目标文本中推断指标 ID。
+
+        解析 research_objective 中的中文/英文关键词，将其映射到已知指标 ID。
+        例如："压降" -> pressure_drop, "阻力" -> drag_coefficient,
+        "涡脱落" -> strouhal_number。
+        """
+        if not research_objective:
+            return []
+        inferred: list[str] = []
+        seen: set[str] = set()
+        for keyword, metric_id in cls._OBJECTIVE_KEYWORD_MAP.items():
+            if keyword in research_objective and metric_id not in seen:
+                inferred.append(metric_id)
+                seen.add(metric_id)
+        return inferred
+
     @staticmethod
     def _is_standard_metric(metric_id: str) -> bool:
         """检查指标是否是已知的标准指标（即使不在当前 registry 中）。"""
@@ -388,6 +704,14 @@ class MetricPlanner:
             "vortex_center_x",
             "vortex_center_y",
             "residual_tolerance",
+            "wall_shear_stress",
+            "pressure_rms",
+            "velocity_rms",
+            "outlet_velocity_distortion",
+            "secondary_flow_intensity",
+            "swirl_number",
+            "frequency_spectrum_peak",
+            "statistical_stability",
         }
         return metric_id in standard
 

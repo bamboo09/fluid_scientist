@@ -1948,6 +1948,29 @@ def create_app(
             raise HTTPException(status_code=404, detail="experiment spec not found")
         return json.loads(stored.spec_json)
 
+    @application.get(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/metric-plan",
+        tags=["experiment-specs"],
+    )
+    def get_metric_plan(
+        project_id: str,
+        experiment_id: str,
+    ) -> dict:
+        """Get the metric plan for an experiment spec."""
+        stored = workflow_repository.load_experiment_spec(experiment_id)
+        if stored is None or stored.project_id != project_id:
+            raise HTTPException(
+                status_code=404, detail="experiment spec not found"
+            )
+        spec = ExperimentSpec.model_validate_json(stored.spec_json)
+        # Return the metrics from the spec
+        metrics = spec.metrics if isinstance(spec.metrics, list) else []
+        return {
+            "experiment_id": experiment_id,
+            "metrics": metrics,
+            "metric_count": len(metrics),
+        }
+
     @application.patch(
         "/api/projects/{project_id}/experiment-specs/{experiment_id}/parameters/{parameter_id}",
         tags=["experiment-specs"],
@@ -2160,6 +2183,70 @@ def create_app(
                            else ""
                        )
                        + (f"，{len(deduped_stale)} 个对象已失效" if deduped_stale else ""),
+        }
+        return response
+
+
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/accept-recommendations",
+        tags=["experiment-specs"],
+    )
+    def accept_all_recommendations(
+        project_id: str,
+        experiment_id: str,
+    ) -> dict:
+        """Accept all system_recommended parameters and compute derived values.
+
+        - system_recommended -> status=ACCEPTED
+        - derived parameters computed (mean_velocity, reynolds_number)
+        - unknown_required parameters remain unchanged
+        - Returns updated spec with acceptance summary
+        """
+        import json
+        stored = workflow_repository.load_experiment_spec(experiment_id)
+        if stored is None or stored.project_id != project_id:
+            raise HTTPException(status_code=404, detail="experiment spec not found")
+
+        spec = ExperimentSpec.model_validate_json(stored.spec_json)
+
+        from fluid_scientist.experiment_spec.derivation import (
+            accept_all_recommendations as do_accept,
+        )
+        updated_spec = do_accept(spec)
+
+        # Count what was accepted
+        accepted = [
+            p.parameter_id for p in updated_spec.parameters
+            if p.source.type.value == "system_recommended"
+            and p.status.value == "accepted"
+        ]
+        derived = [
+            p.parameter_id for p in updated_spec.parameters
+            if p.source.type.value == "derived"
+        ]
+        still_unknown = [
+            p.parameter_id for p in updated_spec.parameters
+            if p.source.type.value == "unknown"
+        ]
+
+        now = datetime.now(UTC).isoformat()
+        updated_stored = workflow_repository.replace_experiment_spec(
+            experiment_id,
+            spec_json=updated_spec.model_dump_json(),
+            experiment_version=stored.experiment_version,
+            status=stored.status,
+            updated_at=now,
+        )
+        response = json.loads(updated_stored.spec_json)
+        response["_acceptance_summary"] = {
+            "accepted_recommendations": accepted,
+            "derived_parameters": derived,
+            "still_unknown_required": still_unknown,
+            "summary": (
+                f"已接受 {len(accepted)} 个推荐值"
+                + (f"，{len(derived)} 个参数已推导" if derived else "")
+                + (f"，{len(still_unknown)} 个参数仍需确认" if still_unknown else "")
+            ),
         }
         return response
 

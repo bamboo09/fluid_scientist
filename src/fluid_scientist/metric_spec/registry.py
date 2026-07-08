@@ -25,6 +25,17 @@ def _cylinder_metrics() -> tuple[MetricDefinition, ...]:
             function_object="forces",
             description="Drag coefficient on cylinder surface",
             critical=True,
+            required_data=[
+                "forceCoeffs time series",
+                "cylinder_diameter",
+                "inlet_velocity",
+                "fluid_density",
+            ],
+            quality_checks=[
+                "sampling_frequency",
+                "minimum_cycles",
+                "statistical_convergence",
+            ],
         ),
         MetricDefinition(
             metric_id="lift_coefficient",
@@ -35,6 +46,17 @@ def _cylinder_metrics() -> tuple[MetricDefinition, ...]:
             formula="Fl / (0.5 * rho * U^2 * D)",
             function_object="forces",
             description="Lift coefficient on cylinder surface",
+            required_data=[
+                "forceCoeffs time series",
+                "cylinder_diameter",
+                "inlet_velocity",
+                "fluid_density",
+            ],
+            quality_checks=[
+                "sampling_frequency",
+                "minimum_cycles",
+                "statistical_convergence",
+            ],
         ),
         MetricDefinition(
             metric_id="strouhal_number",
@@ -45,6 +67,16 @@ def _cylinder_metrics() -> tuple[MetricDefinition, ...]:
             formula="f * D / U",
             function_object="probes",
             description="Vortex shedding frequency dimensionless number",
+            required_data=[
+                "lift_coefficient time series",
+                "cylinder_diameter",
+                "inlet_velocity",
+            ],
+            quality_checks=[
+                "sampling_frequency",
+                "minimum_cycles",
+                "peak_prominence",
+            ],
         ),
         MetricDefinition(
             metric_id="pressure_drop",
@@ -55,6 +87,15 @@ def _cylinder_metrics() -> tuple[MetricDefinition, ...]:
             formula="p_inlet - p_outlet",
             function_object="surfaceFieldValue",
             description="Pressure difference between inlet and outlet",
+            required_data=[
+                "inlet/outlet surfaceFieldValue",
+                "inlet_boundary_pressure",
+                "outlet_boundary_pressure",
+            ],
+            quality_checks=[
+                "mass_balance",
+                "statistical_convergence",
+            ],
         ),
         MetricDefinition(
             metric_id="residual_tolerance",
@@ -65,6 +106,12 @@ def _cylinder_metrics() -> tuple[MetricDefinition, ...]:
             formula="max(initial_residuals)",
             description="Maximum residual for convergence assessment",
             critical=True,
+            required_data=[
+                "solver residual log",
+            ],
+            quality_checks=[
+                "residual_tolerance_threshold",
+            ],
         ),
     )
 
@@ -82,6 +129,15 @@ def _pipe_metrics() -> tuple[MetricDefinition, ...]:
             function_object="surfaceFieldValue",
             description="Pressure difference between inlet and outlet",
             critical=True,
+            required_data=[
+                "inlet/outlet surfaceFieldValue",
+                "inlet_boundary_pressure",
+                "outlet_boundary_pressure",
+            ],
+            quality_checks=[
+                "mass_balance",
+                "statistical_convergence",
+            ],
         ),
         MetricDefinition(
             metric_id="friction_factor",
@@ -91,6 +147,17 @@ def _pipe_metrics() -> tuple[MetricDefinition, ...]:
             unit="dimensionless",
             formula="dp / (0.5 * rho * U^2 * L / D)",
             description="Darcy friction factor",
+            required_data=[
+                "pressure_drop",
+                "pipe_diameter",
+                "pipe_length",
+                "mean_velocity",
+                "fluid_density",
+            ],
+            quality_checks=[
+                "reynolds_number_range",
+                "statistical_convergence",
+            ],
         ),
         MetricDefinition(
             metric_id="reynolds_number",
@@ -100,6 +167,15 @@ def _pipe_metrics() -> tuple[MetricDefinition, ...]:
             unit="dimensionless",
             formula="rho * U * D / mu",
             description="Reynolds number for flow regime verification",
+            required_data=[
+                "pipe_diameter",
+                "mean_velocity",
+                "fluid_density",
+                "fluid_viscosity",
+            ],
+            quality_checks=[
+                "flow_regime_consistency",
+            ],
         ),
         MetricDefinition(
             metric_id="velocity_profile",
@@ -109,6 +185,14 @@ def _pipe_metrics() -> tuple[MetricDefinition, ...]:
             unit="m/s",
             function_object="probes",
             description="Velocity profile at measurement cross-sections",
+            required_data=[
+                "probes along pipe cross-sections",
+                "axial_velocity_field",
+            ],
+            quality_checks=[
+                "statistical_convergence",
+                "symmetry_check",
+            ],
         ),
         MetricDefinition(
             metric_id="residual_tolerance",
@@ -119,6 +203,12 @@ def _pipe_metrics() -> tuple[MetricDefinition, ...]:
             formula="max(initial_residuals)",
             description="Maximum residual for convergence assessment",
             critical=True,
+            required_data=[
+                "solver residual log",
+            ],
+            quality_checks=[
+                "residual_tolerance_threshold",
+            ],
         ),
     )
 
@@ -135,6 +225,14 @@ def _cavity_metrics() -> tuple[MetricDefinition, ...]:
             function_object="probes",
             description="Velocity profile along centerlines",
             critical=True,
+            required_data=[
+                "probes along cavity centerlines",
+                "velocity_field",
+            ],
+            quality_checks=[
+                "statistical_convergence",
+                "symmetry_check",
+            ],
         ),
         MetricDefinition(
             metric_id="pressure_profile",
@@ -144,6 +242,13 @@ def _cavity_metrics() -> tuple[MetricDefinition, ...]:
             unit="Pa",
             function_object="probes",
             description="Pressure profile along centerlines",
+            required_data=[
+                "probes along cavity centerlines",
+                "pressure_field",
+            ],
+            quality_checks=[
+                "statistical_convergence",
+            ],
         ),
         MetricDefinition(
             metric_id="vortex_center_x",
@@ -153,6 +258,13 @@ def _cavity_metrics() -> tuple[MetricDefinition, ...]:
             unit="m",
             formula="argmin(|velocity|) along x",
             description="X coordinate of primary vortex center",
+            required_data=[
+                "velocity_field",
+                "cavity_geometry",
+            ],
+            quality_checks=[
+                "statistical_convergence",
+            ],
         ),
         MetricDefinition(
             metric_id="vortex_center_y",
@@ -162,6 +274,13 @@ def _cavity_metrics() -> tuple[MetricDefinition, ...]:
             unit="m",
             formula="argmin(|velocity|) along y",
             description="Y coordinate of primary vortex center",
+            required_data=[
+                "velocity_field",
+                "cavity_geometry",
+            ],
+            quality_checks=[
+                "statistical_convergence",
+            ],
         ),
         MetricDefinition(
             metric_id="residual_tolerance",
@@ -172,6 +291,12 @@ def _cavity_metrics() -> tuple[MetricDefinition, ...]:
             formula="max(initial_residuals)",
             description="Maximum residual for convergence assessment",
             critical=True,
+            required_data=[
+                "solver residual log",
+            ],
+            quality_checks=[
+                "residual_tolerance_threshold",
+            ],
         ),
     )
 
