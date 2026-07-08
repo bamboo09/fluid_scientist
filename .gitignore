@@ -1,4 +1,4 @@
-.superpowers/
+﻿.superpowers/
 .worktrees/
 .env
 .env.*
@@ -19,4 +19,7 @@ coverage/
 *.db
 
 # SSH 密钥（绝不提交）
-ssh-keys/.tmp_pytest/
+ssh-keys/
+
+# Test temp files
+.tmp_pytest/
