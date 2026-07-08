@@ -134,6 +134,24 @@
         <section><h3>活动项目</h3><p><strong id="current-project">尚未创建</strong><span id="active-project-name">从第一条实验请求开始</span></p></section>
         <section><h3>远程任务</h3><p><strong id="job-state" data-task-label>空闲</strong><span id="job-id">尚未提交</span></p><div class="progress" aria-hidden="true"><i id="job-progress"></i></div><p id="last-task-update" class="rail-note">没有活动任务</p></section>
         <nav aria-label="辅助入口"><button id="open-custom-case" type="button" class="rail-link" aria-haspopup="dialog">上传自定义 OpenFOAM 算例 <span>↗</span></button><a class="rail-link" href="#conversation-stream">查看本次对话 <span>↑</span></a></nav>
+        <section id="workstation-panel" class="context-section">
+          <h4>工作站</h4>
+          <div id="workstation-status" class="workstation-status">
+            <span class="ws-indicator" data-state="unknown">●</span>
+            <span class="ws-text">检查中...</span>
+          </div>
+          <div id="workstation-details" class="ws-details" hidden>
+            <div class="ws-detail-row"><span>主机</span><span id="ws-host"></span></div>
+            <div class="ws-detail-row"><span>OpenFOAM</span><span id="ws-foam"></span></div>
+            <div class="ws-detail-row"><span>CPU</span><span id="ws-cpu"></span></div>
+            <div class="ws-detail-row"><span>内存</span><span id="ws-mem"></span></div>
+            <div class="ws-detail-row"><span>磁盘</span><span id="ws-disk"></span></div>
+          </div>
+          <div class="ws-actions">
+            <button id="ws-reconnect" class="ws-btn" type="button">重连</button>
+            <button id="ws-test-ssh" class="ws-btn" type="button">测试SSH</button>
+          </div>
+        </section>
       </aside>
     </div>
 

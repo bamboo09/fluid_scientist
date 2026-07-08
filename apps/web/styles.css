@@ -852,3 +852,45 @@ select, input[type="text"], input[type="password"] {
   font-family: var(--mono, monospace);
   opacity: 0.8;
 }
+
+/* Workstation panel */
+.workstation-status {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  margin-bottom: 8px;
+}
+.ws-indicator {
+  font-size: 0.7rem;
+  line-height: 1;
+}
+.ws-indicator[data-state="connected"] { color: var(--teal); }
+.ws-indicator[data-state="disconnected"] { color: var(--red); }
+.ws-indicator[data-state="unknown"] { color: var(--amber); }
+.ws-details {
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-bottom: 8px;
+}
+.ws-detail-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 1px 0;
+}
+.ws-detail-row span:first-child { color: var(--faint); }
+.ws-actions {
+  display: flex;
+  gap: 6px;
+}
+.ws-btn {
+  padding: 3px 10px;
+  font-size: 0.75rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--sheet);
+  color: var(--ink);
+  cursor: pointer;
+}
+.ws-btn:hover { border-color: var(--teal); color: var(--teal); }
+.ws-btn:disabled { opacity: 0.5; cursor: not-allowed; }

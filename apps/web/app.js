@@ -2277,6 +2277,74 @@ function openDialog(id) {
   if (dialog?.showModal) dialog.showModal();
 }
 
+// === Workstation Management ===
+
+async function loadWorkstationStatus() {
+  try {
+    const data = await requestJson("/api/workstation/status");
+    const indicator = document.querySelector("#workstation-status .ws-indicator");
+    const text = document.querySelector("#workstation-status .ws-text");
+    const details = document.getElementById("workstation-details");
+
+    if (data.connected) {
+      indicator.dataset.state = "connected";
+      text.textContent = "已连接";
+      details.hidden = false;
+      document.getElementById("ws-host").textContent = data.host || "-";
+      document.getElementById("ws-foam").textContent = data.foam_version || "-";
+      document.getElementById("ws-cpu").textContent = data.cpu_count ? data.cpu_count + " 核" : "-";
+      document.getElementById("ws-mem").textContent = data.memory_gb ? data.memory_gb.toFixed(1) + " GB" : "-";
+      document.getElementById("ws-disk").textContent = data.disk_free_gb ? data.disk_free_gb.toFixed(1) + " GB" : "-";
+    } else {
+      indicator.dataset.state = "disconnected";
+      text.textContent = data.error ? "连接失败" : "未连接";
+      details.hidden = true;
+    }
+  } catch (e) {
+    const indicator = document.querySelector("#workstation-status .ws-indicator");
+    const text = document.querySelector("#workstation-status .ws-text");
+    if (indicator) indicator.dataset.state = "disconnected";
+    if (text) text.textContent = "状态未知";
+  }
+}
+
+async function reconnectWorkstation() {
+  const btn = document.getElementById("ws-reconnect");
+  const text = document.querySelector("#workstation-status .ws-text");
+  if (btn) btn.disabled = true;
+  if (text) text.textContent = "重连中...";
+
+  try {
+    await requestJson("/api/workstation/reconnect", { method: "POST" });
+    await loadWorkstationStatus();
+  } catch (e) {
+    if (text) text.textContent = "重连失败";
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function testWorkstationSsh() {
+  const btn = document.getElementById("ws-test-ssh");
+  const text = document.querySelector("#workstation-status .ws-text");
+  if (btn) btn.disabled = true;
+  if (text) text.textContent = "测试中...";
+
+  try {
+    const data = await requestJson("/api/workstation/test-ssh", { method: "POST" });
+    if (data.success) {
+      if (text) text.textContent = "SSH 连接成功";
+    } else {
+      if (text) text.textContent = "SSH 失败: " + (data.error || "unknown");
+    }
+    await loadWorkstationStatus();
+  } catch (e) {
+    if (text) text.textContent = "测试失败";
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 function bindEvents()
   loadSystemVersion(); {
   const composer = byId("experiment-composer") || byId("research-form");
@@ -2313,6 +2381,8 @@ function bindEvents()
   byId("submit-custom-case")?.addEventListener("click", submitCustomCase);
   byId("open-model-settings")?.addEventListener("click", () => openDialog("model-settings"));
   byId("open-target-settings")?.addEventListener("click", () => openDialog("target-settings"));
+  byId("ws-reconnect")?.addEventListener("click", reconnectWorkstation);
+  byId("ws-test-ssh")?.addEventListener("click", testWorkstationSsh);
   byId("open-custom-case")?.addEventListener("click", () => openDialog("custom-case-drawer"));
   byId("cancel-operation")?.addEventListener("click", cancelActiveOperation);
   byId("retry-operation")?.addEventListener("click", retryActiveOperation);
@@ -2356,6 +2426,8 @@ async function init() {
   loadExecutionTargets().catch((error) => {
     renderError("执行平台", error);
   });
+  loadWorkstationStatus();
+  setInterval(loadWorkstationStatus, 60000);
   await Promise.all([operationRecovery, modelLoad, experimentRecovery]);
   refreshComposer();
 }

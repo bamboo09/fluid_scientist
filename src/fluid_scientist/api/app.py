@@ -1435,6 +1435,109 @@ def create_app(
     def list_execution_targets() -> tuple[TargetCapabilityStatus, ...]:
         return tuple(capability_cache.get(target) for target in configured_targets)
 
+    @application.get("/api/workstation/status")
+    def get_workstation_status() -> dict:
+        """Return workstation connection status for frontend display."""
+        ws_settings = runtime_settings.workstation
+        host = ws_settings.hosts[0] if ws_settings.hosts else None
+
+        status = {
+            "connected": False,
+            "host": host,
+            "username": ws_settings.username,
+            "port": ws_settings.port,
+            "foam_version": None,
+            "cpu_count": None,
+            "memory_gb": None,
+            "disk_free_gb": None,
+            "last_checked": None,
+            "error": None,
+        }
+
+        for target in configured_targets:
+            if target.kind == "workstation_openfoam":
+                cap = capability_cache.get(target)
+                status["connected"] = cap.available
+                status["foam_version"] = cap.foam_version
+                status["cpu_count"] = cap.cpu_count
+                status["memory_gb"] = cap.memory_gb
+                status["disk_free_gb"] = cap.disk_free_gb
+                status["last_checked"] = cap.checked_at
+                if not cap.available and cap.reason:
+                    status["error"] = cap.reason
+                break
+
+        return status
+
+    @application.post("/api/workstation/reconnect")
+    def reconnect_workstation() -> dict:
+        """Force a fresh doctor() call to reconnect the workstation."""
+        ws_settings = runtime_settings.workstation
+        host = ws_settings.hosts[0] if ws_settings.hosts else None
+        for target in configured_targets:
+            if target.kind == "workstation_openfoam":
+                cap = capability_cache.get(target, force_refresh=True)
+                return {
+                    "connected": cap.available,
+                    "host": host,
+                    "username": ws_settings.username,
+                    "port": ws_settings.port,
+                    "foam_version": cap.foam_version,
+                    "cpu_count": cap.cpu_count,
+                    "memory_gb": cap.memory_gb,
+                    "disk_free_gb": cap.disk_free_gb,
+                    "last_checked": cap.checked_at,
+                    "error": None
+                    if cap.available
+                    else (cap.reason or "Connection failed"),
+                }
+        return {
+            "connected": False,
+            "host": host,
+            "error": "No workstation target configured",
+        }
+
+    @application.post("/api/workstation/test-ssh")
+    def test_workstation_ssh() -> dict:
+        """Run a quick SSH test to verify workstation connectivity."""
+        import subprocess
+
+        ws = runtime_settings.workstation
+        if not ws.hosts or not ws.username:
+            return {"success": False, "error": "Workstation not configured"}
+
+        host = ws.hosts[0]
+        cmd = [
+            "ssh",
+            "-p",
+            str(ws.port),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={ws.known_hosts_file}",
+            "-o",
+            "ConnectTimeout=10",
+        ]
+        if ws.identity_file:
+            cmd.extend(["-i", ws.identity_file])
+        cmd.append(f"{ws.username}@{host}")
+        cmd.extend(["echo", "SSH_OK"])
+
+        try:
+            result = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=15
+            )
+            success = result.returncode == 0 and "SSH_OK" in result.stdout
+            return {
+                "success": success,
+                "host": host,
+                "error": None if success else result.stderr[:200],
+            }
+        except Exception as e:  # noqa: BLE001
+            return {"success": False, "host": host, "error": str(e)[:200]}
+
 
     # ------------------------------------------------------------------
     # Candidate template library
