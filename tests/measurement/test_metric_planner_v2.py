@@ -21,7 +21,6 @@ from fluid_scientist.measurement.planner import (
 )
 from fluid_scientist.research.models import ResearchPhysicsSpec
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

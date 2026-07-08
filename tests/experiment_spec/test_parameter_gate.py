@@ -15,8 +15,8 @@ from fastapi.testclient import TestClient
 from fluid_scientist.adapters.sql_repository import SQLWorkflowRepository
 from fluid_scientist.api.app import create_app
 from fluid_scientist.experiment_spec.compilation import (
-    MissingRequiredParameterError,
     _REQUIRED_PARAMETERS,
+    MissingRequiredParameterError,
     compile_spec,
     validate_required_parameters,
 )
@@ -31,7 +31,6 @@ from fluid_scientist.experiment_spec.models import (
 )
 from fluid_scientist.experiment_spec.native_compiler import compile_spec_native
 from fluid_scientist.ports import StoredExperimentSpec
-
 
 # ---------------------------------------------------------------------------
 # Helpers

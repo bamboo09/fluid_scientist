@@ -447,10 +447,7 @@ class MetricExecutor:
                 fs = 1.0 / dt
                 freqs, psd = welch(detrended_np, fs=fs)
                 # Skip DC component (index 0)
-                if len(psd) > 1:
-                    peak_idx = 1 + int(np.argmax(psd[1:]))
-                else:
-                    peak_idx = 0
+                peak_idx = 1 + int(np.argmax(psd[1:])) if len(psd) > 1 else 0
                 frequency = float(freqs[peak_idx])
                 magnitudes = psd
                 spectral_method = "welch"

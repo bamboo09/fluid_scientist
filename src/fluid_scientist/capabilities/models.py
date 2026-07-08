@@ -125,7 +125,7 @@ class CodeExtensionSpec(BaseModel):
 
     def transition_to(
         self, new_state: str, comment: str | None = None
-    ) -> "CodeExtensionSpec":
+    ) -> CodeExtensionSpec:
         if not self.can_transition_to(new_state):
             raise ValueError(f"Invalid transition: {self.state} → {new_state}")
         return self.model_copy(

@@ -11,7 +11,8 @@ Verifies:
   8. TimeSamplingSpec has new physical context fields
   9. MeasurementPlan has probes, lines, storage_estimate fields
   10. StorageEstimate model works correctly
-  11. MetricPlanner._generate_measurement_plan uses dynamic time sampling when physics_params provided
+  11. MetricPlanner._generate_measurement_plan uses dynamic time sampling
+      when physics_params provided
   12. Velocity uniformity generates multiple functionObjects (mean + magnitude for CV)
   13. Storage estimate is populated and non-zero
 """
@@ -34,7 +35,6 @@ from fluid_scientist.measurement.time_sampler import (
     TimeSampler,
     estimate_vortex_shedding_frequency,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

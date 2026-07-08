@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from unittest.mock import patch
 
 import pytest
@@ -28,11 +27,9 @@ from fluid_scientist.experiment_spec.native_compiler import (
     CavityFlowCompiler,
     CompilerRegistry,
     CylinderFlowCompiler,
-    ExperimentCompiler,
     PipeFlowCompiler,
     compile_spec_native,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

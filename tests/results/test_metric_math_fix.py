@@ -24,7 +24,6 @@ from fluid_scientist.results.metric_executor import (
 )
 from fluid_scientist.results.models import SimulationData
 
-
 # --------------------------------------------------------------------------- #
 # Helper: create synthetic Strouhal data with a real time column
 # --------------------------------------------------------------------------- #

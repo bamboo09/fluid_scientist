@@ -25,7 +25,6 @@ from fluid_scientist.results.metric_executor import (
 )
 from fluid_scientist.results.models import MetricResult, SimulationData
 
-
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
@@ -36,8 +35,12 @@ def _make_pressure_data(
     outlet_values: list[float] | None = None,
 ) -> SimulationData:
     """Create SimulationData with inlet/outlet pressure surface field values."""
-    inlet_values = inlet_values if inlet_values is not None else [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
-    outlet_values = outlet_values if outlet_values is not None else [20.0, 20.0, 20.0, 20.0, 20.0, 20.0]
+    inlet_values = (
+        inlet_values if inlet_values is not None else [100.0, 100.0, 100.0, 100.0, 100.0, 100.0]
+    )
+    outlet_values = (
+        outlet_values if outlet_values is not None else [20.0, 20.0, 20.0, 20.0, 20.0, 20.0]
+    )
     return SimulationData(
         surface_field_values={
             "pressure_inlet_average": inlet_values,
@@ -555,7 +558,9 @@ class TestExecuteAll:
 
         assert len(results) == 4
         metric_ids = {r.metric_id for r in results}
-        assert metric_ids == {"drag_coefficient", "lift_coefficient", "residual_tolerance", "max_courant"}
+        assert metric_ids == {
+            "drag_coefficient", "lift_coefficient", "residual_tolerance", "max_courant"
+        }
 
     def test_execute_all_with_definitions(self):
         """execute_all passes metric definitions."""
@@ -695,7 +700,9 @@ class TestScientificAnalyzerLayers:
         # Should NOT contain missing metric
         assert not any("missing_metric" in c for c in fact_contents)
 
-    def test_numerical_credibility_contains_failed_checks(self, sample_results, sample_simulation_data):
+    def test_numerical_credibility_contains_failed_checks(
+        self, sample_results, sample_simulation_data
+    ):
         """Test 16: Numerical credibility layer contains failed quality checks."""
         results_with_failure = [
             MetricResult(
@@ -704,7 +711,11 @@ class TestScientificAnalyzerLayers:
                 unit="dimensionless",
                 confidence="medium",
                 quality_checks=[
-                    {"name": "below_tolerance", "passed": False, "message": "Max residual: 1.00e-03"},
+                    {
+                        "name": "below_tolerance",
+                        "passed": False,
+                        "message": "Max residual: 1.00e-03",
+                    },
                 ],
             ),
         ]
@@ -729,7 +740,9 @@ class TestScientificAnalyzerLayers:
         assert "drag_coefficient" in comp_content
         assert "relative_error" in comp_content
 
-    def test_physical_interpretation_contains_reynolds_regime(self, sample_results, sample_simulation_data):
+    def test_physical_interpretation_contains_reynolds_regime(
+        self, sample_results, sample_simulation_data
+    ):
         """Test 18: Physical interpretation layer contains Reynolds number regime."""
         analyzer = ScientificAnalyzer()
         analysis = analyzer.analyze(sample_results, sample_simulation_data)
@@ -739,7 +752,9 @@ class TestScientificAnalyzerLayers:
         # Re=5000 is turbulent
         assert any("湍流" in c for c in interp_contents)
 
-    def test_recommendations_suggest_recompile_for_missing(self, sample_results, sample_simulation_data):
+    def test_recommendations_suggest_recompile_for_missing(
+        self, sample_results, sample_simulation_data
+    ):
         """Test 19: Recommendations layer suggests recompile for missing data."""
         analyzer = ScientificAnalyzer()
         analysis = analyzer.analyze(sample_results, sample_simulation_data)
@@ -816,13 +831,18 @@ class TestScientificAnalyzerLayers:
         analysis = analyzer.analyze(sample_results, sample_simulation_data)
 
         assert len(analysis.limitations) > 0
-        assert any("missing_metric" in l for l in analysis.limitations)
+        assert any("missing_metric" in item for item in analysis.limitations)
 
     def test_recommendations_for_high_courant(self, sample_simulation_data):
         """Recommendations include timestep reduction when Courant > 1."""
         data = SimulationData(max_courant=1.5)
         results = [
-            MetricResult(metric_id="max_courant", value=1.5, unit="dimensionless", confidence="medium"),
+            MetricResult(
+                metric_id="max_courant",
+                value=1.5,
+                unit="dimensionless",
+                confidence="medium",
+            ),
         ]
         analyzer = ScientificAnalyzer()
         analysis = analyzer.analyze(results, data)

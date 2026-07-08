@@ -24,19 +24,16 @@ from fluid_scientist.experiment_spec.models import (
 )
 from fluid_scientist.research.conflict_detector import (
     ConflictDetector,
-    ParameterConflict,
 )
 from fluid_scientist.research.intent_engine import IntentEngine
 from fluid_scientist.research.models import (
     ConfirmedFact,
     ExtractedFact,
     ResearchContext,
-    ResearchSession,
 )
 from fluid_scientist.research.orchestrator import ResearchOrchestrator
 from fluid_scientist.research.scope_engine import ScopeEngine
 from fluid_scientist.research.session_store import SessionStore
-
 
 # --------------------------------------------------------------------------- #
 # Helpers

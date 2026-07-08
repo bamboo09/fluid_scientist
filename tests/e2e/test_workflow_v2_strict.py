@@ -128,7 +128,7 @@ def test_strict_complex_intent_extracts_phenomena(client, project_id):
 
     # The assessment should have extracted multiple target phenomena
     # Check that the questions mention relevant physics
-    questions_text = " ".join(q.get("text", "") for q in result.get("questions", []))
+    " ".join(q.get("text", "") for q in result.get("questions", []))
     assert len(result["questions"]) > 0
 
 
@@ -284,8 +284,7 @@ def test_strict_native_compile_no_compile_plan(client, project_id):
 def test_strict_unknown_metric_triggers_missing_capability():
     """Unknown metric must create MissingCapability and block compilation."""
     from fluid_scientist.capabilities.resolver import CapabilityResolver
-    from fluid_scientist.capabilities.models import MissingCapability
-    from fluid_scientist.measurement.planner import MetricPlanner, UnknownMetric
+    from fluid_scientist.measurement.planner import MetricPlanner
 
     # Create a metric plan with unknown metrics
     planner = MetricPlanner()
@@ -324,7 +323,6 @@ def test_strict_parameter_modification_creates_version(client, project_id):
     from fluid_scientist.experiment_spec.dependency import propagate_change
     from fluid_scientist.experiment_spec.models import (
         ExperimentSpec,
-        ExperimentStatus,
     )
 
     result = _create_session_and_get_draft(
@@ -437,7 +435,11 @@ def test_strict_measurement_compiler_validates():
         ],
         time_sampling=TimeSamplingSpec(start_time=10.0, end_time=100.0, interval=0.01),
         metric_bindings=[
-            MetricBinding(metric_id="pressure_drop", source="inlet_section", function_object="pressure_inlet"),
+            MetricBinding(
+                metric_id="pressure_drop",
+                source="inlet_section",
+                function_object="pressure_inlet",
+            ),
         ],
     )
 

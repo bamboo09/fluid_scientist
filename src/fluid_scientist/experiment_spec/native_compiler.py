@@ -27,7 +27,6 @@ from fluid_scientist.experiment_spec.models import (
     ExperimentStatus,
 )
 
-
 # ---------------------------------------------------------------------------
 # MeasurementPlan integration helpers
 # ---------------------------------------------------------------------------
@@ -691,7 +690,7 @@ def compile_spec_native(
     compiler = registry.resolve(spec)
     if compiler is None:
         raise ValueError(
-            f"no native compiler registered for spec with parameters: "
+            "no native compiler registered for spec with parameters: "
             + ", ".join(sorted(p.parameter_id for p in spec.parameters))
         )
 

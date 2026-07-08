@@ -29,7 +29,6 @@ from fluid_scientist.experiment_spec.models import (
 )
 from fluid_scientist.experiment_spec.native_compiler import PipeFlowCompiler
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

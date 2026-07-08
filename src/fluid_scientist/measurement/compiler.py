@@ -14,7 +14,6 @@ from fluid_scientist.measurement.models import (
     FunctionObjectSpec,
     FunctionObjectType,
     MeasurementPlan,
-    MetricBinding,
 )
 
 

@@ -164,7 +164,15 @@ class ParameterProvenance(StrictModel):
     last_modified_by: Literal["system", "user", "expert"] | None = None
     evidence: str | None = None
     # NEW fields for Commit 3
-    source_type: Literal["user", "derived", "system_recommended", "template_default", "literature", "generated_by_code", "unknown"] = "unknown"
+    source_type: Literal[
+        "user",
+        "derived",
+        "system_recommended",
+        "template_default",
+        "literature",
+        "generated_by_code",
+        "unknown",
+    ] = "unknown"
     research_session_id: str | None = None
     turn_id: str | None = None
     source_text: str | None = None

@@ -23,8 +23,6 @@ from fluid_scientist.measurement.models import (
     MeasurementPlan,
 )
 from fluid_scientist.results.ingestor import OpenFOAMResultIngestor
-from fluid_scientist.results.models import SimulationData
-
 
 # --------------------------------------------------------------------------- #
 # Fixtures

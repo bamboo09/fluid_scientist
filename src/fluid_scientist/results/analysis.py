@@ -93,14 +93,21 @@ class ScientificAnalyzer:
             for check in result.quality_checks:
                 if not check.get("passed", True):
                     credibility_issues.append(
-                        f"{result.metric_id}: {check.get('name', 'unknown')} — {check.get('message', '')}"
+                        f"{result.metric_id}: {check.get('name', 'unknown')} — "
+                        f"{check.get('message', '')}"
                     )
 
         if simulation_data.max_courant and simulation_data.max_courant > 1.0:
-            credibility_issues.append(f"Max Courant number {simulation_data.max_courant:.4f} exceeds 1.0")
+            credibility_issues.append(
+                f"Max Courant number {simulation_data.max_courant:.4f} exceeds 1.0"
+            )
 
-        if simulation_data.final_continuity_error and abs(simulation_data.final_continuity_error) > 1e-4:
-            credibility_issues.append(f"Continuity error {simulation_data.final_continuity_error:.2e} is high")
+        if simulation_data.final_continuity_error and abs(
+            simulation_data.final_continuity_error
+        ) > 1e-4:
+            credibility_issues.append(
+                f"Continuity error {simulation_data.final_continuity_error:.2e} is high"
+            )
 
         if credibility_issues:
             analysis.numerical_credibility.append(AnalysisLayer(

@@ -1,0 +1,10 @@
+OpenFOAM-13
+Time = 0.1
+Ux: initial residual = 0.001, final residual = 0.0001
+continuity error = 1.5e-06
+Courant Number mean: 0.15 max: 0.85
+Time = 0.2
+Ux: initial residual = 0.0005, final residual = 0.00005
+continuity error = 8e-07
+Courant Number mean: 0.12 max: 0.80
+solution converged

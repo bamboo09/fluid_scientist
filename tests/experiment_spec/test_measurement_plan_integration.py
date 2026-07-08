@@ -12,8 +12,6 @@ from __future__ import annotations
 import io
 import tarfile
 
-import pytest
-
 from fluid_scientist.experiment_spec.models import (
     Criticality,
     ExperimentSpec,
@@ -35,7 +33,6 @@ from fluid_scientist.measurement.models import (
     MeasurementPlan,
     TimeSamplingSpec,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -337,7 +334,7 @@ class TestMeasurementPlanFOsInControlDict:
         lines = cd.split("\n")
         in_block = False
         type_found = None
-        for i, line in enumerate(lines):
+        for _i, line in enumerate(lines):
             stripped = line.strip()
             if stripped == "mp_force_coeffs":
                 in_block = True

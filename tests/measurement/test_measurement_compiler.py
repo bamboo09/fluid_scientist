@@ -11,7 +11,6 @@ from __future__ import annotations
 import pytest
 
 from fluid_scientist.measurement.compiler import (
-    CompilationIssue,
     MeasurementCompilationResult,
     _render_function_object,
     compile_measurement_plan,
@@ -22,12 +21,10 @@ from fluid_scientist.measurement.models import (
     FunctionObjectType,
     MeasurementPlan,
     MetricBinding,
-    ProbeSpec,
     SpatialSamplingSpec,
     SpatialSamplingType,
     TimeSamplingSpec,
 )
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

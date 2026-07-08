@@ -2060,10 +2060,8 @@ def create_app(
         if spec.metrics:
             from fluid_scientist.measurement.models import MeasurementPlan
 
-            try:
+            with contextlib.suppress(Exception):
                 measurement_plan = MeasurementPlan.model_validate(spec.metrics[0])
-            except Exception:
-                pass
 
         # Ingest results
         ingestor = OpenFOAMResultIngestor()
@@ -2096,7 +2094,7 @@ def create_app(
         project_id: str,
         experiment_id: str,
         case_path: str = Body(..., embed=True),
-        metric_ids: list[str] | None = Body(None, embed=True),
+        metric_ids: Annotated[list[str] | None, Body(embed=True)] = None,
     ) -> dict:
         """Calculate metrics from simulation results.
 
@@ -2121,10 +2119,8 @@ def create_app(
         if spec.metrics:
             from fluid_scientist.measurement.models import MeasurementPlan
 
-            try:
+            with contextlib.suppress(Exception):
                 measurement_plan = MeasurementPlan.model_validate(spec.metrics[0])
-            except Exception:
-                pass
 
         # Ingest
         ingestor = OpenFOAMResultIngestor()
@@ -2204,9 +2200,9 @@ def create_app(
         """
         from pathlib import Path
 
+        from fluid_scientist.results.analysis import ScientificAnalyzer
         from fluid_scientist.results.ingestor import OpenFOAMResultIngestor
         from fluid_scientist.results.metric_executor import MetricExecutor
-        from fluid_scientist.results.analysis import ScientificAnalyzer
 
         stored_spec = workflow_repository.load_experiment_spec(experiment_id)
         if stored_spec is None or stored_spec.project_id != project_id:
@@ -2222,10 +2218,8 @@ def create_app(
         if spec.metrics:
             from fluid_scientist.measurement.models import MeasurementPlan
 
-            try:
+            with contextlib.suppress(Exception):
                 measurement_plan = MeasurementPlan.model_validate(spec.metrics[0])
-            except Exception:
-                pass
 
         # Step 1: Ingest
         ingestor = OpenFOAMResultIngestor()

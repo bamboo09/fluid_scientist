@@ -293,12 +293,17 @@ class MetricPlanner:
 
         # 3. 补充对比指标（若尚未包含且物理规格中存在流态信息）
         for cm in self._COMPARISON_METRICS:
-            if cm not in known_metrics and cm in self._METRIC_DEFINITIONS:
-                # 当流态相关时添加 reynolds_number 作为对比指标
-                if cm == "reynolds_number" and physics_spec and physics_spec.flow_regime:
-                    comparison_metrics.append(cm)
-                    metric_definitions[cm] = self._METRIC_DEFINITIONS[cm]
-                    known_metrics.add(cm)
+            # 当流态相关时添加 reynolds_number 作为对比指标
+            if (
+                cm not in known_metrics
+                and cm in self._METRIC_DEFINITIONS
+                and cm == "reynolds_number"
+                and physics_spec
+                and physics_spec.flow_regime
+            ):
+                comparison_metrics.append(cm)
+                metric_definitions[cm] = self._METRIC_DEFINITIONS[cm]
+                known_metrics.add(cm)
 
         # 4. 生成推理摘要
         if core_metrics:
@@ -338,7 +343,9 @@ class MetricPlanner:
             if physics_spec.operating_conditions:
                 physics_params["velocity"] = physics_spec.operating_conditions.get("inlet_velocity")
             if physics_spec.material_facts:
-                physics_params["kinematic_viscosity"] = physics_spec.material_facts.get("kinematic_viscosity")
+                physics_params["kinematic_viscosity"] = (
+                    physics_spec.material_facts.get("kinematic_viscosity")
+                )
             physics_params["is_transient"] = (
                 physics_spec.temporal_type == "transient"
                 if physics_spec.temporal_type

@@ -65,7 +65,11 @@ class TimeSampler:
 
             # Respect max Courant
             if ctx.kinematic_viscosity and ctx.kinematic_viscosity > 0:
-                dt_courant = ctx.max_courant * (ctx.characteristic_length / 10) ** 2 / ctx.kinematic_viscosity
+                dt_courant = (
+                    ctx.max_courant
+                    * (ctx.characteristic_length / 10) ** 2
+                    / ctx.kinematic_viscosity
+                )
                 if dt_courant < sampling_interval:
                     sampling_interval = dt_courant
 

@@ -443,13 +443,11 @@ class OpenFOAMResultIngestor:
                         continue
                     if header:
                         values = line.split()
-                        for name, val in zip(header, values):
+                        for name, val in zip(header, values, strict=False):
                             if name not in data.force_coefficients:
                                 data.force_coefficients[name] = []
-                            try:
+                            with contextlib.suppress(ValueError):
                                 data.force_coefficients[name].append(float(val))
-                            except ValueError:
-                                pass
             except Exception:
                 pass
 
@@ -487,10 +485,8 @@ class OpenFOAMResultIngestor:
                             key = f"force_{i}"
                             if key not in data.forces:
                                 data.forces[key] = []
-                            try:
+                            with contextlib.suppress(ValueError):
                                 data.forces[key].append(float(v))
-                            except ValueError:
-                                pass
                 except Exception:
                     pass
 
@@ -529,10 +525,8 @@ class OpenFOAMResultIngestor:
                         values = line.split()
                         # Take the last value or the magnitude
                         if values:
-                            try:
+                            with contextlib.suppress(ValueError):
                                 data.probe_data[key].append(float(values[-1]))
-                            except ValueError:
-                                pass
                 except Exception:
                     pass
 
@@ -570,12 +564,10 @@ class OpenFOAMResultIngestor:
                             continue
                         values = line.split()
                         if values:
-                            try:
+                            with contextlib.suppress(ValueError):
                                 data.surface_field_values[key].append(
                                     float(values[-1]),
                                 )
-                            except ValueError:
-                                pass
                 except Exception:
                     pass
 
@@ -610,10 +602,8 @@ class OpenFOAMResultIngestor:
                             continue
                         values = line.split()
                         if values:
-                            try:
+                            with contextlib.suppress(ValueError):
                                 data.field_averages[name] = float(values[-1])
-                            except ValueError:
-                                pass
                 except Exception:
                     pass
 
@@ -683,22 +673,17 @@ class OpenFOAMResultIngestor:
 
             # Check if this functionObject has data
             has_data = False
-            if fo_type == "forceCoeffs" and data.force_coefficients:
-                has_data = True
-            elif fo_type == "forces" and data.forces:
-                has_data = True
-            elif fo_type == "probes" and data.probe_data:
-                has_data = True
-            elif fo_type == "surfaceFieldValue" and data.surface_field_values:
-                has_data = True
-            elif fo_type == "fieldAverage" and data.field_averages:
+            if (
+                fo_type == "forceCoeffs" and data.force_coefficients
+                or fo_type == "forces" and data.forces
+                or fo_type == "probes" and data.probe_data
+                or fo_type == "surfaceFieldValue" and data.surface_field_values
+                or fo_type == "fieldAverage" and data.field_averages
+            ):
                 has_data = True
 
             if not has_data:
-                if fo.name:
-                    missing_entry = f"{fo.name} ({fo_type})"
-                else:
-                    missing_entry = fo_type
+                missing_entry = f"{fo.name} ({fo_type})" if fo.name else fo_type
                 # Avoid duplicate entries (may already be recorded by
                 # _parse_post_processing when the directory was absent)
                 if missing_entry not in data.missing_data:

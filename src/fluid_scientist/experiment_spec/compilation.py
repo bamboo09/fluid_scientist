@@ -19,7 +19,6 @@ import sys
 import warnings
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import uuid4
 
 from fluid_scientist import __version__ as _PACKAGE_VERSION
 from fluid_scientist.experiment_planning.compilers import CompiledCase, compile_plan

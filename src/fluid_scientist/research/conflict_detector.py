@@ -126,7 +126,8 @@ class ConflictDetector:
                         "kinematic_viscosity": viscosity,
                     },
                     resolution_suggestion=(
-                        f"请确认：是保持 Re={re}（则速度应调整为 {re * viscosity / diameter:.4f} m/s），"
+                        f"请确认：是保持 Re={re}（则速度应调整为 "
+                        f"{re * viscosity / diameter:.4f} m/s），"
                         f"还是保持速度 U={velocity} m/s（则 Re={calculated_re:.1f}）？"
                     ),
                 )
@@ -171,7 +172,8 @@ class ConflictDetector:
                         "diameter": diameter,
                     },
                     resolution_suggestion=(
-                        f"请确认：是保持质量流量（则速度应调整为 {mass_flow / (density * area):.4f} m/s），"
+                        f"请确认：是保持质量流量（则速度应调整为 "
+                        f"{mass_flow / (density * area):.4f} m/s），"
                         f"还是保持速度（则质量流量为 {calculated_mdot:.6f}）？"
                     ),
                 )

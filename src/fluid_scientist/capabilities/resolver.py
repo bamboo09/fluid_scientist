@@ -11,7 +11,7 @@ from fluid_scientist.capabilities.models import (
     CodeExtensionSpec,
     MissingCapability,
 )
-from fluid_scientist.measurement.planner import MetricPlan, UnknownMetric
+from fluid_scientist.measurement.planner import MetricPlan
 
 
 def detect_missing_capabilities_from_metrics(

@@ -9,7 +9,6 @@ functions (compile_cylinder_plan / compile_cavity_plan).
 from __future__ import annotations
 
 import io
-import json
 import tarfile
 from unittest.mock import patch
 
@@ -32,7 +31,6 @@ from fluid_scientist.experiment_spec.native_compiler import (
     CavityFlowCompiler,
     CylinderFlowCompiler,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers

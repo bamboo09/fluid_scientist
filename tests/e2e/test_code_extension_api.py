@@ -5,10 +5,14 @@ exposed via:
   GET    /api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions
   POST   /api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions
   GET    /api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/{extension_id}
-  POST   /api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/{extension_id}/approve
-  POST   /api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/{extension_id}/reject
-  POST   /api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/{extension_id}/register
-  GET    /api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/{extension_id}/history
+  POST   /api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/
+         {extension_id}/approve
+  POST   /api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/
+         {extension_id}/reject
+  POST   /api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/
+         {extension_id}/register
+  GET    /api/projects/{project_id}/experiment-specs/{experiment_id}/code-extensions/
+         {extension_id}/history
 """
 
 from __future__ import annotations
@@ -28,7 +32,6 @@ from fluid_scientist.experiment_spec.models import (
     ResearchSpec,
 )
 from fluid_scientist.ports import StoredExperimentSpec
-
 
 # ---------------------------------------------------------------------------
 # Fixtures

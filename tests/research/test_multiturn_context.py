@@ -13,7 +13,6 @@ from fluid_scientist.research.orchestrator import ResearchOrchestrator
 from fluid_scientist.research.scope_engine import ScopeEngine
 from fluid_scientist.research.session_store import SessionStore
 
-
 # --------------------------------------------------------------------------- #
 # Helper
 # --------------------------------------------------------------------------- #
@@ -242,7 +241,7 @@ def test_multiturn_session_context_injection() -> None:
     assert water_facts[0].value == "water"
 
     # 第二轮：改成空气
-    result2 = orchestrator.handle_turn(session_id, "介质改成空气")
+    orchestrator.handle_turn(session_id, "介质改成空气")
 
     # 验证冲突被检测并存储
     session2 = store.get(session_id)

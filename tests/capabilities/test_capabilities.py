@@ -23,7 +23,6 @@ from fluid_scientist.capabilities.resolver import (
 from fluid_scientist.measurement.models import MeasurementPlan
 from fluid_scientist.measurement.planner import MetricPlan, UnknownMetric
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -302,7 +301,7 @@ class TestDetectMissingCapabilities:
         cap_ids = [c.capability_id for c in caps]
         assert len(set(cap_ids)) == 3  # all unique
         # Each should reference its own metric
-        for cap, expected_name in zip(caps, ["metric_a", "metric_b", "metric_c"]):
+        for cap, expected_name in zip(caps, ["metric_a", "metric_b", "metric_c"], strict=False):
             assert expected_name in cap.capability_id
             assert cap.related_metric_ids == [expected_name]
 
