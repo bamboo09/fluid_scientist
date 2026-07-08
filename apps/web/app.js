@@ -27,6 +27,9 @@ import {
   plannedResultUrl,
 } from "./result-state.js";
 
+// Workflow mode: "v2" (new ExperimentSpec flow) or "legacy" (old ExperimentPlan flow)
+const workflowMode = "v2";
+
 const $ = (selector) => document.querySelector(selector);
 const byId = (id) => document.getElementById(id);
 const stream = byId("conversation-stream");
@@ -59,8 +62,17 @@ async function loadSystemVersion() {
       if (badge) {
         const sha = info.git_commit || 'unknown';
         const wf = info.workflow || 'v2';
-        badge.textContent = Workflow  · ;
+        badge.textContent = `Workflow ${wf} · ${sha.substring(0, 7)}`;
       }
+      // Populate footer
+      const wfMode = document.getElementById('wf-mode');
+      if (wfMode) wfMode.textContent = (info.workflow || 'v2').toUpperCase() + ' Beta';
+      const wfGit = document.getElementById('wf-git');
+      if (wfGit) wfGit.textContent = info.git_commit ? info.git_commit.substring(0, 12) : '—';
+      const wfSchema = document.getElementById('wf-schema');
+      if (wfSchema) wfSchema.textContent = info.schema_version || '—';
+      const wfApi = document.getElementById('wf-api');
+      if (wfApi) wfApi.textContent = info.api_version || '—';
     }
   } catch (e) {
     // Version display is non-critical
@@ -602,8 +614,14 @@ const loadOperationResult = createResultLoader({
     currentPlan = response;
     currentCompilation = null;
     persist(storageKeys.planId, response.plan_id);
-    renderPlanCard(response);
-    setStatus("实验计划已生成。请审阅假设、参数和局限后确认。");
+    if (workflowMode === "legacy") {
+      renderPlanCard(response);
+      setStatus("实验计划已生成。请审阅假设、参数和局限后确认。");
+    } else {
+      // V2 mode: plan is intermediate, spec workbench is the main UI
+      // Plan creation triggers spec migration if not already done
+      setStatus("实验计划已生成，正在创建结构化实验规格...");
+    }
   },
 });
 
@@ -2263,6 +2281,10 @@ function submissionJob(response) {
 }
 
 async function confirmAndSubmitPlan(button) {
+  if (workflowMode !== "legacy") {
+    console.warn("confirmAndSubmitPlan is deprecated in V2 workflow; use ExperimentSpec workflow instead");
+    return;
+  }
   // 如果存在研究会话，使用新的参数工作台流程，无需旧的“确认并提交”流程
   if (currentResearchSession) {
     return; // 新流程不需要这个按钮
@@ -2615,7 +2637,7 @@ async function restoreActiveExperiment() {
         return;
       }
       currentPlan = restoredPlan;
-      if (!renderedPlanRefs.has(planId)) renderPlanCard(currentPlan);
+      if (workflowMode === "legacy" && !renderedPlanRefs.has(planId)) renderPlanCard(currentPlan);
       const approvedArtifact = currentProject.approved_artifacts?.[planId];
       if (approvedArtifact) {
         currentCompilation = {
