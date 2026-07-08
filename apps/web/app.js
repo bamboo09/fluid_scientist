@@ -1496,22 +1496,95 @@ async function updateSpecParameter(parameterId, newValue) {
 }
 
 function updateParameterRowInPlace(parameterId, spec) {
-  // 只更新参数行，不重建整个工作台
-  for (const p of spec.parameters) {
-    const existingRow = document.querySelector(
-      `.spec-param-row[data-param-id="${p.parameter_id}"]`
-    );
-    if (existingRow) {
-      const freshRow = renderParameterRow(p, spec);
-      existingRow.replaceWith(freshRow);
+  const param = spec.parameters.find(p => p.parameter_id === parameterId);
+  if (!param) return;
+
+  const row = document.querySelector(
+    `.spec-param-row[data-param-id="${parameterId}"]`
+  );
+  if (!row) return;
+
+  const editable = param.editable && isSpecEditable(spec);
+  row.dataset.editable = String(editable);
+
+  // Update input value without recreating the element
+  const input = row.querySelector("input");
+  if (input && editable) {
+    // Only update if the value actually changed and input doesn't have focus
+    // (to avoid disrupting user typing)
+    if (document.activeElement !== input) {
+      input.value = param.value ?? "";
+    }
+  } else if (input && !editable) {
+    // Replace input with span
+    const valueSpan = document.createElement("span");
+    valueSpan.textContent = text(param.value);
+    input.replaceWith(valueSpan);
+  } else if (!input && editable) {
+    // Replace span with input
+    const valueContainer = row.querySelector(".spec-param-value");
+    if (valueContainer) {
+      const span = valueContainer.querySelector("span");
+      if (span) {
+        const newInput = document.createElement("input");
+        newInput.type = param.data_type === "integer" ? "number" : "text";
+        newInput.value = param.value ?? "";
+        newInput.placeholder = "未设置";
+        newInput.addEventListener("input", () => markParameterDirty(param.parameter_id, newInput.value, param.unit));
+        span.replaceWith(newInput);
+      }
     }
   }
 
-  // 更新版本号
+  // Update status chip
+  const statusChip = row.querySelector(".spec-chip-status");
+  if (statusChip) {
+    statusChip.dataset.status = param.status;
+    statusChip.textContent = paramStatusLabels[param.status] || param.status || "—";
+  }
+
+  // Update source chip
+  const sourceChip = row.querySelector(".spec-chip-source");
+  if (sourceChip) {
+    sourceChip.textContent = sourceLabels[param.source?.type] || param.source?.type || "—";
+  }
+
+  // Update criticality chip
+  const critChip = row.querySelector(".spec-chip-criticality");
+  if (critChip) {
+    critChip.dataset.criticality = param.criticality;
+    critChip.textContent = criticalityLabels[param.criticality] || param.criticality || "—";
+  }
+
+  // Update or add reason display
+  const existingReason = row.querySelector(".spec-param-reason");
+  if (param.source?.reason) {
+    if (existingReason) {
+      existingReason.textContent = param.source.reason;
+      if (param.source.confidence) {
+        existingReason.dataset.confidence = param.source.confidence;
+      }
+    } else {
+      const meta = row.querySelector(".spec-param-meta");
+      if (meta) {
+        const reasonEl = document.createElement("div");
+        reasonEl.className = "spec-param-reason";
+        reasonEl.textContent = param.source.reason;
+        if (param.source.confidence) {
+          reasonEl.dataset.confidence = param.source.confidence;
+        }
+        meta.append(reasonEl);
+      }
+    }
+  } else if (existingReason) {
+    existingReason.remove();
+  }
+
+  // Update version label
   const versionLabel = document.querySelector(".spec-version-label");
   if (versionLabel) versionLabel.textContent = `v${spec.experiment_version}`;
 
-  // 更新控件状态
+  // Update controls
   updateSpecControls(spec);
 }
 
@@ -1611,9 +1684,16 @@ async function applyPendingParameterChanges() {
     currentSpec = response;
     pendingParameterChanges.clear();
 
-    // Partial update: refresh all parameter rows
-    for (const p of response.parameters) {
-      updateParameterRowInPlace(p.parameter_id, response);
+    // Partial update: only refresh changed parameter rows
+    const changedIds = new Set(updates.map(u => u.parameter_id));
+    if (propagation?.auto_recomputed) {
+      for (const id of propagation.auto_recomputed) changedIds.add(id);
+    }
+    if (propagation?.derived_updates) {
+      for (const d of propagation.derived_updates) changedIds.add(d.parameter_id);
+    }
+    for (const id of changedIds) {
+      updateParameterRowInPlace(id, response);
     }
     updateSpecControls(response);
     updateDirtyRowStyles();
@@ -1671,25 +1751,80 @@ function renderBatchPropagation(propagation) {
     summary.textContent = propagation.summary;
     node.append(summary);
   }
-  if (propagation.updated_parameters?.length) {
-    const item = document.createElement("p");
-    item.textContent = `直接修改：${propagation.updated_parameters.join("，")}`;
-    node.append(item);
+
+  // Show directly modified parameters with old→new diff
+  if (propagation.direct_updates?.length) {
+    const section = document.createElement("div");
+    section.className = "spec-change-section";
+    const title = document.createElement("p");
+    title.className = "spec-change-section-title";
+    title.textContent = "直接修改";
+    section.append(title);
+    for (const update of propagation.direct_updates) {
+      const row = document.createElement("div");
+      row.className = "spec-change-row spec-change-direct";
+      const label = document.createElement("span");
+      label.className = "spec-change-label";
+      label.textContent = update.parameter_id;
+      const diff = document.createElement("span");
+      diff.className = "spec-change-diff";
+      const oldVal = document.createElement("span");
+      oldVal.className = "spec-change-old";
+      oldVal.textContent = text(update.old_value, "空");
+      const arrow = document.createElement("span");
+      arrow.className = "spec-change-arrow";
+      arrow.textContent = " → ";
+      const newVal = document.createElement("span");
+      newVal.className = "spec-change-new";
+      newVal.textContent = text(update.new_value, "空");
+      diff.append(oldVal, arrow, newVal);
+      row.append(label, diff);
+      section.append(row);
+    }
+    node.append(section);
   }
+
+  // Show derived updates with old→new diff
   if (propagation.derived_updates?.length) {
-    const item = document.createElement("p");
-    const descs = propagation.derived_updates.map(d =>
-      `${d.parameter_id} → ${d.new_value}`
-    );
-    item.textContent = `联动更新：${descs.join("，")}`;
-    node.append(item);
+    const section = document.createElement("div");
+    section.className = "spec-change-section";
+    const title = document.createElement("p");
+    title.className = "spec-change-section-title";
+    title.textContent = "联动更新";
+    section.append(title);
+    for (const update of propagation.derived_updates) {
+      const row = document.createElement("div");
+      row.className = "spec-change-row spec-change-derived";
+      const label = document.createElement("span");
+      label.className = "spec-change-label";
+      label.textContent = update.parameter_id;
+      const diff = document.createElement("span");
+      diff.className = "spec-change-diff";
+      const newVal = document.createElement("span");
+      newVal.className = "spec-change-new";
+      newVal.textContent = text(update.new_value, "空");
+      diff.append(newVal);
+      if (update.reason) {
+        const reason = document.createElement("span");
+        reason.className = "spec-change-reason";
+        reason.textContent = `（${update.reason}）`;
+        diff.append(reason);
+      }
+      row.append(label, diff);
+      section.append(row);
+    }
+    node.append(section);
   }
+
+  // Show invalidated artifacts
   if (propagation.invalidated?.length) {
     const item = document.createElement("p");
     item.className = "spec-propagation-warning";
     item.textContent = `失效对象：${propagation.invalidated.join("，")}`;
     node.append(item);
   }
+
+  // Show warnings
   if (propagation.warnings?.length) {
     for (const warning of propagation.warnings) {
       const item = document.createElement("p");

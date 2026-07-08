@@ -2065,6 +2065,7 @@ def create_app(
         all_warnings = []
         all_requires_choice = []
         derived_updates = []
+        direct_updates = []
         needs_new_version = False
 
         for update in updates:
@@ -2078,6 +2079,10 @@ def create_app(
                     detail=f"value is required for parameter {param_id}",
                 )
 
+            # Capture old value before update
+            old_param = updated_spec.get_parameter(param_id)
+            old_value = old_param.value if old_param else None
+
             try:
                 updated_spec, result = propagate_change(updated_spec, param_id, new_value)
             except KeyError as e:
@@ -2086,6 +2091,12 @@ def create_app(
                 raise HTTPException(status_code=422, detail=str(e)) from e
 
             updated_parameters.append(param_id)
+            # Track direct update with old/new values
+            direct_updates.append({
+                "parameter_id": param_id,
+                "old_value": old_value,
+                "new_value": new_value,
+            })
             all_auto_recomputed.extend(result.auto_recomputed)
             all_stale_artifacts.extend(result.stale_artifacts)
             all_warnings.extend(result.new_warnings)
@@ -2135,6 +2146,7 @@ def create_app(
         response = json.loads(updated_stored.spec_json)
         response["_batch_propagation"] = {
             "updated_parameters": updated_parameters,
+            "direct_updates": direct_updates,
             "derived_updates": derived_updates,
             "auto_recomputed": deduped_recomputed,
             "requires_choice": all_requires_choice,

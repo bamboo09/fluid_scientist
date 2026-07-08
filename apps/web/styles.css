@@ -726,6 +726,58 @@ select, input[type="text"], input[type="password"] {
   font-weight: 500;
 }
 
+/* Change summary panel */
+.spec-change-section {
+  margin-bottom: 0.5rem;
+}
+
+.spec-change-section-title {
+  font-weight: 600;
+  font-size: 0.8125rem;
+  color: var(--muted, #6b7280);
+  margin-bottom: 0.25rem;
+}
+
+.spec-change-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  padding: 0.25rem 0;
+  font-size: 0.8125rem;
+}
+
+.spec-change-label {
+  font-weight: 500;
+  min-width: 8rem;
+}
+
+.spec-change-diff {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.25rem;
+}
+
+.spec-change-old {
+  color: var(--error-fg, #991b1b);
+  text-decoration: line-through;
+  opacity: 0.7;
+}
+
+.spec-change-arrow {
+  color: var(--muted, #6b7280);
+}
+
+.spec-change-new {
+  color: var(--success-fg, #065f46);
+  font-weight: 500;
+}
+
+.spec-change-reason {
+  color: var(--muted, #6b7280);
+  font-size: 0.75rem;
+  font-style: italic;
+}
+
 /* Metric quality checks */
 
 .metric-quality-checks { margin-top: 18px; }
