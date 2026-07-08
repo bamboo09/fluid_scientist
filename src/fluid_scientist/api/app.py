@@ -2011,6 +2011,146 @@ def create_app(
         }
         return response
 
+    @application.patch(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/parameters",
+        tags=["experiment-specs"],
+    )
+    def batch_update_parameters(
+        project_id: str,
+        experiment_id: str,
+        body: dict,
+    ) -> dict:
+        """Batch update multiple parameters and propagate dependencies."""
+        import json
+        stored = workflow_repository.load_experiment_spec(experiment_id)
+        if stored is None or stored.project_id != project_id:
+            raise HTTPException(status_code=404, detail="experiment spec not found")
+
+        # Version check
+        client_version = body.get("experiment_version")
+        if client_version is not None and client_version != stored.experiment_version:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "version_conflict",
+                    "current_version": stored.experiment_version,
+                    "client_version": client_version,
+                    "message": "实验参数已被其他操作修改，请刷新后再提交。",
+                },
+            )
+
+        spec = ExperimentSpec.model_validate_json(stored.spec_json)
+
+        # Check if spec is editable
+        from fluid_scientist.experiment_spec.state_machine import is_editable
+        status_val = spec.status.value if hasattr(spec.status, 'value') else str(spec.status)
+        if not is_editable(status_val):
+            raise HTTPException(
+                status_code=422,
+                detail="experiment spec is not editable in current state"
+            )
+
+        updates = body.get("updates", [])
+        if not updates:
+            raise HTTPException(
+                status_code=422,
+                detail="updates list is required and must not be empty",
+            )
+
+        # Apply each update sequentially and accumulate results
+        updated_spec = spec
+        updated_parameters = []
+        all_auto_recomputed = []
+        all_stale_artifacts = []
+        all_warnings = []
+        all_requires_choice = []
+        derived_updates = []
+        needs_new_version = False
+
+        for update in updates:
+            param_id = update.get("parameter_id")
+            new_value = update.get("value")
+            if param_id is None:
+                raise HTTPException(status_code=422, detail="each update must have parameter_id")
+            if new_value is None:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"value is required for parameter {param_id}",
+                )
+
+            try:
+                updated_spec, result = propagate_change(updated_spec, param_id, new_value)
+            except KeyError as e:
+                raise HTTPException(status_code=404, detail=str(e)) from e
+            except ValueError as e:
+                raise HTTPException(status_code=422, detail=str(e)) from e
+
+            updated_parameters.append(param_id)
+            all_auto_recomputed.extend(result.auto_recomputed)
+            all_stale_artifacts.extend(result.stale_artifacts)
+            all_warnings.extend(result.new_warnings)
+            all_requires_choice.extend(result.requires_choice)
+            if result.needs_new_version:
+                needs_new_version = True
+
+            # Track derived updates with old/new values
+            for rec_id in result.auto_recomputed:
+                rec_param = updated_spec.get_parameter(rec_id)
+                if rec_param:
+                    derived_updates.append({
+                        "parameter_id": rec_id,
+                        "new_value": rec_param.value,
+                        "reason": f"由 {param_id} 修改联动更新",
+                    })
+
+        # Deduplicate stale artifacts
+        seen_stale = set()
+        deduped_stale = []
+        for s in all_stale_artifacts:
+            if s not in seen_stale:
+                seen_stale.add(s)
+                deduped_stale.append(s)
+
+        # Deduplicate auto_recomputed
+        seen_recomputed = set()
+        deduped_recomputed = []
+        for r in all_auto_recomputed:
+            if r not in seen_recomputed:
+                seen_recomputed.add(r)
+                deduped_recomputed.append(r)
+
+        new_version = (
+            stored.experiment_version + 1
+            if needs_new_version
+            else stored.experiment_version
+        )
+        now = datetime.now(UTC).isoformat()
+        updated_stored = workflow_repository.replace_experiment_spec(
+            experiment_id,
+            spec_json=updated_spec.model_dump_json(),
+            experiment_version=new_version,
+            status=stored.status,
+            updated_at=now,
+        )
+        response = json.loads(updated_stored.spec_json)
+        response["_batch_propagation"] = {
+            "updated_parameters": updated_parameters,
+            "derived_updates": derived_updates,
+            "auto_recomputed": deduped_recomputed,
+            "requires_choice": all_requires_choice,
+            "invalidated": deduped_stale,
+            "warnings": all_warnings,
+            "needs_new_version": needs_new_version,
+            "summary": f"已保存 {len(updated_parameters)} 个参数"
+                       + (
+                           f"，{len(deduped_recomputed)} 个派生参数已更新"
+                           if deduped_recomputed
+                           else ""
+                       )
+                       + (f"，{len(deduped_stale)} 个对象已失效" if deduped_stale else ""),
+        }
+        return response
+
     @application.post(
         "/api/projects/{project_id}/experiment-specs/{experiment_id}/transition",
         tags=["experiment-specs"],

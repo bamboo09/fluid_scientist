@@ -708,6 +708,24 @@ select, input[type="text"], input[type="password"] {
 
 .spec-actions { margin-top: 20px; }
 
+/* Parameter dirty state */
+.spec-param-dirty {
+  background: var(--warning-bg, #fffbeb);
+  border-left: 3px solid var(--warning-border, #f59e0b);
+  padding-left: 0.5rem;
+}
+
+.spec-pending-summary {
+  padding: 0.5rem 0.75rem;
+  background: var(--warning-bg, #fffbeb);
+  border: 1px solid var(--warning-border, #fde68a);
+  border-radius: 0.375rem;
+  font-size: 0.875rem;
+  color: var(--warning-fg, #92400e);
+  margin-bottom: 0.5rem;
+  font-weight: 500;
+}
+
 /* Metric quality checks */
 
 .metric-quality-checks { margin-top: 18px; }

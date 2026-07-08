@@ -232,6 +232,7 @@ function clearResearchSession() {
   currentPlan = null;
   currentCompilation = null;
   currentSpec = null;
+  pendingParameterChanges.clear();
   activeTask = null;
   latestResults = null;
   postprocessSessionVersion += 1;
@@ -1128,7 +1129,7 @@ function renderParameterRow(param, spec) {
     input.type = param.data_type === "integer" ? "number" : "text";
     input.value = param.value ?? "";
     input.placeholder = "未设置";
-    input.addEventListener("change", () => updateSpecParameter(param.parameter_id, input.value));
+    input.addEventListener("input", () => markParameterDirty(param.parameter_id, input.value, param.unit));
     valueContainer.append(input);
   } else {
     const valueSpan = document.createElement("span");
@@ -1280,6 +1281,20 @@ function renderSpecWorkbench(spec) {
   saveBtn.id = "spec-save-btn";
   saveBtn.textContent = "保存草案";
   saveBtn.addEventListener("click", () => saveSpecDraft());
+  const applyBtn = document.createElement("button");
+  applyBtn.type = "button";
+  applyBtn.className = "button button-primary";
+  applyBtn.id = "spec-apply-btn";
+  applyBtn.textContent = "应用修改";
+  applyBtn.disabled = true;
+  applyBtn.addEventListener("click", () => applyPendingParameterChanges());
+  const discardBtn = document.createElement("button");
+  discardBtn.type = "button";
+  discardBtn.className = "button button-quiet";
+  discardBtn.id = "spec-discard-btn";
+  discardBtn.textContent = "放弃修改";
+  discardBtn.disabled = true;
+  discardBtn.addEventListener("click", () => discardPendingParameterChanges());
   const readyBtn = document.createElement("button");
   readyBtn.type = "button";
   readyBtn.className = "button button-secondary";
@@ -1304,7 +1319,7 @@ function renderSpecWorkbench(spec) {
   submitBtn.id = "spec-submit-btn";
   submitBtn.textContent = "提交运行";
   submitBtn.addEventListener("click", () => submitSpec());
-  actions.append(saveBtn, readyBtn, confirmBtn, compileBtn, submitBtn);
+  actions.append(saveBtn, applyBtn, discardBtn, readyBtn, confirmBtn, compileBtn, submitBtn);
   card.append(actions);
 
   updateSpecControls(spec);
@@ -1364,6 +1379,68 @@ function showWorkbenchToast(message, type = "success") {
     toast.classList.add("workbench-toast-fading");
     window.setTimeout(() => toast.remove(), 300);
   }, 2700);
+}
+
+const pendingParameterChanges = new Map();
+
+function markParameterDirty(parameterId, value, unit = null) {
+  // If value matches original, remove from pending
+  if (currentSpec) {
+    const original = currentSpec.parameters.find(p => p.parameter_id === parameterId);
+    if (original && String(original.value) === String(value)) {
+      pendingParameterChanges.delete(parameterId);
+    } else {
+      pendingParameterChanges.set(parameterId, {
+        parameter_id: parameterId,
+        value: value === "" ? null : (isNaN(Number(value)) ? value : Number(value)),
+        unit: unit || original?.unit || null,
+      });
+    }
+  }
+  renderPendingChangeSummary();
+  updateDirtyRowStyles();
+}
+
+function updateDirtyRowStyles() {
+  document.querySelectorAll(".spec-param-row").forEach(row => {
+    const paramId = row.dataset.paramId;
+    if (pendingParameterChanges.has(paramId)) {
+      row.classList.add("spec-param-dirty");
+    } else {
+      row.classList.remove("spec-param-dirty");
+    }
+  });
+  // Update apply/discard button states
+  const applyBtn = byId("spec-apply-btn");
+  const discardBtn = byId("spec-discard-btn");
+  const hasPending = pendingParameterChanges.size > 0;
+  if (applyBtn) applyBtn.disabled = !hasPending;
+  if (discardBtn) discardBtn.disabled = !hasPending;
+}
+
+function renderPendingChangeSummary() {
+  let summary = byId("spec-pending-summary");
+  const count = pendingParameterChanges.size;
+  if (count === 0) {
+    if (summary) summary.hidden = true;
+    return;
+  }
+  if (!summary) {
+    summary = document.createElement("div");
+    summary.id = "spec-pending-summary";
+    summary.className = "spec-pending-summary";
+    const card = byId("active-spec-card");
+    if (card) {
+      const actions = card.querySelector(".spec-actions");
+      if (actions) {
+        card.insertBefore(summary, actions);
+      } else {
+        card.append(summary);
+      }
+    }
+  }
+  summary.hidden = false;
+  summary.textContent = `${count} 个参数待保存`;
 }
 
 async function updateSpecParameter(parameterId, newValue) {
@@ -1493,6 +1570,122 @@ async function saveSpecDraft() {
     showWorkbenchToast("实验草案已保存", "success");
   } catch (error) {
     showWorkbenchToast(`保存失败：${error.message || error}`, "error");
+  }
+}
+
+async function applyPendingParameterChanges() {
+  if (!currentProject || !currentSpec) return;
+  if (pendingParameterChanges.size === 0) {
+    showWorkbenchToast("没有待保存的修改", "info");
+    return;
+  }
+
+  const savedScrollY = window.scrollY;
+  const updates = Array.from(pendingParameterChanges.values());
+
+  try {
+    const response = await requestJson(
+      `/api/projects/${currentProject.project_id}/experiment-specs/${currentSpec.experiment_id}/parameters`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          experiment_version: currentSpec.experiment_version,
+          updates: updates,
+        }),
+      },
+    );
+
+    const propagation = response._batch_propagation;
+    currentSpec = response;
+    pendingParameterChanges.clear();
+
+    // Partial update: refresh all parameter rows
+    for (const p of response.parameters) {
+      updateParameterRowInPlace(p.parameter_id, response);
+    }
+    updateSpecControls(response);
+    updateDirtyRowStyles();
+    renderPendingChangeSummary();
+
+    // Render propagation if available
+    if (propagation) {
+      renderBatchPropagation(propagation);
+    }
+
+    // Show toast with summary
+    if (propagation?.summary) {
+      showWorkbenchToast(propagation.summary, "success");
+    } else {
+      showWorkbenchToast(`已保存 ${updates.length} 个参数`, "success");
+    }
+
+    // Restore scroll position
+    window.scrollTo({ top: savedScrollY, behavior: "instant" });
+  } catch (error) {
+    if (error.status === 409) {
+      showWorkbenchToast("版本冲突：实验参数已被修改，请刷新后再提交", "error");
+    } else {
+      showWorkbenchToast(`批量保存失败：${error.message || error}`, "error");
+    }
+    window.scrollTo({ top: savedScrollY, behavior: "instant" });
+  }
+}
+
+function discardPendingParameterChanges() {
+  pendingParameterChanges.clear();
+  // Re-render workbench to restore original values
+  if (currentSpec) {
+    for (const p of currentSpec.parameters) {
+      updateParameterRowInPlace(p.parameter_id, currentSpec);
+    }
+  }
+  updateDirtyRowStyles();
+  renderPendingChangeSummary();
+  showWorkbenchToast("已放弃未保存修改", "info");
+}
+
+function renderBatchPropagation(propagation) {
+  const node = byId("spec-propagation");
+  if (!node) return;
+  node.hidden = false;
+  node.replaceChildren();
+  const heading = document.createElement("p");
+  heading.className = "spec-propagation-title";
+  heading.textContent = "参数变更摘要";
+  node.append(heading);
+
+  if (propagation.summary) {
+    const summary = document.createElement("pre");
+    summary.textContent = propagation.summary;
+    node.append(summary);
+  }
+  if (propagation.updated_parameters?.length) {
+    const item = document.createElement("p");
+    item.textContent = `直接修改：${propagation.updated_parameters.join("，")}`;
+    node.append(item);
+  }
+  if (propagation.derived_updates?.length) {
+    const item = document.createElement("p");
+    const descs = propagation.derived_updates.map(d =>
+      `${d.parameter_id} → ${d.new_value}`
+    );
+    item.textContent = `联动更新：${descs.join("，")}`;
+    node.append(item);
+  }
+  if (propagation.invalidated?.length) {
+    const item = document.createElement("p");
+    item.className = "spec-propagation-warning";
+    item.textContent = `失效对象：${propagation.invalidated.join("，")}`;
+    node.append(item);
+  }
+  if (propagation.warnings?.length) {
+    for (const warning of propagation.warnings) {
+      const item = document.createElement("p");
+      item.className = "spec-propagation-warning";
+      item.textContent = warning;
+      node.append(item);
+    }
   }
 }
 
