@@ -6,6 +6,7 @@ files without going through the old ExperimentPlan → compile_plan path.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import platform
@@ -176,10 +177,8 @@ def _extract_spec_parameters(spec: ExperimentSpec) -> dict[str, float]:
                 "side_length", "domain_width", "domain_height"):
         raw = values.get(key)
         if raw is not None:
-            try:
+            with contextlib.suppress(TypeError, ValueError):
                 spec_params[key] = float(raw)
-            except (TypeError, ValueError):
-                pass
     return spec_params
 
 
@@ -232,7 +231,11 @@ def _integrate_measurement_plan(
     # Blocking: compilation failure or error-severity issues
     error_issues = [i for i in result.issues if i.severity == "error"]
     if not result.success or error_issues:
-        messages = "; ".join(i.message for i in error_issues) if error_issues else "compilation failed"
+        messages = (
+            "; ".join(i.message for i in error_issues)
+            if error_issues
+            else "compilation failed"
+        )
         raise MeasurementCompilationError(
             f"MeasurementPlan compilation failed: {messages}"
         )

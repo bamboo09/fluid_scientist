@@ -33,6 +33,7 @@ The planning pipeline follows:
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
@@ -747,17 +748,15 @@ class MetricPlanner:
                 if source_dict and isinstance(source_dict, dict):
                     for key, val in source_dict.items():
                         if val is not None:
-                            try:
+                            with contextlib.suppress(TypeError, ValueError):
                                 geom[key] = float(val)
-                            except (TypeError, ValueError):
-                                pass
 
         diameter = geom.get("diameter", 1.0)
         length = geom.get("length", 1.0)
         side_length = geom.get("side_length", 1.0)
-        domain_width = geom.get("domain_width", 10.0)
-        domain_height = geom.get("domain_height", 10.0)
-        extrusion_span = geom.get("extrusion_span", diameter * 0.1)
+        geom.get("domain_width", 10.0)
+        geom.get("domain_height", 10.0)
+        geom.get("extrusion_span", diameter * 0.1)
 
         required_fields = [
             FieldOutputSpec(field_name="U", write_interval=100),

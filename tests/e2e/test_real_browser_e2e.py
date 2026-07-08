@@ -62,7 +62,6 @@ from fluid_scientist.measurement.planner import MetricPlanner
 from fluid_scientist.ports import StoredExperimentSpec
 from fluid_scientist.research.models import ResearchPhysicsSpec
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------

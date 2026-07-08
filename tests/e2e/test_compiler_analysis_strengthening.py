@@ -32,7 +32,6 @@ from fluid_scientist.measurement.compiler import (
     compile_measurement_plan,
 )
 from fluid_scientist.measurement.models import (
-    FieldOutputSpec,
     FunctionObjectSpec,
     FunctionObjectType,
     MeasurementPlan,
@@ -45,7 +44,6 @@ from fluid_scientist.measurement.models import (
 from fluid_scientist.measurement.planner import MetricPlanner
 from fluid_scientist.ports import StoredExperimentSpec
 from fluid_scientist.research.models import ResearchPhysicsSpec
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
