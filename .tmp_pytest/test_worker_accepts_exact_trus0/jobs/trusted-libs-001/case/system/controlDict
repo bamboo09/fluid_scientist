@@ -1,2 +1,0 @@
-solver incompressibleFluid;
-functions { coefficients { libs ("libforces.so"); } }

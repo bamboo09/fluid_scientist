@@ -19,4 +19,4 @@ coverage/
 *.db
 
 # SSH 密钥（绝不提交）
-ssh-keys/
+ssh-keys/.tmp_pytest/
