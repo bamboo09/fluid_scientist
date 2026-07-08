@@ -1158,6 +1158,17 @@ function renderParameterRow(param, spec) {
   statusChip.textContent = paramStatusLabels[param.status] || param.status || "—";
   meta.append(sourceChip, critChip, statusChip);
 
+  // Display recommendation reason if available
+  if (param.source?.reason) {
+    const reasonEl = document.createElement("div");
+    reasonEl.className = "spec-param-reason";
+    reasonEl.textContent = param.source.reason;
+    if (param.source.confidence) {
+      reasonEl.dataset.confidence = param.source.confidence;
+    }
+    meta.append(reasonEl);
+  }
+
   row.append(label, valueContainer, meta);
   return row;
 }

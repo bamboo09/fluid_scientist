@@ -970,3 +970,28 @@ select, input[type="text"], input[type="password"] {
     transform: translateY(0);
   }
 }
+
+
+/* Parameter recommendation reason */
+.spec-param-reason {
+  font-size: 0.75rem;
+  color: var(--muted, #6b7280);
+  font-style: italic;
+  margin-top: 0.25rem;
+  grid-column: 1 / -1;
+}
+
+.spec-param-reason[data-confidence="high"]::before {
+  content: "\2605 ";
+  color: var(--success-fg, #059669);
+}
+
+.spec-param-reason[data-confidence="medium"]::before {
+  content: "\25C6 ";
+  color: var(--warning-fg, #d97706);
+}
+
+.spec-param-reason[data-confidence="low"]::before {
+  content: "\25B3 ";
+  color: var(--error-fg, #dc2626);
+}
