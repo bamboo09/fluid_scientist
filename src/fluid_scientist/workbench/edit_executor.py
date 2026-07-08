@@ -153,6 +153,12 @@ class SpecEditExecutor:
             return self._op_set_physics(spec, op)
         elif op.operation == "set_boundary_condition":
             return self._op_set_boundary_condition(spec, op)
+        elif op.operation in (
+            "set_initial_condition",
+            "set_mesh",
+            "set_numerics",
+        ):
+            return self._op_update_parameter(spec, op)
         elif op.operation == "accept_recommendation":
             return self._op_accept_recommendation(spec, op)
         return None

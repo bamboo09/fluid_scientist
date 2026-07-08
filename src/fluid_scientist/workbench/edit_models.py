@@ -1,4 +1,4 @@
-"""Pydantic models for the workbench edit system.
+﻿"""Pydantic models for the workbench edit system.
 
 Defines the structured EditProposal, SpecEditOperation, ChangeSummary,
 and ValidationResult models used by the WorkbenchAgent and SpecEditExecutor.
@@ -23,6 +23,8 @@ EditIntent = Literal[
     "change_mesh",
     "change_numerics",
     "set_boundary_condition",
+    "change_boundary_condition",
+    "explain_parameter",
     "accept_recommendations",
     "validate_spec",
     "prepare_compile",

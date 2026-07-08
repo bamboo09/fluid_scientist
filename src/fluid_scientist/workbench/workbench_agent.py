@@ -100,7 +100,187 @@ class WorkbenchAgent:
                 requires_confirmation=False,
             )
 
-        # 2. Add wall_roughness
+        # 2. Explain parameter
+        if "解释" in msg or "explain" in msg_lower:
+            # Try to find a parameter name in the message
+            params = spec.get("parameters", [])
+            matched_param = None
+            for p in params:
+                if not isinstance(p, dict):
+                    continue
+                display_name = p.get("display_name", "")
+                param_id = p.get("parameter_id", "")
+                if display_name and display_name in msg:
+                    matched_param = p
+                    break
+                if param_id and param_id in msg:
+                    matched_param = p
+                    break
+
+            # Fallback: check for common parameter names in the message
+            if matched_param is None:
+                _COMMON_PARAM_KEYWORDS = [
+                    "雷诺数", "reynolds", "直径", "diameter", "速度", "velocity",
+                    "密度", "density", "粘度", "viscosity", "压降", "pressure",
+                    "时间步", "time_step", "网格", "mesh", "边界", "boundary",
+                    "湍流", "turbulence", "质量流量", "mass_flow",
+                ]
+                for kw in _COMMON_PARAM_KEYWORDS:
+                    if kw in msg_lower:
+                        matched_param = {"display_name": kw, "parameter_id": kw}
+                        break
+
+            if matched_param is not None:
+                param_name = matched_param.get(
+                    "display_name",
+                    matched_param.get("parameter_id", "该参数"),
+                )
+                return self._make_proposal(
+                    experiment_id=experiment_id,
+                    experiment_version=experiment_version,
+                    edit_intent="explain_parameter",
+                    summary=f"解释参数: {param_name}",
+                    requires_confirmation=False,
+                )
+            return self._make_proposal(
+                experiment_id=experiment_id,
+                experiment_version=experiment_version,
+                edit_intent="clarification_required",
+                summary="用户要求解释参数但未指定名称",
+                clarification_question="请问要解释哪个参数？",
+                requires_confirmation=False,
+            )
+
+        # 3. Change initial condition (增加初始压力/增加初始条件)
+        if (
+            "增加初始压力" in msg
+            or "增加初始条件" in msg
+            or "initial condition" in msg_lower
+        ):
+            return self._make_proposal(
+                experiment_id=experiment_id,
+                experiment_version=experiment_version,
+                edit_intent="change_initial_condition",
+                summary="增加初始压力条件",
+                proposed_operations=[
+                    SpecEditOperation(
+                        operation="set_initial_condition",
+                        target_id="initial.pressure",
+                        value=0,
+                        unit="Pa",
+                        reason="用户要求增加初始压力条件",
+                    ),
+                ],
+                invalidates=["compiled_case"],
+            )
+
+        # 4. Change mesh (修改网格/网格加密)
+        if (
+            "修改网格" in msg
+            or "网格加密" in msg
+            or "change mesh" in msg_lower
+        ):
+            return self._make_proposal(
+                experiment_id=experiment_id,
+                experiment_version=experiment_version,
+                edit_intent="change_mesh",
+                summary="修改网格设置",
+                proposed_operations=[
+                    SpecEditOperation(
+                        operation="set_mesh",
+                        target_id="mesh.cells",
+                        value=100000,
+                        reason="用户要求修改网格",
+                    ),
+                ],
+                invalidates=["compiled_case"],
+            )
+
+        # 5. Change numerics (修改时间步/修改数值)
+        if (
+            "修改时间步" in msg
+            or "修改数值" in msg
+            or "change numerics" in msg_lower
+        ):
+            return self._make_proposal(
+                experiment_id=experiment_id,
+                experiment_version=experiment_version,
+                edit_intent="change_numerics",
+                summary="修改数值/时间步设置",
+                proposed_operations=[
+                    SpecEditOperation(
+                        operation="set_numerics",
+                        target_id="numerics.time_step",
+                        value=0.005,
+                        unit="s",
+                        reason="用户要求修改时间步长",
+                    ),
+                ],
+                invalidates=["compiled_case"],
+            )
+
+        # 6. Change boundary condition to mass flow inlet
+        if (
+            "修改入口边界为质量流量" in msg
+            or "change inlet to mass flow" in msg_lower
+        ):
+            return self._make_proposal(
+                experiment_id=experiment_id,
+                experiment_version=experiment_version,
+                edit_intent="change_boundary_condition",
+                summary="将入口边界改为质量流量",
+                proposed_operations=[
+                    SpecEditOperation(
+                        operation="set_boundary_condition",
+                        target_id="boundary.inlet_condition",
+                        value="mass_flow_inlet",
+                        reason="用户要求将入口边界改为质量流量",
+                    ),
+                    SpecEditOperation(
+                        operation="update_parameter",
+                        target_id="mass_flow_rate",
+                        parameter=ProposedParameter(
+                            parameter_id="mass_flow_rate",
+                            display_name="质量流量",
+                            category="boundary_condition",
+                            value=None,
+                            status="unknown_required",
+                            source="unknown",
+                            reason="改为质量流量入口后需要指定质量流量值",
+                        ),
+                        reason="改为质量流量入口后需要指定质量流量值",
+                    ),
+                ],
+                invalidates=["measurement_plan", "compiled_case"],
+            )
+
+        # 7. Add outlet velocity uniformity metric
+        if (
+            "增加出口速度均匀性指标" in msg
+            or "velocity uniformity" in msg_lower
+        ):
+            return self._make_proposal(
+                experiment_id=experiment_id,
+                experiment_version=experiment_version,
+                edit_intent="add_metric",
+                summary="增加出口速度均匀性指标",
+                proposed_operations=[
+                    SpecEditOperation(
+                        operation="add_metric",
+                        target_id="outlet_velocity_uniformity",
+                        metric=ProposedMetric(
+                            metric_id="outlet_velocity_uniformity",
+                            display_name="出口速度均匀性",
+                            required_data=["outlet_velocity_field"],
+                            measurement_requirements=["surfaceFieldValue"],
+                            reason="用户要求新增出口速度均匀性指标",
+                        ),
+                        reason="用户要求新增出口速度均匀性指标",
+                    ),
+                ],
+            )
+
+        # 8. Add wall_roughness
         if "壁面粗糙度" in msg or "wall_roughness" in msg_lower:
             return self._make_proposal(
                 experiment_id=experiment_id,
@@ -128,7 +308,7 @@ class WorkbenchAgent:
                 invalidates=["compiled_case"],
             )
 
-        # 3. Add lift coefficient metric
+        # 9. Add lift coefficient metric
         if "升力" in msg or "lift" in msg_lower:
             return self._make_proposal(
                 experiment_id=experiment_id,
@@ -157,7 +337,7 @@ class WorkbenchAgent:
                 invalidates=["measurement_plan"],
             )
 
-        # 4. Change fluid to air
+        # 10. Change fluid to air
         if "流体改为空气" in msg or "改为空气" in msg or (
             "空气" in msg and "改" in msg
         ):
@@ -168,7 +348,7 @@ class WorkbenchAgent:
                 fluid_label="空气",
             )
 
-        # 5. Change fluid to water
+        # 11. Change fluid to water
         if "流体改为水" in msg or "改为水" in msg or (
             "水" in msg and "改" in msg and "改为" in msg
         ):
@@ -179,12 +359,12 @@ class WorkbenchAgent:
                 fluid_label="水",
             )
 
-        # 6. Parameter value changes — use nl_parser
+        # 12. Parameter value changes — use nl_parser
         nl_result = self._try_nl_parse(msg, spec)
         if nl_result is not None:
             return nl_result
 
-        # 7. Accept recommendations
+        # 13. Accept recommendations
         if "接受推荐" in msg or "接受所有推荐" in msg or "接受所有推荐值" in msg:
             return self._make_proposal(
                 experiment_id=experiment_id,
@@ -201,7 +381,7 @@ class WorkbenchAgent:
                 requires_confirmation=True,
             )
 
-        # 8. Validate / check
+        # 14. Validate / check
         if "验证" in msg or "检查" in msg:
             return self._make_proposal(
                 experiment_id=experiment_id,
@@ -211,7 +391,7 @@ class WorkbenchAgent:
                 requires_confirmation=False,
             )
 
-        # 9. Prepare compile
+        # 15. Prepare compile
         if "编译" in msg or "准备编译" in msg:
             return self._make_proposal(
                 experiment_id=experiment_id,
@@ -221,7 +401,7 @@ class WorkbenchAgent:
                 requires_confirmation=True,
             )
 
-        # 10. Default → clarification
+        # 16. Default → clarification
         return self._make_proposal(
             experiment_id=experiment_id,
             experiment_version=experiment_version,

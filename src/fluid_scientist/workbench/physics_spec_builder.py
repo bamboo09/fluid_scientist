@@ -276,11 +276,11 @@ class PhysicsSpecBuilder:
         # Pattern: parameter_name + number + unit
         patterns = [
             (
-                r"(管径|直径|diameter|D)\s*[：:=]?\s*(\d+\.?\d*)\s*(mm|cm|m)?",
+                r"(管径|直径|diameter|D)\s*[：:=]?\s*(\d+\.?\d*)\s*(mm|cm|m|毫米|厘米|米)?",
                 "diameter",
             ),
             (
-                r"(长度|length|L)\s*[：:=]?\s*(\d+\.?\d*)\s*(mm|cm|m)?",
+                r"(长度|length|L)\s*[：:=]?\s*(\d+\.?\d*)\s*(mm|cm|m|毫米|厘米|米)?",
                 "length",
             ),
             (
@@ -296,7 +296,7 @@ class PhysicsSpecBuilder:
                 "reynolds_number",
             ),
             (
-                r"(边长|side.?length)\s*[：:=]?\s*(\d+\.?\d*)\s*(mm|cm|m)?",
+                r"(边长|side.?length)\s*[：:=]?\s*(\d+\.?\d*)\s*(mm|cm|m|毫米|厘米|米)?",
                 "side_length",
             ),
         ]
@@ -309,11 +309,13 @@ class PhysicsSpecBuilder:
                 with contextlib.suppress(ValueError):
                     value = float(value_str)
                     # Convert units
-                    if unit == "mm":
+                    if unit in ("mm", "毫米"):
                         value *= 0.001
                         unit = "m"
-                    elif unit == "cm":
+                    elif unit in ("cm", "厘米"):
                         value *= 0.01
+                        unit = "m"
+                    elif unit in ("m", "米"):
                         unit = "m"
 
                     known[param_id] = {

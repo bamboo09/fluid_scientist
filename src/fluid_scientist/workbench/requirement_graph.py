@@ -101,6 +101,12 @@ class RequirementGraph:
         # 7. Turbulence model slots
         slots.extend(self._turbulence_slots(physics_spec))
 
+        # 7.5. Flow condition slots (physical quantities)
+        slots.extend(self._flow_condition_slots(system, physics_spec))
+
+        # 7.6. Derived parameter slots
+        slots.extend(self._derived_slots(physics_spec))
+
         # 8. Metric-driven measurement slots
         slots.extend(self._measurement_slots(metric_plan))
 
@@ -448,6 +454,67 @@ class RequirementGraph:
                 required_by=["solver"],
                 criticality="high",
                 acceptable_sources=["model_recommended", "user"],
+            ))
+
+        return slots
+
+    def _flow_condition_slots(
+        self, system: str, spec: PhysicsSpecResult,
+    ) -> list[RequiredSlot]:
+        """Generate flow condition slots (physical quantities)."""
+        slots = []
+
+        if system in ("pipe_flow", "external_flow", "channel_flow"):
+            slots.append(RequiredSlot(
+                slot_id="flow.inlet_velocity",
+                display_name="入口速度",
+                category="flow_condition",
+                reason="入口速度大小，用于雷诺数计算",
+                required_by=["solver", "reynolds_number"],
+                criticality="critical",
+                affects=["reynolds_number"],
+            ))
+            slots.append(RequiredSlot(
+                slot_id="flow.mass_flow_rate",
+                display_name="质量流量",
+                category="flow_condition",
+                reason="质量流量，可推导平均速度",
+                required_by=["mean_velocity"],
+                criticality="high",
+                affects=["mean_velocity"],
+            ))
+
+        return slots
+
+    def _derived_slots(
+        self, spec: PhysicsSpecResult,
+    ) -> list[RequiredSlot]:
+        """Generate derived parameter slots."""
+        slots = []
+
+        # Reynolds number (always needed for flow problems)
+        slots.append(RequiredSlot(
+            slot_id="derived.reynolds_number",
+            display_name="雷诺数",
+            category="derived",
+            reason="雷诺数判断流动状态",
+            required_by=["solver", "turbulence_model"],
+            criticality="high",
+            acceptable_sources=["derived", "user", "model_recommended"],
+            dependencies=["inlet_velocity", "diameter", "kinematic_viscosity"],
+        ))
+
+        # Mean velocity (for pipe flow with mass flow rate)
+        if spec.physical_system == "pipe_flow":
+            slots.append(RequiredSlot(
+                slot_id="derived.mean_velocity",
+                display_name="平均速度",
+                category="derived",
+                reason="管道截面平均速度",
+                required_by=["reynolds_number"],
+                criticality="medium",
+                acceptable_sources=["derived", "user", "model_recommended"],
+                dependencies=["mass_flow_rate", "density", "diameter"],
             ))
 
         return slots

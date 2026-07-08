@@ -1234,6 +1234,7 @@ function getWorkbenchActions(status) {
       actions.secondary = [
         { id: "spec-save-btn", text: "保存草案" },
         { id: "spec-ready-btn", text: "继续修改" },
+        { id: "spec-revalidate-btn", text: "重新校验" },
       ];
       actions.hidden = [
         "spec-compile-btn", "spec-submit-btn", "spec-clone-btn",
@@ -1293,12 +1294,15 @@ function getWorkbenchActions(status) {
       ];
       break;
     case "failed":
-      actions.primary = "创建修复版本";
-      actions.primaryId = "spec-clone-btn";
-      actions.secondary = [];
+      actions.primary = "查看错误";
+      actions.primaryId = "spec-error-btn";
+      actions.secondary = [
+        { id: "spec-back-draft-btn", text: "回到草案" },
+        { id: "spec-clone-btn", text: "克隆新版本" },
+      ];
       actions.hidden = [
         "spec-compile-btn", "spec-submit-btn", "spec-apply-btn",
-        "spec-save-btn",
+        "spec-confirm-btn", "spec-ready-btn",
       ];
       break;
     default:
@@ -1321,6 +1325,7 @@ function updateSpecControls(spec) {
     "spec-submit-btn", "spec-apply-btn", "spec-discard-btn",
     "spec-accept-rec-btn", "spec-clone-btn", "spec-run-status-btn",
     "spec-report-btn", "spec-capability-btn",
+    "spec-error-btn", "spec-back-draft-btn", "spec-revalidate-btn",
   ];
 
   // Hide all first
@@ -1409,6 +1414,39 @@ function updateDisabledReason(spec) {
   } else {
     node.hidden = true;
     node.textContent = "";
+  }
+}
+
+
+function showErrorDetails() {
+  if (!currentSpec) return;
+  const errorInfo = currentSpec.error_info || currentSpec.error || '未知错误';
+  const reasonArea = document.getElementById('spec-disabled-reason');
+  if (reasonArea) {
+    reasonArea.innerHTML = `<div class="error-details">
+      <strong>错误详情:</strong> ${escapeHtml(typeof errorInfo === 'string' ? errorInfo : JSON.stringify(errorInfo))}
+    </div>`;
+  }
+}
+
+async function backToDraft() {
+  if (!currentSpec) return;
+  if (!confirm('确定要将实验回到草案状态吗？这将允许重新编辑参数。')) return;
+  await transitionSpec('draft');
+}
+
+async function revalidateSpec() {
+  if (!currentSpec) return;
+  try {
+    const response = await requestJson(
+      `/api/projects/${currentSpec.project_id}/experiment-specs/${currentSpec.experiment_id}/pre-check`,
+      'GET'
+    );
+    updateDisabledReason(currentSpec, response);
+    showWorkbenchToast(response.can_compile ? '校验通过' : '存在阻塞问题',
+      response.can_compile ? 'success' : 'warning');
+  } catch (err) {
+    showWorkbenchToast(`校验失败: ${err.message}`, 'error');
   }
 }
 
@@ -1594,7 +1632,25 @@ function renderSpecWorkbench(spec) {
   cloneBtn.id = "spec-clone-btn";
   cloneBtn.textContent = "修改参数（创建新版本）";
   cloneBtn.addEventListener("click", () => cloneSpec());
-  actions.append(saveBtn, applyBtn, discardBtn, acceptRecBtn, readyBtn, confirmBtn, compileBtn, submitBtn, runStatusBtn, reportBtn, capabilityBtn, cloneBtn);
+  const errorBtn = document.createElement("button");
+  errorBtn.type = "button";
+  errorBtn.className = "button button-primary";
+  errorBtn.id = "spec-error-btn";
+  errorBtn.textContent = "查看错误";
+  errorBtn.addEventListener("click", () => showErrorDetails());
+  const backDraftBtn = document.createElement("button");
+  backDraftBtn.type = "button";
+  backDraftBtn.className = "button button-secondary";
+  backDraftBtn.id = "spec-back-draft-btn";
+  backDraftBtn.textContent = "回到草案";
+  backDraftBtn.addEventListener("click", () => backToDraft());
+  const revalidateBtn = document.createElement("button");
+  revalidateBtn.type = "button";
+  revalidateBtn.className = "button button-secondary";
+  revalidateBtn.id = "spec-revalidate-btn";
+  revalidateBtn.textContent = "重新校验";
+  revalidateBtn.addEventListener("click", () => revalidateSpec());
+  actions.append(saveBtn, applyBtn, discardBtn, acceptRecBtn, readyBtn, confirmBtn, compileBtn, submitBtn, runStatusBtn, reportBtn, capabilityBtn, cloneBtn, errorBtn, backDraftBtn, revalidateBtn);
   card.append(actions);
 
   const disabledReason = document.createElement("div");
