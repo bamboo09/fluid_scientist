@@ -2896,8 +2896,7 @@ async function testWorkstationSsh() {
   }
 }
 
-function bindEvents()
-  loadSystemVersion(); {
+function bindEvents() {
   const composer = byId("experiment-composer") || byId("research-form");
   composer?.addEventListener("submit", designExperimentFromPrompt);
   if (designButton && (designButton.type !== "submit" || designButton.form !== composer)) {
@@ -2963,8 +2962,8 @@ function bindEvents()
 }
 
 async function init() {
-  bindEvents()
-  loadSystemVersion();;
+  bindEvents();
+  loadSystemVersion();
   const modelLoad = loadModelConfiguration().catch((error) => {
     renderError("模型配置", error);
   });
@@ -3011,7 +3010,7 @@ async function ingestExperimentResults(projectId, experimentId, casePath) {
  * Replaces the old /experiment-plans/{id}/analysis endpoint.
  * @deprecated The old analysis endpoint is deprecated; use this instead.
  */
-async function analyzeExperimentResults(projectId, experimentId) {
+async function analyzeSpecResults(projectId, experimentId) {
   console.info("[NEW API] Calling /experiment-specs/{id}/analyze");
   return requestJson(
     `/api/projects/${projectId}/experiment-specs/${experimentId}/analyze`,
