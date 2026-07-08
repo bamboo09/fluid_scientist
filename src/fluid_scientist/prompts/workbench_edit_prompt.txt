@@ -9,7 +9,8 @@ Return a JSON object with EXACTLY these fields:
 
 - edit_intent: string
   One of: add_parameter, update_parameter, remove_parameter, add_metric,
-  remove_metric, change_physics_model, set_boundary_condition,
+  remove_metric, change_physics_model, change_initial_condition,
+  change_mesh, change_numerics, set_boundary_condition,
   accept_recommendations, validate_spec, prepare_compile, clarification_required
 - summary: string
   A human-readable summary of what the edit does (in the user's language).
@@ -19,7 +20,8 @@ Return a JSON object with EXACTLY these fields:
 - proposed_operations: array of objects, each with:
   - operation: string
     One of: add_parameter, update_parameter, remove_parameter, add_metric,
-    remove_metric, set_physics, set_boundary_condition, accept_recommendation
+    remove_metric, set_physics, set_boundary_condition,
+    set_initial_condition, set_mesh, set_numerics, accept_recommendation
   - target_id: string or null
     The parameter_id or metric_id being modified, or null for new items.
   - parameter: object or null
@@ -55,7 +57,13 @@ Rules:
 4. For add_metric, provide the metric definition and required_data.
 5. For change_physics_model, update physics fields AND affected parameters
    (e.g. changing fluid from water to air updates density and viscosity).
-6. Write invalidates for ALL affected components. Changing a geometry
+6. For change_initial_condition, use set_initial_condition operations to
+   update initial velocity, pressure, or turbulence fields.
+7. For change_mesh, use set_mesh operations to update mesh resolution
+   parameters (cells, axial_cells, radial_cells, etc.).
+8. For change_numerics, use set_numerics operations to update solver,
+   time_step, end_time, or max_courant parameters.
+9. Write invalidates for ALL affected components. Changing a geometry
    parameter invalidates "compiled_case" and "mesh". Changing a material
    property invalidates "measurement_plan" and "compiled_case".
-7. Return ONLY the JSON object, no markdown fences or extra text.
+10. Return ONLY the JSON object, no markdown fences or extra text.

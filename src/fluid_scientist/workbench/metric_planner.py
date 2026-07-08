@@ -96,6 +96,41 @@ class DynamicMetricPlanner:
             "measurement_plan": metric_plan.measurement_plan.model_dump(),
         }
 
+    def generate_measurement_requirements(
+        self, metrics: list[dict],
+    ) -> list[dict]:
+        """Generate measurement requirements from metrics.
+
+        For each metric, determine what OpenFOAM functionObjects are needed.
+        """
+        requirements = []
+        for metric in metrics:
+            metric_id = metric.get("metric_id", "")
+            required_data = metric.get("required_data", [])
+            for data in required_data:
+                if "forceCoeffs" in data:
+                    requirements.append({
+                        "type": "forceCoeffs",
+                        "fields": ["p", "U"],
+                        "reason": f"{metric_id} 需要力系数数据",
+                        "metric_id": metric_id,
+                    })
+                elif "pressure" in data.lower():
+                    requirements.append({
+                        "type": "surfaceFieldValue",
+                        "fields": ["p"],
+                        "reason": f"{metric_id} 需要压力采样",
+                        "metric_id": metric_id,
+                    })
+                elif "velocity" in data.lower():
+                    requirements.append({
+                        "type": "probes",
+                        "fields": ["U"],
+                        "reason": f"{metric_id} 需要速度采样",
+                        "metric_id": metric_id,
+                    })
+        return requirements
+
     @staticmethod
     def _extract_experiment_type(intent: dict) -> str:
         """Extract experiment type from intent assessment."""

@@ -19,6 +19,9 @@ EditIntent = Literal[
     "add_metric",
     "remove_metric",
     "change_physics_model",
+    "change_initial_condition",
+    "change_mesh",
+    "change_numerics",
     "set_boundary_condition",
     "accept_recommendations",
     "validate_spec",
@@ -80,6 +83,9 @@ OperationType = Literal[
     "remove_metric",
     "set_physics",
     "set_boundary_condition",
+    "set_initial_condition",
+    "set_mesh",
+    "set_numerics",
     "accept_recommendation",
 ]
 
