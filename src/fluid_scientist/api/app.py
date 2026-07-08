@@ -2484,6 +2484,158 @@ def create_app(
             "entry_point": "system/controlDict",
         }
 
+    @application.post(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/clone",
+        status_code=status.HTTP_201_CREATED,
+        tags=["experiment-specs"],
+    )
+    def clone_experiment_spec(
+        project_id: str,
+        experiment_id: str,
+    ) -> dict:
+        """Clone an immutable experiment spec into a new editable draft.
+
+        Creates a brand-new ``experiment_id`` with ``status="draft"``,
+        copying all parameters, physics, and research info, while
+        incrementing ``experiment_version`` by one.  The original spec is
+        left untouched so confirmed results stay immutable.
+        """
+        import json
+
+        stored = workflow_repository.load_experiment_spec(experiment_id)
+        if stored is None or stored.project_id != project_id:
+            raise HTTPException(status_code=404, detail="experiment spec not found")
+
+        spec = ExperimentSpec.model_validate_json(stored.spec_json)
+
+        new_experiment_id = f"exp-{uuid4().hex[:16]}"
+        new_version = stored.experiment_version + 1
+        now = datetime.now(UTC).isoformat()
+
+        cloned_spec = spec.model_copy(
+            update={
+                "experiment_id": new_experiment_id,
+                "experiment_version": new_version,
+                "status": ExperimentStatus.DRAFT,
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+        new_stored = StoredExperimentSpec(
+            experiment_id=new_experiment_id,
+            project_id=project_id,
+            schema_version=cloned_spec.schema_version,
+            experiment_version=new_version,
+            status=cloned_spec.status.value,
+            task_type=cloned_spec.task_type.value,
+            interaction_mode=cloned_spec.interaction_mode.value,
+            spec_json=cloned_spec.model_dump_json(),
+            created_at=now,
+            updated_at=now,
+        )
+        try:
+            workflow_repository.save_experiment_spec(new_stored)
+        except Exception as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+        return json.loads(new_stored.spec_json)
+
+    @application.get(
+        "/api/projects/{project_id}/experiment-specs/{experiment_id}/pre-check",
+        tags=["experiment-specs"],
+    )
+    def pre_check_experiment_spec(
+        project_id: str,
+        experiment_id: str,
+    ) -> dict:
+        """Pre-compile validation for an experiment spec.
+
+        Checks performed before allowing Case generation:
+        1. ``spec.status`` is ``confirmed`` (blocking otherwise).
+        2. No parameters with ``source.type == "unknown"`` (blocking).
+        3. No missing/unapproved code capabilities (blocking).
+
+        Returns ``can_compile`` plus structured ``blocking_issues`` and
+        informational ``warnings``.
+        """
+        stored = workflow_repository.load_experiment_spec(experiment_id)
+        if stored is None or stored.project_id != project_id:
+            raise HTTPException(status_code=404, detail="experiment spec not found")
+
+        spec = ExperimentSpec.model_validate_json(stored.spec_json)
+
+        blocking_issues: list[dict[str, Any]] = []
+        warnings: list[str] = []
+
+        status_val = (
+            spec.status.value if hasattr(spec.status, "value") else str(spec.status)
+        )
+
+        # Check 1: status must be confirmed before compiling.
+        if status_val != "confirmed":
+            blocking_issues.append(
+                {
+                    "type": "status",
+                    "message": (
+                        f"实验规格当前状态为「{status_val}」，"
+                        "需要先确认实验版本后再生成 Case。"
+                    ),
+                }
+            )
+
+        # Check 2: parameters with unknown source block compilation.
+        for param in spec.parameters:
+            source_type = (
+                param.source.type.value
+                if hasattr(param.source.type, "value")
+                else str(param.source.type)
+            )
+            if source_type == "unknown":
+                blocking_issues.append(
+                    {
+                        "type": "unknown_required",
+                        "parameter_id": param.parameter_id,
+                        "message": (
+                            f"参数「{param.display_name}」来源未知，"
+                            "需先确认后再生成 Case。"
+                        ),
+                    }
+                )
+
+        # Check 3: missing / unapproved code capabilities block compilation.
+        for ext in spec.code_extensions:
+            approval_state = ext.get("approval_state") or ext.get("status")
+            if approval_state in (None, "pending", "missing", "required", "rejected"):
+                capability_id = (
+                    ext.get("capability_id")
+                    or ext.get("id")
+                    or ext.get("name", "unknown")
+                )
+                blocking_issues.append(
+                    {
+                        "type": "missing_capability",
+                        "capability_id": capability_id,
+                        "message": (
+                            f"缺少能力「{capability_id}」，"
+                            "需先完成代码扩展审批。"
+                        ),
+                    }
+                )
+
+        # Warnings: critical parameters that still lack a value.
+        for param in spec.critical_unresolved():
+            warnings.append(
+                f"关键参数「{param.display_name}」尚未确认。"
+            )
+
+        can_compile = len(blocking_issues) == 0
+        return {
+            "experiment_id": experiment_id,
+            "can_compile": can_compile,
+            "blocking_issues": blocking_issues,
+            "warnings": warnings,
+        }
+
     # ------------------------------------------------------------------ #
     # Analysis main flow: Ingestor -> MetricExecutor -> ScientificAnalyzer
     # ------------------------------------------------------------------ #

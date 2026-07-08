@@ -1196,23 +1196,44 @@ function renderParameterRow(param, spec) {
 
 function updateSpecControls(spec) {
   const saveBtn = byId("spec-save-btn");
+  const applyBtn = byId("spec-apply-btn");
+  const discardBtn = byId("spec-discard-btn");
+  const acceptRecBtn = byId("spec-accept-rec-btn");
   const readyBtn = byId("spec-ready-btn");
   const confirmBtn = byId("spec-confirm-btn");
   const compileBtn = byId("spec-compile-btn");
   const submitBtn = byId("spec-submit-btn");
+  const runStatusBtn = byId("spec-run-status-btn");
+  const reportBtn = byId("spec-report-btn");
+  const capabilityBtn = byId("spec-capability-btn");
+  const cloneBtn = byId("spec-clone-btn");
   if (!readyBtn || !confirmBtn) return;
   const status = spec?.status;
   const editable = isSpecEditable(spec);
   const hasCompilation = !!currentCompilation;
   const submitted = ["running", "completed", "failed", "rejected"].includes(status);
+  // States where the spec is locked and a new version can be cloned.
+  const cloneableStates = ["confirmed", "compiling", "running", "completed", "failed"];
 
-  // 保存草案：草稿/就绪状态下可保存
+  // 保存草案 / 应用修改 / 放弃修改 / 接受推荐值：仅 draft/ready 可编辑
   if (saveBtn) {
     saveBtn.hidden = !editable;
     saveBtn.disabled = !editable;
   }
+  if (applyBtn) {
+    applyBtn.hidden = !editable;
+    applyBtn.disabled = !editable || pendingParameterChanges.size === 0;
+  }
+  if (discardBtn) {
+    discardBtn.hidden = !editable;
+    discardBtn.disabled = !editable || pendingParameterChanges.size === 0;
+  }
+  if (acceptRecBtn) {
+    acceptRecBtn.hidden = !editable;
+    acceptRecBtn.disabled = !editable;
+  }
 
-  // 准备就绪：draft → ready
+  // 接受推荐并校验（准备就绪）：draft → ready
   readyBtn.hidden = status !== "draft";
   readyBtn.disabled = status !== "draft";
 
@@ -1239,6 +1260,90 @@ function updateSpecControls(spec) {
     const canSubmit = hasCompilation && !submitted && !specCompiling;
     submitBtn.hidden = !canSubmit;
     submitBtn.disabled = !canSubmit;
+  }
+
+  // 查看运行状态：running
+  if (runStatusBtn) {
+    runStatusBtn.hidden = status !== "running";
+    runStatusBtn.disabled = status !== "running";
+  }
+
+  // 查看分析报告：completed
+  if (reportBtn) {
+    reportBtn.hidden = status !== "completed";
+    reportBtn.disabled = status !== "completed";
+  }
+
+  // 查看缺失能力：awaiting_code_approval
+  if (capabilityBtn) {
+    capabilityBtn.hidden = status !== "awaiting_code_approval";
+    capabilityBtn.disabled = status !== "awaiting_code_approval";
+  }
+
+  // 修改参数（创建新版本）：confirmed/compiling/running/completed/failed
+  if (cloneBtn) {
+    const canClone = cloneableStates.includes(status);
+    cloneBtn.hidden = !canClone;
+    cloneBtn.disabled = !canClone;
+  }
+
+  // Disabled reason display
+  updateDisabledReason(spec);
+
+  // When confirmed, run an advisory pre-check to surface blocking issues.
+  if (spec && status === "confirmed") {
+    runPreCheck(spec);
+  }
+}
+
+function updateDisabledReason(spec) {
+  const node = byId("spec-disabled-reason");
+  if (!node || !spec) return;
+  const status = spec.status;
+  const editable = isSpecEditable(spec);
+  const reasons = [];
+
+  if (status === "draft") {
+    reasons.push("确认参数后点击「准备就绪」进入校验");
+  } else if (status === "ready") {
+    reasons.push("校验通过后点击「确认实验版本」锁定参数");
+  } else if (status === "confirmed") {
+    const blockingIssues = spec._blocking_issues;
+    if (blockingIssues && blockingIssues.length) {
+      reasons.push("无法生成 Case：" + blockingIssues.map(i => i.message).join("；"));
+    } else {
+      reasons.push("参数已锁定，点击「生成 Case」编译算例");
+    }
+  } else if (status === "awaiting_code_approval") {
+    reasons.push("缺少代码能力，需完成代码扩展审批后继续");
+  } else if (status === "failed") {
+    reasons.push("实验失败，点击「修改参数（创建新版本）」创建修复版本");
+  }
+
+  if (reasons.length) {
+    node.hidden = false;
+    node.textContent = reasons.join("；");
+  } else {
+    node.hidden = true;
+    node.textContent = "";
+  }
+}
+
+async function runPreCheck(spec) {
+  if (!currentProject || !spec) return;
+  try {
+    const preCheck = await requestJson(
+      `/api/projects/${currentProject.project_id}/experiment-specs/${spec.experiment_id}/pre-check`,
+    );
+    if (!currentSpec || spec.experiment_id !== currentSpec.experiment_id) return;
+    currentSpec = { ...currentSpec, _blocking_issues: preCheck.blocking_issues };
+    const node = byId("spec-disabled-reason");
+    if (node && preCheck.blocking_issues && preCheck.blocking_issues.length) {
+      node.hidden = false;
+      node.textContent = "无法生成 Case：" + preCheck.blocking_issues.map(i => i.message).join("；");
+    }
+  } catch (e) {
+    // Pre-check is advisory; silently ignore network errors.
   }
 }
 
@@ -1382,8 +1487,38 @@ function renderSpecWorkbench(spec) {
   submitBtn.id = "spec-submit-btn";
   submitBtn.textContent = "提交运行";
   submitBtn.addEventListener("click", () => submitSpec());
-  actions.append(saveBtn, applyBtn, discardBtn, acceptRecBtn, readyBtn, confirmBtn, compileBtn, submitBtn);
+  const runStatusBtn = document.createElement("button");
+  runStatusBtn.type = "button";
+  runStatusBtn.className = "button button-secondary";
+  runStatusBtn.id = "spec-run-status-btn";
+  runStatusBtn.textContent = "查看运行状态";
+  runStatusBtn.addEventListener("click", () => showRunStatus());
+  const reportBtn = document.createElement("button");
+  reportBtn.type = "button";
+  reportBtn.className = "button button-secondary";
+  reportBtn.id = "spec-report-btn";
+  reportBtn.textContent = "查看分析报告";
+  reportBtn.addEventListener("click", () => showAnalysisReport());
+  const capabilityBtn = document.createElement("button");
+  capabilityBtn.type = "button";
+  capabilityBtn.className = "button button-secondary";
+  capabilityBtn.id = "spec-capability-btn";
+  capabilityBtn.textContent = "查看缺失能力";
+  capabilityBtn.addEventListener("click", () => showMissingCapabilities());
+  const cloneBtn = document.createElement("button");
+  cloneBtn.type = "button";
+  cloneBtn.className = "button button-secondary";
+  cloneBtn.id = "spec-clone-btn";
+  cloneBtn.textContent = "修改参数（创建新版本）";
+  cloneBtn.addEventListener("click", () => cloneSpec());
+  actions.append(saveBtn, applyBtn, discardBtn, acceptRecBtn, readyBtn, confirmBtn, compileBtn, submitBtn, runStatusBtn, reportBtn, capabilityBtn, cloneBtn);
   card.append(actions);
+
+  const disabledReason = document.createElement("div");
+  disabledReason.className = "spec-disabled-reason";
+  disabledReason.id = "spec-disabled-reason";
+  disabledReason.hidden = true;
+  card.append(disabledReason);
 
   updateSpecControls(spec);
 
@@ -2058,6 +2193,23 @@ async function compileSpec() {
     renderError("生成 Case", new Error("仅已确认的实验规格可以生成 Case"));
     return false;
   }
+  // Pre-compile validation: surface blocking issues before compiling.
+  try {
+    const preCheck = await requestJson(
+      `/api/projects/${currentProject.project_id}/experiment-specs/${currentSpec.experiment_id}/pre-check`,
+    );
+    if (!preCheck.can_compile) {
+      currentSpec = { ...currentSpec, _blocking_issues: preCheck.blocking_issues };
+      updateDisabledReason(currentSpec);
+      const messages = preCheck.blocking_issues.map(i => i.message).join("；");
+      showWorkbenchToast(`无法生成 Case：${messages}`, "error");
+      return false;
+    }
+    currentSpec = { ...currentSpec, _blocking_issues: [] };
+  } catch (error) {
+    showWorkbenchToast(`预检查失败：${error.message || error}`, "error");
+    return false;
+  }
   specCompiling = true;
   renderSpecWorkbench(currentSpec);
   try {
@@ -2081,6 +2233,53 @@ async function compileSpec() {
     return false;
   } finally {
     specCompiling = false;
+  }
+}
+
+// 创建新版本：克隆已确认/不可变实验规格为可编辑草稿
+async function cloneSpec() {
+  if (!currentProject || !currentSpec) return;
+  const ok = window.confirm(
+    "当前实验版本已确认。修改参数将创建新版本，不影响当前版本和结果。"
+  );
+  if (!ok) return;
+  try {
+    const cloned = await requestJson(
+      `/api/projects/${currentProject.project_id}/experiment-specs/${currentSpec.experiment_id}/clone`,
+      { method: "POST" },
+    );
+    currentSpec = cloned;
+    currentCompilation = null;
+    pendingParameterChanges.clear();
+    renderSpecWorkbench(cloned);
+    showWorkbenchToast(`已创建新版本 v${cloned.experiment_version}`, "success");
+  } catch (error) {
+    showWorkbenchToast(`创建新版本失败：${error.message || error}`, "error");
+  }
+}
+
+// 查看运行状态：展示当前运行任务信息
+function showRunStatus() {
+  if (!currentSpec) return;
+  const jobId = currentSpec._job_id || currentSpec._external_job_id || "（未记录）";
+  showWorkbenchToast(`运行中任务：${jobId}`, "info");
+}
+
+// 查看分析报告：跳转或提示分析报告
+function showAnalysisReport() {
+  if (!currentSpec) return;
+  showWorkbenchToast("分析报告生成中，请稍后查看分析模块。", "info");
+}
+
+// 查看缺失能力：展示缺失的代码扩展能力
+function showMissingCapabilities() {
+  if (!currentSpec) return;
+  const exts = currentSpec.code_extensions || [];
+  if (exts.length) {
+    const names = exts.map(e => e.capability_id || e.id || e.name || "未知").join("，");
+    showWorkbenchToast(`缺失能力：${names}`, "info");
+  } else {
+    showWorkbenchToast("当前无缺失能力记录。", "info");
   }
 }
 

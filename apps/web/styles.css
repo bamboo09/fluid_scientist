@@ -1135,3 +1135,16 @@ select, input[type="text"], input[type="password"] {
   border-radius: 0.25rem;
   border: 1px solid var(--border, #e5e7eb);
 }
+
+
+/* Disabled reason hint shown below the action buttons. */
+.spec-disabled-reason {
+  margin-top: 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #fff8e1;
+  border: 1px solid #ffe082;
+  color: #795548;
+  font-size: 13px;
+  line-height: 1.5;
+}
