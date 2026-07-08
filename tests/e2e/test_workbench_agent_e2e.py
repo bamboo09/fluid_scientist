@@ -46,7 +46,6 @@ from fluid_scientist.workbench.parameter_schema_planner import (
 from fluid_scientist.workbench.validator import WorkbenchValidator
 from fluid_scientist.workbench.workbench_agent import WorkbenchAgent
 
-
 # ===========================================================================
 # Helper functions for building test specs
 # ===========================================================================
@@ -833,7 +832,7 @@ class TestDerivationEngine:
             ]
         }
         original_value = 5.0
-        updates = engine.propagate(spec, ["mass_flow_rate"])
+        engine.propagate(spec, ["mass_flow_rate"])
 
         # propagate() must not mutate the spec -- the user-confirmed value
         # should be preserved in the spec dict.
