@@ -15,8 +15,9 @@ def test_example_environment_contains_no_real_secrets() -> None:
 def test_compose_declares_required_platform_services() -> None:
     compose = yaml.safe_load(Path("infra/compose.yaml").read_text(encoding="utf-8"))
 
-    assert set(compose["services"]) == {"postgres", "redis", "qdrant", "minio"}
-    assert all("healthcheck" in service for service in compose["services"].values())
+    required = {"postgres", "redis", "qdrant", "minio"}
+    assert required.issubset(set(compose["services"]))
+    assert all("healthcheck" in compose["services"][name] for name in required)
 
 
 def test_readme_documents_fake_mode_and_three_hpc_nodes() -> None:

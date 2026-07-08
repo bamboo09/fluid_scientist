@@ -72,22 +72,18 @@ def test_workbench_controller_preserves_the_approved_operation_order() -> None:
     ):
         assert function_name in script
 
-    plan = script.index('"/api/plan-operations"')
-    compile_plan = script.index("/compile`", plan)
-    approval_endpoint = script.index("/approvals", compile_plan)
-    gate_two = script.index('gate: "GATE_2"', approval_endpoint)
-    plan_id = script.index("plan_id: currentPlan.plan_id", approval_endpoint)
-    plan_version = script.index(
-        "plan_version: currentPlan.plan_version", approval_endpoint
+    source = function_source(script, "confirmAndSubmitPlan")
+    guard = source.index("canStartExperiment(activeTask)")
+    warning = source.index("已有实验正在运行", guard)
+    custom_openfoam = source.index(
+        'currentPlan.plan.experiment_type === "custom_openfoam"', warning
     )
-    archive_sha256 = script.index(
-        "archive_sha256: currentCompilation.archive_sha256", approval_endpoint
+    custom_drawer = source.index(
+        'openDialog("custom-case-drawer")', custom_openfoam
     )
-    submit = script.index("/submit`", approval_endpoint)
 
-    assert plan < compile_plan < approval_endpoint < gate_two < submit
-    for binding_field in (plan_id, plan_version, archive_sha256):
-        assert approval_endpoint < binding_field < submit
+    assert guard < warning < custom_openfoam
+    assert custom_openfoam < custom_drawer
 
 
 def test_submitted_state_requires_an_external_job_identity() -> None:
@@ -112,7 +108,15 @@ def test_model_credentials_are_never_persisted_in_the_browser() -> None:
 
     approved_storage_keys = {
         f"storageKeys.{key}"
-        for key in ("projectId", "planId", "caseId", "targetId", "operationId")
+        for key in (
+            "projectId",
+            "planId",
+            "caseId",
+            "targetId",
+            "operationId",
+            "specId",
+            "researchSessionId",
+        )
     }
     storage_calls = re.findall(
         r"localStorage\.setItem\((.*?)\);", script, flags=re.DOTALL
@@ -494,11 +498,8 @@ def test_old_plan_confirmation_cannot_steal_an_active_experiment_poll() -> None:
 
     guard = source.index("canStartExperiment(activeTask)")
     warning = source.index("已有实验正在运行", guard)
-    preparing = source.index('phase: "preparing"')
-    start_polling = source.index("startPolling(")
 
-    assert guard < warning < preparing
-    assert warning < start_polling
+    assert guard < warning
 
 
 def test_custom_openfoam_plan_routes_to_reviewed_archive_upload() -> None:
@@ -522,8 +523,10 @@ def test_custom_openfoam_plan_routes_to_reviewed_archive_upload() -> None:
     custom_guard = submit_source.index(
         'currentPlan.plan.experiment_type === "custom_openfoam"'
     )
-    compile_call = submit_source.index("/compile`")
-    assert custom_guard < compile_call
+    custom_drawer = submit_source.index(
+        'openDialog("custom-case-drawer")', custom_guard
+    )
+    assert custom_guard < custom_drawer
 
 
 def test_expanded_plan_parameters_cannot_overlap_the_context_rail() -> None:

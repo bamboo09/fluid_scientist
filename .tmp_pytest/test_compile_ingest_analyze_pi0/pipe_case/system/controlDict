@@ -1,0 +1,87 @@
+FoamFile
+{
+    version     2.0;
+    format      ascii;
+    class       dictionary;
+    location    "system";
+    object      controlDict;
+}
+
+solver          incompressibleFluid;
+startFrom       startTime;
+startTime       0;
+stopAt          endTime;
+endTime         2000;
+deltaT          1;
+writeControl    timeStep;
+writeInterval   2000;
+purgeWrite      1;
+writeFormat     ascii;
+writePrecision  10;
+writeCompression off;
+timeFormat      general;
+timePrecision   6;
+runTimeModifiable true;
+functions
+{
+    pressureDrop
+    {
+        type fieldValueDelta;
+        libs ("libfieldFunctionObjects.so");
+        writeControl timeStep;
+        writeInterval 1;
+        operation subtract;
+        region1
+        {
+            type surfaceFieldValue;
+            libs ("libfieldFunctionObjects.so");
+            writeControl timeStep;
+            writeInterval 1;
+            writeFields false;
+            operation areaAverage;
+            fields (p);
+            patch inlet;
+        }
+        region2
+        {
+            type surfaceFieldValue;
+            libs ("libfieldFunctionObjects.so");
+            writeControl timeStep;
+            writeInterval 1;
+            writeFields false;
+            operation areaAverage;
+            fields (p);
+            patch outlet;
+        }
+    }
+    inletFlow
+    {
+        type surfaceFieldValue;
+        libs ("libfieldFunctionObjects.so");
+        writeControl timeStep;
+        writeInterval 1;
+        writeFields false;
+        operation sum;
+        fields (phi);
+        patch inlet;
+    }
+    outletFlow
+    {
+        type surfaceFieldValue;
+        libs ("libfieldFunctionObjects.so");
+        writeControl timeStep;
+        writeInterval 1;
+        writeFields false;
+        operation sum;
+        fields (phi);
+        patch outlet;
+    }
+    residuals
+    {
+        type residuals;
+        libs ("libutilityFunctionObjects.so");
+        fields (U p);
+        writeControl timeStep;
+        writeInterval 1;
+    }
+}
