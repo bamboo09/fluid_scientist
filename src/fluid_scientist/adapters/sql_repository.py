@@ -82,11 +82,16 @@ def _enable_sqlite_foreign_keys(dbapi_connection, connection_record) -> None:
 
 
 def _migrate_compiled_experiments_plan_id_impl(engine) -> None:
-    """Rename compiled_experiments.plan_id to experiment_id if needed.
+    """Rename compiled_experiments.plan_id to experiment_id and drop the legacy FK.
 
-    SQLite 3.25+ supports ALTER TABLE ... RENAME COLUMN.  For older
-    versions the migration is a no-op (the table will be created with
-    the correct column name by create_all).
+    The original ``compiled_experiments`` table was created with
+    ``FOREIGN KEY (plan_id) REFERENCES experiment_plans(plan_id)``.  A plain
+    ``ALTER TABLE ... RENAME COLUMN plan_id TO experiment_id`` leaves that
+    constraint in place (as ``FOREIGN KEY (experiment_id) REFERENCES
+    experiment_plans``), which rejects compiled experiments whose
+    ``experiment_id`` originates from ``experiment_specs`` instead of
+    ``experiment_plans``.  SQLite cannot ``DROP CONSTRAINT``, so the table is
+    rebuilt without the foreign key using the standard SQLite rebuild pattern.
     """
     from sqlalchemy import inspect, text
 
@@ -95,15 +100,44 @@ def _migrate_compiled_experiments_plan_id_impl(engine) -> None:
         return
     columns = {col["name"] for col in inspector.get_columns("compiled_experiments")}
     if "plan_id" in columns and "experiment_id" not in columns:
+        # Rebuild the table without the legacy foreign key.  PRAGMA
+        # foreign_keys is a no-op inside a transaction, but the rebuild is
+        # safe regardless: the freshly created table has no foreign key, so
+        # the data copy is never FK-checked, and dropping the renamed child
+        # table is always permitted.
         with engine.begin() as conn:
-            # Disable FK enforcement during migration to avoid issues
             conn.execute(text("PRAGMA foreign_keys=OFF"))
             conn.execute(
                 text(
                     "ALTER TABLE compiled_experiments "
-                    "RENAME COLUMN plan_id TO experiment_id"
+                    "RENAME TO compiled_experiments_old"
                 )
             )
+            conn.execute(
+                text(
+                    "CREATE TABLE compiled_experiments ("
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+                    "experiment_id VARCHAR(128), "
+                    "plan_version INTEGER NOT NULL, "
+                    "archive_sha256 VARCHAR(71) NOT NULL, "
+                    "archive BLOB NOT NULL, "
+                    "preview_json TEXT NOT NULL, "
+                    "created_at VARCHAR(64) NOT NULL, "
+                    "UNIQUE (experiment_id, plan_version)"
+                    ")"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO compiled_experiments "
+                    "(experiment_id, plan_version, archive_sha256, archive, "
+                    "preview_json, created_at) "
+                    "SELECT plan_id, plan_version, archive_sha256, archive, "
+                    "preview_json, created_at "
+                    "FROM compiled_experiments_old"
+                )
+            )
+            conn.execute(text("DROP TABLE compiled_experiments_old"))
             conn.execute(text("PRAGMA foreign_keys=ON"))
 
 
