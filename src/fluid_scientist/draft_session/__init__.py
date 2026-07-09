@@ -10,9 +10,11 @@ without external dependencies.
 
 from fluid_scientist.draft_session.input_router import InputRouter
 from fluid_scientist.draft_session.models import (
+    ClarificationQuestion,
     DraftSession,
     DraftSessionStatus,
     InputRoute,
+    LLMCallRecord,
     ResearchState,
     SessionMessage,
 )
@@ -23,12 +25,14 @@ from fluid_scientist.draft_session.state_machine import (
 )
 
 __all__ = [
+    "ClarificationQuestion",
     "DraftSession",
     "DraftSessionStateMachine",
     "DraftSessionStatus",
     "DraftSessionStore",
     "InputRoute",
     "InputRouter",
+    "LLMCallRecord",
     "ResearchState",
     "SessionMessage",
     "TransitionError",

@@ -11,6 +11,7 @@ Typical flow::
     # ... each block is parsed into a StudyIntent, grouped into a BatchStudyPlan
 """
 
+from fluid_scientist.study_decomposition.condition_extractor import ConditionExtractor
 from fluid_scientist.study_decomposition.models import (
     AmbiguityItem,
     BatchStudyPlan,
@@ -19,16 +20,23 @@ from fluid_scientist.study_decomposition.models import (
     PhysicsFrame,
     StudyIntent,
 )
+from fluid_scientist.study_decomposition.observable_extractor import ObservableExtractor
+from fluid_scientist.study_decomposition.parameter_extractor import ParameterExtractor
 from fluid_scientist.study_decomposition.physics_extractor import PhysicsFrameExtractor
 from fluid_scientist.study_decomposition.splitter import StudySplitter
+from fluid_scientist.study_decomposition.study_type_classifier import StudyTypeClassifier
 
 __all__ = [
     "AmbiguityItem",
     "BatchStudyPlan",
+    "ConditionExtractor",
     "ExtractedParameter",
+    "ObservableExtractor",
     "ObservableSpec",
+    "ParameterExtractor",
     "PhysicsFrame",
     "PhysicsFrameExtractor",
     "StudyIntent",
     "StudySplitter",
+    "StudyTypeClassifier",
 ]

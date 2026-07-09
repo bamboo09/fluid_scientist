@@ -19,6 +19,7 @@ from typing import Any
 
 from fluid_scientist.draft.models import (
     ChangeProposal,
+    DraftChange,
     DraftParameter,
     ExperimentDraft,
 )
@@ -37,6 +38,8 @@ CHANGE_TYPES = [
     "change_mesh",
     "change_numerics",
     "change_solver",
+    "add_assumption",
+    "remove_assumption",
     "question",
     "clarification_required",
     "missing_capability",
@@ -52,10 +55,22 @@ class DraftChangeAgent:
         user_message: str,
         session_id: str | None = None,
     ) -> ChangeProposal:
-        """Parse *user_message* and return a structured proposal."""
+        """Parse *user_message* and return a structured proposal.
+
+        Raises:
+            ValueError: If *draft* is read-only (locked/confirmed). The API
+                layer must clone locked drafts before calling this method;
+                this check is a defensive safety net.
+        """
+        if draft.is_read_only():
+            raise ValueError(
+                "Cannot generate a change proposal on a locked/confirmed "
+                "draft. Clone the draft to a new editable version first."
+            )
+
         proposal_id = f"proposal_{uuid.uuid4().hex[:12]}"
         sid = session_id or draft.session_id
-        changes: list[dict] = []
+        changes: list[DraftChange] = []
         impact_summary: list[str] = []
         invalidates: list[str] = []
         clarifications: list[dict] = []
@@ -96,13 +111,13 @@ class DraftChangeAgent:
         # --- Detect mesh changes ---
         if self._has_mesh_keywords(msg_lower):
             changes.append(
-                {
-                    "change_type": "change_mesh",
-                    "target_path": "mesh",
-                    "old_value": draft.mesh,
-                    "new_value": None,
-                    "reason": "用户请求修改网格",
-                }
+                DraftChange(
+                    change_type="change_mesh",
+                    target_path="mesh",
+                    old_value=draft.mesh,
+                    new_value=None,
+                    reason="用户请求修改网格",
+                )
             )
             impact_summary.append("网格策略已修改")
             invalidates.extend(["case_files", "mesh"])
@@ -111,13 +126,13 @@ class DraftChangeAgent:
         if self._has_solver_keywords(msg_lower):
             solver_name = self._extract_solver_name(user_message)
             changes.append(
-                {
-                    "change_type": "change_solver",
-                    "target_path": "solver",
-                    "old_value": draft.solver,
-                    "new_value": {"name": solver_name} if solver_name else None,
-                    "reason": "用户请求更换求解器",
-                }
+                DraftChange(
+                    change_type="change_solver",
+                    target_path="solver",
+                    old_value=draft.solver,
+                    new_value={"name": solver_name} if solver_name else None,
+                    reason="用户请求更换求解器",
+                )
             )
             impact_summary.append("求解器已修改")
             invalidates.extend(["solver", "numerics"])
@@ -125,13 +140,13 @@ class DraftChangeAgent:
         # --- Detect questions ---
         if self._is_question(msg_lower):
             changes.append(
-                {
-                    "change_type": "question",
-                    "target_path": None,
-                    "old_value": None,
-                    "new_value": user_message,
-                    "reason": "用户提问",
-                }
+                DraftChange(
+                    change_type="question",
+                    target_path="",
+                    old_value=None,
+                    new_value=user_message,
+                    reason="用户提问",
+                )
             )
 
         # --- If no changes detected, mark as clarification_required ---
@@ -164,9 +179,9 @@ class DraftChangeAgent:
     # ------------------------------------------------------------------ helpers
     def _detect_param_changes(
         self, draft: ExperimentDraft, message: str, msg_lower: str
-    ) -> list[dict]:
+    ) -> list[DraftChange]:
         """Detect set_parameter / add_parameter changes."""
-        changes: list[dict] = []
+        changes: list[DraftChange] = []
         # Pattern: "把 Re 改成 5000" / "Re=5000" / "将直径设为 0.2"
         set_patterns = [
             r"(?:把|将|让)?\s*(\w+)\s*(?:改成|改为|设为|修改为|调整为|换成|更新为)\s*([\d.]+)",
@@ -187,30 +202,29 @@ class DraftChangeAgent:
                 existing = self._find_param(draft, param_name)
                 if existing:
                     changes.append(
-                        {
-                            "change_type": "set_parameter",
-                            "target_path": f"control_parameters.{existing.parameter_id}",
-                            "old_value": existing.value,
-                            "new_value": new_value,
-                            "reason": f"用户修改 {param_name}",
-                        }
+                        DraftChange(
+                            change_type="set_parameter",
+                            target_path=f"control_parameters.{existing.parameter_id}",
+                            old_value=existing.value,
+                            new_value=new_value,
+                            reason=f"用户修改 {param_name}",
+                        )
                     )
                 else:
                     changes.append(
-                        {
-                            "change_type": "add_parameter",
-                            "target_path": f"control_parameters.{param_name}",
-                            "old_value": None,
-                            "new_value": new_value,
-                            "reason": f"用户新增参数 {param_name}",
-                            "flag_unknown_parameter": True,
-                        }
+                        DraftChange(
+                            change_type="add_parameter",
+                            target_path=f"control_parameters.{param_name}",
+                            old_value=None,
+                            new_value=new_value,
+                            reason=f"用户新增参数 {param_name}",
+                        )
                     )
         return changes
 
-    def _detect_bc_changes(self, message: str, msg_lower: str) -> list[dict]:
+    def _detect_bc_changes(self, message: str, msg_lower: str) -> list[DraftChange]:
         """Detect boundary condition changes."""
-        changes: list[dict] = []
+        changes: list[DraftChange] = []
         bc_keywords = ["边界", "boundary", "入口", "inlet", "出口", "outlet", "壁面", "wall"]
         if not any(kw in msg_lower for kw in bc_keywords):
             return changes
@@ -229,19 +243,19 @@ class DraftChangeAgent:
 
         if boundary:
             changes.append(
-                {
-                    "change_type": "change_boundary_condition",
-                    "target_path": f"boundary_conditions.{boundary}",
-                    "old_value": None,
-                    "new_value": None,
-                    "reason": f"用户修改 {boundary} 边界条件",
-                }
+                DraftChange(
+                    change_type="change_boundary_condition",
+                    target_path=f"boundary_conditions.{boundary}",
+                    old_value=None,
+                    new_value=None,
+                    reason=f"用户修改 {boundary} 边界条件",
+                )
             )
         return changes
 
-    def _detect_ic_changes(self, message: str, msg_lower: str) -> list[dict]:
+    def _detect_ic_changes(self, message: str, msg_lower: str) -> list[DraftChange]:
         """Detect initial condition changes."""
-        changes: list[dict] = []
+        changes: list[DraftChange] = []
         ic_keywords = ["初始", "initial", "初场", "初始化"]
         if not any(kw in msg_lower for kw in ic_keywords):
             return changes
@@ -249,19 +263,19 @@ class DraftChangeAgent:
         if not any(kw in msg_lower for kw in change_keywords):
             return changes
         changes.append(
-            {
-                "change_type": "change_initial_condition",
-                "target_path": "initial_conditions",
-                "old_value": None,
-                "new_value": None,
-                "reason": "用户修改初始条件",
-            }
+            DraftChange(
+                change_type="change_initial_condition",
+                target_path="initial_conditions",
+                old_value=None,
+                new_value=None,
+                reason="用户修改初始条件",
+            )
         )
         return changes
 
-    def _detect_physics_changes(self, message: str, msg_lower: str) -> list[dict]:
+    def _detect_physics_changes(self, message: str, msg_lower: str) -> list[DraftChange]:
         """Detect physics model changes."""
-        changes: list[dict] = []
+        changes: list[DraftChange] = []
         physics_keywords = [
             "物理模型", "physics model", "湍流模型", "turbulence",
             "les", "rans", "des", "大涡", "雷诺平均",
@@ -281,19 +295,19 @@ class DraftChangeAgent:
             model = "DES"
 
         changes.append(
-            {
-                "change_type": "change_physics_model",
-                "target_path": "physics_models.turbulence_model",
-                "old_value": None,
-                "new_value": model,
-                "reason": f"用户修改湍流模型为 {model}" if model else "用户修改物理模型",
-            }
+            DraftChange(
+                change_type="change_physics_model",
+                target_path="physics_models.turbulence_model",
+                old_value=None,
+                new_value=model,
+                reason=f"用户修改湍流模型为 {model}" if model else "用户修改物理模型",
+            )
         )
         return changes
 
-    def _detect_output_changes(self, message: str, msg_lower: str) -> list[dict]:
+    def _detect_output_changes(self, message: str, msg_lower: str) -> list[DraftChange]:
         """Detect add_output / remove_output changes."""
-        changes: list[dict] = []
+        changes: list[DraftChange] = []
         add_keywords = ["增加输出", "添加输出", "输出", "增加", "add output", "add"]
         remove_keywords = ["删除输出", "去掉输出", "移除", "remove output", "remove"]
         output_targets = ["阻力", "drag", "升力", "lift", "压力", "pressure", "热", "heat"]
@@ -302,23 +316,23 @@ class DraftChangeAgent:
             if target in msg_lower:
                 if any(kw in msg_lower for kw in remove_keywords):
                     changes.append(
-                        {
-                            "change_type": "remove_output",
-                            "target_path": f"requested_outputs.{target}",
-                            "old_value": None,
-                            "new_value": None,
-                            "reason": f"用户移除输出 {target}",
-                        }
+                        DraftChange(
+                            change_type="remove_output",
+                            target_path=f"requested_outputs.{target}",
+                            old_value=None,
+                            new_value=None,
+                            reason=f"用户移除输出 {target}",
+                        )
                     )
                 elif any(kw in msg_lower for kw in add_keywords):
                     changes.append(
-                        {
-                            "change_type": "add_output",
-                            "target_path": f"requested_outputs.{target}",
-                            "old_value": None,
-                            "new_value": {"name": target},
-                            "reason": f"用户新增输出 {target}",
-                        }
+                        DraftChange(
+                            change_type="add_output",
+                            target_path=f"requested_outputs.{target}",
+                            old_value=None,
+                            new_value={"name": target},
+                            reason=f"用户新增输出 {target}",
+                        )
                     )
         return changes
 
@@ -371,12 +385,12 @@ class DraftChangeAgent:
                 return p
         return None
 
-    def _build_summary(self, changes: list[dict], user_message: str) -> str:
+    def _build_summary(self, changes: list[DraftChange], user_message: str) -> str:
         if not changes:
             return f"需要澄清用户意图: {user_message[:50]}"
         type_counts: dict[str, int] = {}
         for c in changes:
-            ct = c.get("change_type", "unknown")
+            ct = c.change_type
             type_counts[ct] = type_counts.get(ct, 0) + 1
         parts = [f"{count}个{ct}" for ct, count in type_counts.items()]
         return f"修改提案包含: {', '.join(parts)}"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fluid_scientist.draft.models import (
     ChangeProposal,
+    DraftChange,
     DraftParameter,
     DraftStatus,
     ExperimentDraft,
@@ -258,20 +259,20 @@ class TestChangeProposal:
             base_draft_version=1,
             summary="Increase Reynolds number",
             changes=[
-                {
-                    "change_type": "update_parameter",
-                    "target_path": "control_parameters[re]",
-                    "old_value": 3900,
-                    "new_value": 5000,
-                    "reason": "user requested higher Re",
-                },
+                DraftChange(
+                    change_type="set_parameter",
+                    target_path="control_parameters.re",
+                    old_value=3900,
+                    new_value=5000,
+                    reason="user requested higher Re",
+                ),
             ],
             impact_summary=["Mesh must be refined"],
             invalidates=["mesh_plan_v1"],
         )
         assert proposal.summary == "Increase Reynolds number"
         assert len(proposal.changes) == 1
-        assert proposal.changes[0]["new_value"] == 5000
+        assert proposal.changes[0].new_value == 5000
         assert proposal.impact_summary == ["Mesh must be refined"]
 
 

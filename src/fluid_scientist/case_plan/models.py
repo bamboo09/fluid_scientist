@@ -40,6 +40,13 @@ class MissingCapability(BaseModel):
     reason: str
     severity: Literal["blocking", "warning"] = "blocking"
     extension_spec_id: str | None = None
+    required_by: list[str] = Field(default_factory=list)
+    suggested_resolution: Literal[
+        "ask_user_to_simplify",
+        "use_supported_alternative",
+        "create_code_extension",
+    ] = "create_code_extension"
+    alternative_options: list[dict] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

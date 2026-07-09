@@ -193,7 +193,48 @@ class ExperimentDraft(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 5. ChangeProposal
+# 5. DraftChange
+# ---------------------------------------------------------------------------
+
+
+class DraftChange(BaseModel):
+    """A single atomic change to a draft.
+
+    Each change describes one modification with its ``change_type``,
+    ``target_path`` (a dot-separated path into the draft structure), the
+    ``old_value`` / ``new_value``, an optional ``unit``, the ``reason`` for
+    the change, and a ``confidence`` score (0.0–1.0).
+    """
+
+    change_type: Literal[
+        "set_parameter",
+        "add_parameter",
+        "remove_parameter",
+        "add_output",
+        "remove_output",
+        "change_boundary_condition",
+        "change_initial_condition",
+        "change_physics_model",
+        "change_geometry",
+        "change_mesh",
+        "change_numerics",
+        "change_solver",
+        "add_assumption",
+        "remove_assumption",
+        "question",
+        "clarification_required",
+        "missing_capability",
+    ]
+    target_path: str
+    old_value: Any | None = None
+    new_value: Any | None = None
+    unit: str | None = None
+    reason: str = ""
+    confidence: float = 0.0
+
+
+# ---------------------------------------------------------------------------
+# 6. ChangeProposal
 # ---------------------------------------------------------------------------
 
 
@@ -202,9 +243,8 @@ class ChangeProposal(BaseModel):
 
     Because confirmed drafts are read-only, any refinement must be expressed
     as a :class:`ChangeProposal` that the user reviews before it is applied
-    deterministically.  Each entry in ``changes`` describes a single
-    modification with ``change_type``, ``target_path``, ``old_value``,
-    ``new_value`` and ``reason``.
+    deterministically.  Each entry in ``changes`` is a :class:`DraftChange`
+    describing a single modification.
     """
 
     proposal_id: str
@@ -213,7 +253,7 @@ class ChangeProposal(BaseModel):
     base_draft_version: int
     status: Literal["pending", "applied", "cancelled", "expired"] = "pending"
     summary: str = ""
-    changes: list[dict] = Field(default_factory=list)
+    changes: list[DraftChange] = Field(default_factory=list)
     impact_summary: list[str] = Field(default_factory=list)
     invalidates: list[str] = Field(default_factory=list)
     requires_confirmation: bool = True
@@ -223,7 +263,7 @@ class ChangeProposal(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 6. ValidationResult
+# 7. ValidationResult
 # ---------------------------------------------------------------------------
 
 
@@ -244,6 +284,7 @@ class ValidationResult(BaseModel):
 
 __all__ = [
     "ChangeProposal",
+    "DraftChange",
     "DraftParameter",
     "DraftStatus",
     "ExperimentDraft",

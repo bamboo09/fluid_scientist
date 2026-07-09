@@ -19,8 +19,10 @@ from __future__ import annotations
 
 import uuid
 
+from fluid_scientist.draft.derivation import DerivationEngine
 from fluid_scientist.draft.models import (
     ChangeProposal,
+    DraftChange,
     DraftParameter,
     DraftStatus,
     ExperimentDraft,
@@ -28,6 +30,10 @@ from fluid_scientist.draft.models import (
     ValidationResult,
 )
 from fluid_scientist.draft.validator import DraftValidator
+from fluid_scientist.study_decomposition.unknown_mapper import (
+    MetricDefinition,
+    UnknownParameterMapping,
+)
 
 
 class ProposalVersionMismatchError(Exception):
@@ -108,6 +114,134 @@ class UnknownParameterMapper:
             "reason": f"指标 {metric_id} 不在系统已知指标目录中",
         }
 
+    # ------------------------------------------------------------------
+    # Structured-model mapping methods (v5)
+    # ------------------------------------------------------------------
+
+    def map_parameter(self, name: str, context: str = "") -> UnknownParameterMapping:
+        """Return a structured :class:`UnknownParameterMapping` for *name*.
+
+        Unlike :meth:`check_parameter`, which returns a plain dict for
+        backward compatibility, this method always returns a fully
+        populated Pydantic model suitable for the v5 workflow.
+        """
+        check = self.check_parameter(name)
+        is_known = not check["requires_extension"]
+
+        category = self._guess_parameter_category(name)
+        confidence = 0.9 if is_known else 0.3
+
+        return UnknownParameterMapping(
+            canonical_id=name.lower().replace(" ", "_").replace("-", "_"),
+            display_name=name,
+            category=category,
+            unit=None,
+            expected_type="float",
+            description=f"Parameter '{name}' discovered in user input."
+                        + (f" Context: {context}" if context else ""),
+            affects=[],
+            requires_user_value=not is_known,
+            can_recommend_default=is_known,
+            capability_check_required=not is_known,
+            confidence=confidence,
+            reason=check.get("reason", ""),
+        )
+
+    def map_metric(self, name: str, context: str = "") -> MetricDefinition:
+        """Return a structured :class:`MetricDefinition` for *name*.
+
+        Unlike :meth:`check_metric`, which returns a plain dict for
+        backward compatibility, this method always returns a fully
+        populated Pydantic model suitable for the v5 workflow.
+        """
+        check = self.check_metric(name)
+        is_known = not check["requires_extension"]
+
+        category = self._guess_metric_category(name)
+
+        return MetricDefinition(
+            metric_id=name.lower().replace(" ", "_").replace("-", "_"),
+            display_name=name,
+            category=category,
+            formula=None,
+            required_fields=[],
+            required_sampling=[],
+            postprocess_method="python_postprocess",
+            unit=None,
+            capability_check_required=not is_known,
+        )
+
+    # -- Helpers for structured mapping ------------------------------------
+
+    @staticmethod
+    def _guess_parameter_category(name: str) -> str:
+        """Heuristically guess the category of a parameter from its name."""
+        n = name.lower()
+        geometry_keys = ("diameter", "length", "width", "height", "depth",
+                         "radius", "thickness", "gap", "angle", "ratio",
+                         "aspect", "step", "dimension", "size")
+        material_keys = ("density", "viscosity", "rho", "mu", "nu",
+                         "conductivity", "specific_heat", "thermal")
+        bc_keys = ("inlet", "outlet", "wall", "boundary", "pressure",
+                   "velocity_inlet", "bc_")
+        ic_keys = ("initial", "ic_", "initial_condition")
+        physics_keys = ("turbulence", "solver", "model", "reynolds", "froude",
+                        "mach", "strouhal")
+        mesh_keys = ("mesh", "cell", "resolution", "grid", "y_plus", "yplus")
+        numerics_keys = ("time_step", "delta_t", "end_time", "courant",
+                         "cfl", "relaxation", "convergence", "residual")
+
+        if any(k in n for k in geometry_keys):
+            return "geometry"
+        if any(k in n for k in material_keys):
+            return "material_property"
+        if any(k in n for k in bc_keys):
+            return "boundary_condition"
+        if any(k in n for k in ic_keys):
+            return "initial_condition"
+        if any(k in n for k in physics_keys):
+            return "physics_model"
+        if any(k in n for k in mesh_keys):
+            return "mesh"
+        if any(k in n for k in numerics_keys):
+            return "numerics"
+        return "custom"
+
+    @staticmethod
+    def _guess_metric_category(name: str) -> str:
+        """Heuristically guess the category of a metric from its name."""
+        n = name.lower()
+        force_keys = ("drag", "lift", "force", "coefficient", "cd", "cl")
+        pressure_keys = ("pressure", "dp", "delta_p", "head")
+        velocity_keys = ("velocity", "speed", "u_", "v_", "w_", "profile")
+        thermal_keys = ("temperature", "heat", "thermal", "nusselt", "ntu")
+        vorticity_keys = ("vorticity", "vortex", "enstrophy")
+        uniformity_keys = ("uniformity", "homogeneity", "distortion")
+        frequency_keys = ("frequency", "strouhal", "shedding", "oscillation")
+        reattachment_keys = ("reattachment", "recirculation", "wake_length",
+                              "separation")
+        mixing_keys = ("mixing", "concentration", "dilution", "dispersion")
+
+        if any(k in n for k in force_keys):
+            return "force"
+        if any(k in n for k in pressure_keys):
+            return "pressure"
+        if any(k in n for k in velocity_keys):
+            return "velocity"
+        if any(k in n for k in thermal_keys):
+            return "thermal"
+        if any(k in n for k in vorticity_keys):
+            return "vorticity"
+        if any(k in n for k in uniformity_keys):
+            return "uniformity"
+        if any(k in n for k in frequency_keys):
+            return "frequency"
+        if any(k in n for k in reattachment_keys):
+            return "reattachment"
+        if any(k in n for k in mixing_keys):
+            return "mixing"
+        return "custom"
+
 
 class ApplyProposalExecutor:
     """Apply a confirmed :class:`ChangeProposal` to produce a new draft version."""
@@ -116,9 +250,11 @@ class ApplyProposalExecutor:
         self,
         validator: DraftValidator | None = None,
         unknown_mapper: UnknownParameterMapper | None = None,
+        derivation: DerivationEngine | None = None,
     ) -> None:
         self._validator = validator or DraftValidator()
         self._unknown_mapper = unknown_mapper or UnknownParameterMapper()
+        self._derivation = derivation or DerivationEngine()
 
     def apply(
         self,
@@ -155,6 +291,9 @@ class ApplyProposalExecutor:
             if trigger:
                 extension_triggers.append(trigger)
 
+        # 4b. Recalculate derived parameters
+        self._derivation.recalculate(new_draft)
+
         # 5. Mark proposal as applied
         proposal.status = "applied"
 
@@ -184,10 +323,10 @@ class ApplyProposalExecutor:
 
     # ------------------------------------------------------------------ change application
     def _apply_change(
-        self, draft: ExperimentDraft, change: dict
+        self, draft: ExperimentDraft, change: DraftChange
     ) -> dict | None:
         """Apply a single change to *draft*. Returns extension trigger if any."""
-        change_type = change.get("change_type", "")
+        change_type = change.change_type
 
         if change_type == "set_parameter":
             return self._apply_set_parameter(draft, change)
@@ -213,15 +352,17 @@ class ApplyProposalExecutor:
             self._apply_change_geometry(draft, change)
         elif change_type == "change_numerics":
             self._apply_change_numerics(draft, change)
+        elif change_type in ("add_assumption", "remove_assumption"):
+            pass  # Assumption changes are handled at draft level
         elif change_type in ("question", "clarification_required", "missing_capability"):
             pass  # No draft mutation needed
 
         return None
 
     def _apply_set_parameter(
-        self, draft: ExperimentDraft, change: dict
+        self, draft: ExperimentDraft, change: DraftChange
     ) -> dict | None:
-        target = change.get("target_path", "")
+        target = change.target_path
         # Extract parameter_id from "control_parameters.{id}"
         parts = target.split(".", 1)
         if len(parts) < 2:
@@ -229,19 +370,19 @@ class ApplyProposalExecutor:
         param_id = parts[1]
         for p in draft.control_parameters:
             if p.parameter_id == param_id:
-                p.value = change.get("new_value")
+                p.value = change.new_value
                 p.source = ParameterSource.USER_PROVIDED
                 p.source_reason = "用户修改"
                 return None
         return None
 
     def _apply_add_parameter(
-        self, draft: ExperimentDraft, change: dict
+        self, draft: ExperimentDraft, change: DraftChange
     ) -> dict | None:
-        target = change.get("target_path", "")
+        target = change.target_path
         parts = target.split(".", 1)
         param_id = parts[1] if len(parts) > 1 else target
-        new_value = change.get("new_value")
+        new_value = change.new_value
 
         # Check if parameter already exists
         for p in draft.control_parameters:
@@ -276,9 +417,9 @@ class ApplyProposalExecutor:
         return None
 
     def _apply_remove_parameter(
-        self, draft: ExperimentDraft, change: dict
+        self, draft: ExperimentDraft, change: DraftChange
     ) -> None:
-        target = change.get("target_path", "")
+        target = change.target_path
         parts = target.split(".", 1)
         if len(parts) < 2:
             return
@@ -288,16 +429,16 @@ class ApplyProposalExecutor:
         ]
 
     def _apply_add_output(
-        self, draft: ExperimentDraft, change: dict
+        self, draft: ExperimentDraft, change: DraftChange
     ) -> None:
-        new_value = change.get("new_value")
+        new_value = change.new_value
         if new_value and isinstance(new_value, dict):
             draft.requested_outputs.append(new_value)
 
     def _apply_remove_output(
-        self, draft: ExperimentDraft, change: dict
+        self, draft: ExperimentDraft, change: DraftChange
     ) -> None:
-        target = change.get("target_path", "")
+        target = change.target_path
         parts = target.split(".", 1)
         if len(parts) < 2:
             return
@@ -308,64 +449,64 @@ class ApplyProposalExecutor:
         ]
 
     def _apply_change_bc(
-        self, draft: ExperimentDraft, change: dict
+        self, draft: ExperimentDraft, change: DraftChange
     ) -> None:
-        target = change.get("target_path", "")
+        target = change.target_path
         parts = target.split(".", 1)
         boundary = parts[1] if len(parts) > 1 else "unknown"
-        new_value = change.get("new_value")
+        new_value = change.new_value
         if new_value:
             draft.boundary_conditions[boundary] = new_value
         else:
             draft.boundary_conditions[boundary] = {
                 "status": "modified",
-                "reason": change.get("reason", ""),
+                "reason": change.reason,
             }
 
     def _apply_change_ic(
-        self, draft: ExperimentDraft, change: dict
+        self, draft: ExperimentDraft, change: DraftChange
     ) -> None:
-        new_value = change.get("new_value")
-        if new_value:
+        new_value = change.new_value
+        if new_value and isinstance(new_value, dict):
             draft.initial_conditions.update(new_value)
         else:
             draft.initial_conditions["status"] = "modified"
 
     def _apply_change_physics(
-        self, draft: ExperimentDraft, change: dict
+        self, draft: ExperimentDraft, change: DraftChange
     ) -> None:
-        new_value = change.get("new_value")
+        new_value = change.new_value
         if new_value:
             draft.physics_models["turbulence_model"] = new_value
 
     def _apply_change_mesh(
-        self, draft: ExperimentDraft, change: dict
+        self, draft: ExperimentDraft, change: DraftChange
     ) -> None:
-        new_value = change.get("new_value")
-        if new_value:
+        new_value = change.new_value
+        if new_value and isinstance(new_value, dict):
             draft.mesh.update(new_value)
         else:
             draft.mesh["status"] = "modified"
 
     def _apply_change_solver(
-        self, draft: ExperimentDraft, change: dict
+        self, draft: ExperimentDraft, change: DraftChange
     ) -> None:
-        new_value = change.get("new_value")
-        if new_value:
+        new_value = change.new_value
+        if new_value and isinstance(new_value, dict):
             draft.solver.update(new_value)
 
     def _apply_change_geometry(
-        self, draft: ExperimentDraft, change: dict
+        self, draft: ExperimentDraft, change: DraftChange
     ) -> None:
-        new_value = change.get("new_value")
-        if new_value:
+        new_value = change.new_value
+        if new_value and isinstance(new_value, dict):
             draft.geometry.update(new_value)
 
     def _apply_change_numerics(
-        self, draft: ExperimentDraft, change: dict
+        self, draft: ExperimentDraft, change: DraftChange
     ) -> None:
-        new_value = change.get("new_value")
-        if new_value:
+        new_value = change.new_value
+        if new_value and isinstance(new_value, dict):
             draft.numerics.update(new_value)
 
 

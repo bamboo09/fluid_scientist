@@ -8,6 +8,7 @@ it, and (later) manages change proposals against confirmed drafts.
 from fluid_scientist.draft.draft_generator import DraftGenerator
 from fluid_scientist.draft.models import (
     ChangeProposal,
+    DraftChange,
     DraftParameter,
     DraftStatus,
     ExperimentDraft,
@@ -18,6 +19,7 @@ from fluid_scientist.draft.validator import DraftValidator
 
 __all__ = [
     "ChangeProposal",
+    "DraftChange",
     "DraftGenerator",
     "DraftParameter",
     "DraftStatus",

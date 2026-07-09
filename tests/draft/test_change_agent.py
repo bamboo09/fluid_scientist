@@ -26,7 +26,6 @@ def _make_draft(**kwargs) -> ExperimentDraft:
                 parameter_id="reynolds_number",
                 display_name="Re",
                 value=3900,
-                dimensionless=False,
                 source=ParameterSource.USER_PROVIDED,
             ),
             DraftParameter(
@@ -49,15 +48,15 @@ class TestDraftChangeAgent:
         draft = _make_draft()
         agent = DraftChangeAgent()
         proposal = agent.generate(draft, "把 Re 改成 5000")
-        set_changes = [c for c in proposal.changes if c["change_type"] == "set_parameter"]
+        set_changes = [c for c in proposal.changes if c.change_type == "set_parameter"]
         assert len(set_changes) >= 1
-        assert set_changes[0]["new_value"] == 5000.0
+        assert set_changes[0].new_value == 5000.0
 
     def test_add_parameter_detected(self) -> None:
         draft = _make_draft()
         agent = DraftChangeAgent()
         proposal = agent.generate(draft, "viscosity=0.001")
-        add_changes = [c for c in proposal.changes if c["change_type"] == "add_parameter"]
+        add_changes = [c for c in proposal.changes if c.change_type == "add_parameter"]
         assert len(add_changes) >= 1
 
     def test_bc_change_detected(self) -> None:
@@ -65,33 +64,33 @@ class TestDraftChangeAgent:
         agent = DraftChangeAgent()
         proposal = agent.generate(draft, "入口边界改成压力入口")
         bc_changes = [
-            c for c in proposal.changes if c["change_type"] == "change_boundary_condition"
+            c for c in proposal.changes if c.change_type == "change_boundary_condition"
         ]
         assert len(bc_changes) == 1
-        assert "inlet" in bc_changes[0]["target_path"]
+        assert "inlet" in bc_changes[0].target_path
 
     def test_physics_model_change_detected(self) -> None:
         draft = _make_draft()
         agent = DraftChangeAgent()
         proposal = agent.generate(draft, "湍流模型换成 LES")
         phys_changes = [
-            c for c in proposal.changes if c["change_type"] == "change_physics_model"
+            c for c in proposal.changes if c.change_type == "change_physics_model"
         ]
         assert len(phys_changes) == 1
-        assert phys_changes[0]["new_value"] == "LES"
+        assert phys_changes[0].new_value == "LES"
 
     def test_add_output_detected(self) -> None:
         draft = _make_draft()
         agent = DraftChangeAgent()
         proposal = agent.generate(draft, "增加升力输出")
-        add_out = [c for c in proposal.changes if c["change_type"] == "add_output"]
+        add_out = [c for c in proposal.changes if c.change_type == "add_output"]
         assert len(add_out) >= 1
 
     def test_question_detected(self) -> None:
         draft = _make_draft()
         agent = DraftChangeAgent()
         proposal = agent.generate(draft, "为什么 Re=3900？")
-        question_changes = [c for c in proposal.changes if c["change_type"] == "question"]
+        question_changes = [c for c in proposal.changes if c.change_type == "question"]
         assert len(question_changes) == 1
 
     def test_clarification_when_no_intent(self) -> None:
@@ -123,6 +122,6 @@ class TestDraftChangeAgent:
         agent = DraftChangeAgent()
         proposal = agent.generate(draft, "求解器换成 pimpleFoam")
         solver_changes = [
-            c for c in proposal.changes if c["change_type"] == "change_solver"
+            c for c in proposal.changes if c.change_type == "change_solver"
         ]
         assert len(solver_changes) == 1

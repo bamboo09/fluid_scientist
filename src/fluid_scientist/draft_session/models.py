@@ -161,7 +161,34 @@ class ResearchState(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# 5. InputRoute
+# 5. ClarificationQuestion
+# ---------------------------------------------------------------------------
+
+
+class ClarificationQuestion(BaseModel):
+    """A structured clarification question posed to the user.
+
+    ``severity`` distinguishes questions that merely need confirmation
+    (``"needs_confirmation"``) from those that must be answered before case
+    generation can proceed (``"blocking_for_case_generation"``).
+    ``options`` may provide a set of pre-defined answer choices, while
+    ``recommended_answer`` can suggest a default.  When ``allow_free_text``
+    is ``True`` the user may supply a free-form answer beyond the listed
+    options.
+    """
+
+    question_id: str
+    field: str
+    question: str
+    reason: str
+    severity: Literal["needs_confirmation", "blocking_for_case_generation"]
+    options: list[dict] | None = None
+    recommended_answer: dict | None = None
+    allow_free_text: bool = True
+
+
+# ---------------------------------------------------------------------------
+# 6. InputRoute
 # ---------------------------------------------------------------------------
 
 
@@ -194,10 +221,63 @@ class InputRoute(BaseModel):
     should_call_llm: bool
 
 
+# ---------------------------------------------------------------------------
+# 7. LLMCallRecord
+# ---------------------------------------------------------------------------
+
+
+class LLMCallRecord(BaseModel):
+    """An audit record of a single LLM invocation within a draft session.
+
+    Captures the full provenance of an LLM call: which provider/model was
+    used, which prompt template/version, what inputs were referenced, a
+    summary of the input, the expected output schema, the raw and parsed
+    outputs, whether the call succeeded, whether a fallback was used, and
+    any error information.  This enables replay, debugging and quality
+    analysis of the AI-driven workflow.
+    """
+
+    call_id: str
+    session_id: str
+    purpose: Literal[
+        "input_routing",
+        "study_decomposition",
+        "physics_intent",
+        "clarification_extract",
+        "clarification_planning",
+        "draft_generation",
+        "draft_change_proposal",
+        "unknown_parameter_mapping",
+        "unknown_metric_mapping",
+        "case_plan_generation",
+        "missing_capability_analysis",
+        "code_extension_spec",
+        "code_generation",
+        "code_review",
+        "explanation",
+    ]
+    provider: str = "unknown"
+    model_name: str = "unknown"
+    prompt_name: str = ""
+    prompt_version: str = ""
+    input_refs: list[str] = Field(default_factory=list)
+    input_summary: str = ""
+    output_schema: str = ""
+    raw_output: str | None = None
+    parsed_output: dict | None = None
+    success: bool = False
+    fallback_used: bool = False
+    fallback_reason: str | None = None
+    error: str | None = None
+    created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+
 __all__ = [
+    "ClarificationQuestion",
     "DraftSession",
     "DraftSessionStatus",
     "InputRoute",
+    "LLMCallRecord",
     "ResearchState",
     "SessionMessage",
 ]

@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar, Literal
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from fluid_scientist.capabilities.models import CapabilityRegistry, MissingCapability
 from fluid_scientist.compat import UTC
@@ -29,14 +29,22 @@ from fluid_scientist.compat import UTC
 # ---------------------------------------------------------------------------
 
 ExtensionType = Literal[
+    "python_metric",
+    "openfoam_function_object_writer",
+    "case_compiler_plugin",
+    "boundary_condition_writer",
+    "mesh_generator_plugin",
+    "geometry_generator_plugin",
+    "initial_condition_generator",
     "analysis_plugin",
     "metric_operator",
+    "parameter_definition",
+    # Legacy types kept for backward compatibility
     "boundary_condition",
     "geometry_generator",
     "physical_model_writer",
     "postprocess_metric",
     "mesh_generator",
-    "parameter_definition",
 ]
 
 SpecStatus = Literal[
@@ -119,14 +127,22 @@ _CAPABILITY_TYPE_MAP: dict[str, str] = {
 
 _VALID_EXTENSION_TYPES: frozenset[str] = frozenset(
     {
+        "python_metric",
+        "openfoam_function_object_writer",
+        "case_compiler_plugin",
+        "boundary_condition_writer",
+        "mesh_generator_plugin",
+        "geometry_generator_plugin",
+        "initial_condition_generator",
         "analysis_plugin",
         "metric_operator",
+        "parameter_definition",
+        # Legacy types kept for backward compatibility
         "boundary_condition",
         "geometry_generator",
         "physical_model_writer",
         "postprocess_metric",
         "mesh_generator",
-        "parameter_definition",
     }
 )
 
@@ -151,7 +167,9 @@ class CodeExtensionSpec(BaseModel):
         draft_id: Optional study-decomposition draft that originated the gap.
         extension_type: Category of code extension to generate.
         missing_capability_id: ID of the MissingCapability this extension fills.
-        description: Human-readable description of what the extension must do.
+        requirement: Human-readable description of what the extension must do.
+        risk_level: Risk classification for the extension ("low", "medium", "high").
+        files_to_create_or_modify: List of file paths the extension will touch.
         target_interfaces: Interface contracts the extension must conform to.
         inputs: Declared input parameters (name, data_type, etc.).
         outputs: Declared output parameters.
@@ -165,12 +183,16 @@ class CodeExtensionSpec(BaseModel):
         updated_at: Last-update timestamp (UTC).
     """
 
+    model_config = ConfigDict(populate_by_name=True)
+
     extension_id: str
     session_id: str
     draft_id: str | None = None
     extension_type: ExtensionType
     missing_capability_id: str
-    description: str
+    requirement: str = ""
+    risk_level: Literal["low", "medium", "high"] = "medium"
+    files_to_create_or_modify: list[str] = Field(default_factory=list)
     target_interfaces: list[str] = Field(default_factory=list)
     inputs: list[dict[str, Any]] = Field(default_factory=list)
     outputs: list[dict[str, Any]] = Field(default_factory=list)
@@ -184,6 +206,27 @@ class CodeExtensionSpec(BaseModel):
     review_notes: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    # Backward-compatible alias for ``requirement``
+    @property
+    def description(self) -> str:
+        """Backward-compatible alias for :attr:`requirement`."""
+        return self.requirement
+
+    @description.setter
+    def description(self, value: str) -> None:
+        self.requirement = value
+
+    @model_validator(mode="before")
+    @classmethod
+    def _alias_description_to_requirement(cls, data: Any) -> Any:
+        """Accept ``description`` as an input alias for ``requirement``."""
+        if isinstance(data, dict):
+            if "description" in data and "requirement" not in data:
+                data = {**data, "requirement": data.pop("description")}
+            elif "description" in data:
+                data.pop("description")
+        return data
 
     # -- State machine -------------------------------------------------------
 
@@ -298,7 +341,7 @@ class CodeExtensionWorkflow:
             else []
         )
 
-        description = cap.get("requested_behavior") or cap.get("reason", "")
+        requirement = cap.get("requested_behavior") or cap.get("reason", "")
 
         return CodeExtensionSpec(
             extension_id=f"ext-{uuid4().hex[:12]}",
@@ -306,7 +349,7 @@ class CodeExtensionWorkflow:
             draft_id=draft_id,
             extension_type=extension_type,  # type: ignore[arg-type]
             missing_capability_id=capability_id,
-            description=description,
+            requirement=requirement,
             target_interfaces=[],
             inputs=inputs,
             outputs=outputs,
@@ -591,9 +634,9 @@ def _make_registry_entry(spec: CodeExtensionSpec) -> dict[str, Any]:
     """Build a registry entry dict from a :class:`CodeExtensionSpec`."""
     return {
         "extension_id": spec.extension_id,
-        "extension_name": spec.description[:200] if spec.description else spec.extension_id,
+        "extension_name": spec.requirement[:200] if spec.requirement else spec.extension_id,
         "extension_type": spec.extension_type,
-        "description": spec.description,
+        "description": spec.requirement,
         "required_inputs": [
             i.get("name", str(i)) if isinstance(i, dict) else str(i)
             for i in spec.inputs

@@ -5,9 +5,13 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from fluid_scientist.compat import UTC
+
+
+class StrictModel(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False, strict=True)
 
 
 class CapabilityType:
@@ -50,6 +54,34 @@ class MissingCapability(BaseModel):
 
     def is_blocking(self) -> bool:
         return self.severity == "blocking"
+
+
+class CompilerCapability(StrictModel):
+    """A capability declaration for the native case compiler.
+
+    Describes a single compiler capability (solver writer, geometry
+    generator, boundary condition writer, etc.) along with the specific
+    values it supports, the inputs it requires, the files it produces,
+    and any known limitations.  The compiler uses these declarations to
+    determine whether a :class:`~fluid_scientist.case_plan.models.CasePlan`
+    can be compiled natively.
+    """
+
+    capability_id: str
+    capability_type: Literal[
+        "solver",
+        "geometry_generator",
+        "mesh_generator",
+        "boundary_condition_writer",
+        "initial_condition_writer",
+        "physical_model_writer",
+        "function_object_writer",
+        "postprocess_metric",
+    ]
+    supported_values: list[str] = Field(default_factory=list)
+    required_inputs: list[str] = Field(default_factory=list)
+    output_files: list[str] = Field(default_factory=list)
+    limitations: list[str] = Field(default_factory=list)
 
 
 class CodeExtensionSpec(BaseModel):
@@ -197,5 +229,7 @@ __all__ = [
     "CapabilityRegistry",
     "CapabilityType",
     "CodeExtensionSpec",
+    "CompilerCapability",
     "MissingCapability",
+    "StrictModel",
 ]

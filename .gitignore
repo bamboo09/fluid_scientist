@@ -24,3 +24,4 @@ ssh-keys/
 # Test temp files
 .tmp_pytest/
 tmp_test/
+.pytest_tmp/
