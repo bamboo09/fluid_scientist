@@ -108,8 +108,12 @@ _CAPABILITY_TYPE_MAP: dict[str, str] = {
     "metric_operator": "metric_operator",
     "boundary_condition": "boundary_condition",
     "solver_extension": "physical_model_writer",
+    "physical_model_writer": "physical_model_writer",
     "post_processor": "postprocess_metric",
+    "postprocess_metric": "postprocess_metric",
     "mesh_generator": "mesh_generator",
+    "geometry_generator": "geometry_generator",
+    "parameter_definition": "analysis_plugin",
     "analysis_plugin": "analysis_plugin",
 }
 

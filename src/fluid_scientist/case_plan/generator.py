@@ -93,6 +93,9 @@ _OUTPUT_FO_MAP: dict[str, tuple[str, list[str], list[str], dict]] = {
     "velocity_profile": ("probes", [], ["U"], {"probeLocations": []}),
     "strouhal": ("probes", [], ["U"], {"probeLocations": []}),
     "st": ("probes", [], ["U"], {"probeLocations": []}),
+    "reattachment_length": ("probes", [], ["U"], {"probeLocations": []}),
+    "reattachment": ("probes", [], ["U"], {"probeLocations": []}),
+    "recirculation_length": ("probes", [], ["U"], {"probeLocations": []}),
 }
 
 # Valid ObservableSpec categories (used when reconstructing from draft dicts).
@@ -261,8 +264,25 @@ class CasePlanGenerator:
     # ------------------------------------------------------------------
 
     def _generate_geometry_plan(self, draft: ExperimentDraft) -> dict:
-        """Generate the geometry plan from draft.geometry."""
-        return dict(draft.geometry)
+        """Generate the geometry plan from draft.geometry.
+
+        Also includes domain dimensions from control_parameters so the
+        compiler has the required ``length`` and ``height`` values.
+        """
+        plan = dict(draft.geometry)
+        # Include domain dimensions from control_parameters
+        for param in draft.control_parameters:
+            pid = param.parameter_id.lower()
+            if pid == "domain_length" and param.value is not None:
+                plan["length"] = param.value
+            elif pid == "domain_height" and param.value is not None:
+                plan["height"] = param.value
+            elif pid == "step_height" and param.value is not None:
+                plan.setdefault("height", param.value)
+            elif pid == "cylinder_diameter" and param.value is not None:
+                plan.setdefault("diameter", param.value)
+                plan.setdefault("D", param.value)
+        return plan
 
     def _generate_mesh_plan(self, draft: ExperimentDraft, dimensions: str) -> dict:
         """Generate the mesh plan from draft.mesh or defaults."""
@@ -281,13 +301,27 @@ class CasePlanGenerator:
         return {k: dict(v) for k, v in draft.initial_conditions.items()}
 
     def _generate_physical_model_plan(self, draft: ExperimentDraft) -> dict:
-        """Generate the physical model plan from draft.physics_models."""
-        return dict(draft.physics_models)
+        """Generate the physical model plan from draft.physics_models.
+
+        Also includes key physical parameters (nu, rho, etc.) from
+        control_parameters so the compiler has everything it needs.
+        """
+        plan = dict(draft.physics_models)
+        # Include physical properties from control_parameters
+        for param in draft.control_parameters:
+            pid = param.parameter_id.lower()
+            if pid in ("nu", "kinematic_viscosity", "mu", "dynamic_viscosity",
+                        "rho", "density", "nu_inf", "rho_inf"):
+                plan[pid] = param.value
+        return plan
 
     def _generate_numerics_plan(
         self, draft: ExperimentDraft, solver: str
     ) -> dict:
-        """Generate the numerics plan from draft.numerics or defaults."""
+        """Generate the numerics plan from draft.numerics or defaults.
+
+        Also includes endTime/deltaT from control_parameters if available.
+        """
         if draft.numerics:
             plan = dict(draft.numerics)
         else:
@@ -306,6 +340,13 @@ class CasePlanGenerator:
                     "writeControl": "timeStep",
                     "writeInterval": 100,
                 }
+        # Override with values from control_parameters if present
+        for param in draft.control_parameters:
+            pid = param.parameter_id.lower()
+            if pid == "endtime" and param.value is not None:
+                plan["endTime"] = param.value
+            elif pid == "deltat" and param.value is not None:
+                plan["deltaT"] = param.value
         # Record steady flag for the compiler.
         plan.setdefault("steady", "simple" in solver.lower())
         return plan
@@ -330,10 +371,21 @@ class CasePlanGenerator:
     def _map_output_to_function_object(
         self, obs_id: str
     ) -> FunctionObjectSpec | None:
-        """Map a requested output observable_id to a FunctionObjectSpec."""
+        """Map a requested output observable_id to a FunctionObjectSpec.
+
+        Unknown observables get a default ``probes`` functionObject so that
+        at least some data is collected for post-processing.
+        """
         entry = _OUTPUT_FO_MAP.get(obs_id.lower())
         if entry is None:
-            return None
+            # Fallback: create a probes functionObject for unknown observables
+            return FunctionObjectSpec(
+                function_object_id=f"probes_{obs_id}",
+                function_object_type="probes",
+                fields=["U", "p"],
+                patches=[],
+                configuration={"probeLocations": []},
+            )
         fo_type, patches, fields, config = entry
         return FunctionObjectSpec(
             function_object_id=f"{fo_type}_{obs_id}",

@@ -43,6 +43,7 @@ _NATIVE_CAPABILITIES: dict[str, list[str]] = {
         "cylinder",
         "pipe",
         "backward_facing_step",
+        "step",
         "cavity",
     ],
     "boundary_condition_writer": [

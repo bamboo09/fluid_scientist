@@ -366,7 +366,7 @@ class TestMeasurementPlan:
         plan = CasePlanGenerator().generate(draft)
         assert len(plan.measurement_plan.function_objects) == 3
 
-    def test_unknown_output_skipped(self) -> None:
+    def test_unknown_output_gets_default_probes(self) -> None:
         draft = _make_confirmed_draft(
             requested_outputs=[
                 {"observable_id": "drag", "category": "force"},
@@ -374,7 +374,11 @@ class TestMeasurementPlan:
             ],
         )
         plan = CasePlanGenerator().generate(draft)
-        assert len(plan.measurement_plan.function_objects) == 1
+        # Unknown outputs get a default probes functionObject
+        assert len(plan.measurement_plan.function_objects) == 2
+        fo_types = [fo.function_object_type for fo in plan.measurement_plan.function_objects]
+        assert "forces" in fo_types
+        assert "probes" in fo_types
 
     def test_write_interval_from_numerics(self) -> None:
         draft = _make_confirmed_draft(
