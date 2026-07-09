@@ -19,6 +19,7 @@ from fluid_scientist.study_decomposition.models import (
     PhysicsFrame,
     StudyIntent,
 )
+from fluid_scientist.study_decomposition.physics_extractor import PhysicsFrameExtractor
 from fluid_scientist.study_decomposition.splitter import StudySplitter
 
 __all__ = [
@@ -27,6 +28,7 @@ __all__ = [
     "ExtractedParameter",
     "ObservableSpec",
     "PhysicsFrame",
+    "PhysicsFrameExtractor",
     "StudyIntent",
     "StudySplitter",
 ]
