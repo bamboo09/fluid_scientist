@@ -4,10 +4,14 @@ auto-testing, approval workflow, plugin registration, and rollback.
 Implements P3 requirements: safe generation, validation, and lifecycle
 management of code extensions (custom functionObjects, boundary conditions,
 post-processing scripts) for OpenFOAM simulations.
+
+The primary :class:`CodeExtensionSpec` and :class:`CodeExtensionWorkflow`
+are exported from :mod:`fluid_scientist.code_extension.spec`. The legacy
+models from :mod:`fluid_scientist.code_extension.models` remain available
+for the existing sandbox / registry / testing infrastructure.
 """
 
 from fluid_scientist.code_extension.models import (
-    CodeExtensionSpec,
     CodeExtensionType,
     ExtensionStatus,
     TestResult,
@@ -23,14 +27,21 @@ from fluid_scientist.code_extension.sandbox import (
     SandboxResult,
     execute_in_sandbox,
 )
+from fluid_scientist.code_extension.spec import (
+    DEFAULT_SAFETY_CONSTRAINTS,
+    CodeExtensionSpec,
+    CodeExtensionWorkflow,
+)
 from fluid_scientist.code_extension.testing import (
     generate_tests,
     run_tests,
 )
 
 __all__ = [
+    "DEFAULT_SAFETY_CONSTRAINTS",
     "CodeExtensionSpec",
     "CodeExtensionType",
+    "CodeExtensionWorkflow",
     "ExtensionRegistry",
     "ExtensionStatus",
     "SandboxResult",
