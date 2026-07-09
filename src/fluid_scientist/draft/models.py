@@ -164,9 +164,13 @@ class ExperimentDraft(BaseModel):
         The clone keeps the same content but gets a fresh ``draft_id``, an
         incremented ``version``, and is reset to the editable ``draft``
         state (``status=draft``, ``locked=False``).
+
+        Uses deep copy so mutable fields (lists, dicts) are not shared
+        between the original and the clone.
         """
         now = datetime.now(UTC)
         return self.model_copy(
+            deep=True,
             update={
                 "draft_id": new_draft_id,
                 "version": self.version + 1,
@@ -174,7 +178,7 @@ class ExperimentDraft(BaseModel):
                 "locked": False,
                 "created_at": now,
                 "updated_at": now,
-            }
+            },
         )
 
     def confirm(self) -> ExperimentDraft:
