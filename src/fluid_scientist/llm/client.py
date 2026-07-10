@@ -1,14 +1,16 @@
 """Simple LLM client wrapper with call recording.
 
-The :class:`LLMClient` is a thin abstraction over an LLM provider.  In
-production it would call OpenAI / Anthropic / a local model; for now it
-ships with a deterministic mock backend that returns structured
-responses tailored to each ``purpose`` while recording every invocation
-as an :class:`~fluid_scientist.draft_session.models.LLMCallRecord`.
+The :class:`LLMClient` is a thin abstraction over an LLM provider.  It
+supports real OpenAI-compatible providers (OpenAI, GLM/智谱, DeepSeek)
+via the ``openai`` SDK, and falls back to a deterministic mock backend
+when no provider is configured.
+
+Every invocation is recorded as an :class:`~fluid_scientist.draft_session.models.LLMCallRecord`.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from typing import Any
 
@@ -34,19 +36,94 @@ _ALLOWED_PURPOSES: frozenset[str] = frozenset({
 })
 _FALLBACK_PURPOSE = "explanation"
 
+# Provider base URLs for OpenAI-compatible APIs.
+_PROVIDER_BASE_URLS: dict[str, str] = {
+    "glm": "https://open.bigmodel.cn/api/paas/v4/",
+    "deepseek": "https://api.deepseek.com",
+    "openai": "https://api.openai.com/v1",
+}
+
+# Suggested model IDs for each provider.
+_PROVIDER_MODELS: dict[str, list[str]] = {
+    "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4"],
+    "glm": ["glm-4-plus", "glm-4", "glm-4-flash", "glm-4-long"],
+    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+}
+
 
 class LLMClient:
-    """Simple LLM client wrapper with call recording.
+    """LLM client wrapper with call recording.
 
-    In production this would connect to OpenAI/Anthropic/etc.
-    For now it provides a deterministic fallback that returns structured
-    responses based on prompt type, while recording all calls via LLMCallRecord.
+    When ``provider`` is ``"mock"`` (default), uses a deterministic fallback.
+    When a real provider and API key are configured, calls the provider's
+    chat.completions endpoint via the ``openai`` SDK.
     """
 
-    def __init__(self, provider: str = "mock", model_name: str = "mock-v1") -> None:
+    def __init__(
+        self,
+        provider: str = "mock",
+        model_name: str = "mock-v1",
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout_seconds: int = 120,
+    ) -> None:
         self._records: list[LLMCallRecord] = []
         self._provider = provider
         self._model_name = model_name
+        self._api_key = api_key
+        self._base_url = base_url
+        self._timeout = timeout_seconds
+        self._client: Any | None = None
+
+        # Initialize real client if configured
+        if provider != "mock" and api_key:
+            self._init_real_client()
+
+    def _init_real_client(self) -> None:
+        """Initialize the OpenAI SDK client for the configured provider."""
+        try:
+            from openai import OpenAI
+
+            base_url = self._base_url or _PROVIDER_BASE_URLS.get(self._provider)
+            self._client = OpenAI(
+                api_key=self._api_key,
+                base_url=base_url,
+                timeout=self._timeout,
+                max_retries=0,
+            )
+        except ImportError:
+            self._client = None
+
+    def reconfigure(
+        self,
+        provider: str,
+        model_name: str,
+        api_key: str,
+        base_url: str | None = None,
+        timeout_seconds: int = 120,
+    ) -> None:
+        """Reconfigure the client to use a real provider.
+
+        Called when the user configures a model via the API.
+        """
+        self._provider = provider
+        self._model_name = model_name
+        self._api_key = api_key
+        self._base_url = base_url
+        self._timeout = timeout_seconds
+        self._init_real_client()
+
+    @property
+    def is_mock(self) -> bool:
+        return self._provider == "mock" or self._client is None
+
+    @property
+    def provider(self) -> str:
+        return self._provider
+
+    @property
+    def model_name(self) -> str:
+        return self._model_name
 
     # ------------------------------------------------------------------
     # Public API
@@ -73,9 +150,7 @@ class LLMClient:
             output_schema: Optional JSON schema describing expected output.
             session_id: Draft session this call belongs to (for audit).
             input_refs: Optional list of referenced input artifact IDs.
-            prompt_version: Version string for the prompt template.  When
-                empty (default) the client records ``"mock-1"`` for mock
-                runs and ``""`` for real-provider runs.
+            prompt_version: Version string for the prompt template.
 
         Returns:
             A tuple of ``(parsed_output_dict, call_record)``.
@@ -83,8 +158,7 @@ class LLMClient:
         call_id = f"llm_{uuid.uuid4().hex[:12]}"
         refs = list(input_refs) if input_refs else []
 
-        # Decide whether to use the real provider or fall back to mock.
-        use_mock = self._provider == "mock"
+        use_mock = self.is_mock
         fallback_reason: str | None = None
         raw_output: str | None = None
         parsed_output: dict[str, Any]
@@ -98,20 +172,43 @@ class LLMClient:
                     purpose, user_message, output_schema
                 )
                 raw_output = str(parsed_output)
-            except Exception as exc:  # pragma: no cover - defensive
+            except Exception as exc:
                 success = False
                 error = str(exc)
                 parsed_output = {
                     "status": "error",
                     "message": f"mock response failed: {exc}",
                 }
-        else:  # pragma: no cover - future real-provider path
-            # Placeholder for real provider integration.
-            fallback_reason = "Real provider not yet implemented; falling back to mock"
-            parsed_output = self._mock_response(
-                purpose, user_message, output_schema
-            )
-            raw_output = str(parsed_output)
+        else:
+            # Call the real provider
+            try:
+                raw_output = self._call_real_provider(
+                    system_prompt, user_message, output_schema
+                )
+                if raw_output:
+                    # Try to parse as JSON
+                    try:
+                        parsed_output = json.loads(raw_output)
+                    except json.JSONDecodeError:
+                        # If not valid JSON, try to extract JSON from the text
+                        parsed_output = self._extract_json(raw_output)
+                        if parsed_output is None:
+                            # If extraction fails, wrap as text
+                            parsed_output = {
+                                "status": "raw_text",
+                                "content": raw_output,
+                                "fallback_used": False,
+                            }
+                            fallback_reason = "Provider returned non-JSON text; wrapped as raw"
+                else:
+                    fallback_reason = "Provider returned empty response; using mock"
+                    parsed_output = self._mock_response(purpose, user_message, output_schema)
+            except Exception as exc:
+                success = False
+                error = str(exc)
+                fallback_reason = f"Provider call failed: {exc}; using mock"
+                parsed_output = self._mock_response(purpose, user_message, output_schema)
+                raw_output = str(parsed_output)
 
         # Coerce unknown purposes to a valid Literal value so the record
         # always validates; the original purpose is preserved in the
@@ -120,8 +217,7 @@ class LLMClient:
         record_purpose = purpose if purpose_known else _FALLBACK_PURPOSE
         record_original_purpose = None if purpose_known else purpose
 
-        # Resolve prompt_version: explicit caller value wins, else mock
-        # default ("mock-1"), else empty for real provider.
+        # Resolve prompt_version
         resolved_prompt_version = prompt_version or ("mock-1" if use_mock else "")
 
         record = LLMCallRecord(
@@ -156,6 +252,73 @@ class LLMClient:
         """Return the most recent recorded call, optionally filtered by session."""
         records = self.get_records(session_id)
         return records[-1] if records else None
+
+    # ------------------------------------------------------------------
+    # Real provider call
+    # ------------------------------------------------------------------
+
+    def _call_real_provider(
+        self,
+        system_prompt: str,
+        user_message: str,
+        output_schema: dict | None,
+    ) -> str | None:
+        """Call the real provider's chat.completions endpoint."""
+        if self._client is None:
+            return None
+
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ]
+
+        # Build kwargs for chat.completions.create
+        kwargs: dict[str, Any] = {
+            "model": self._model_name,
+            "messages": messages,
+            "stream": False,
+            "timeout": self._timeout,
+        }
+
+        # Request JSON output if the provider supports it
+        if output_schema:
+            kwargs["response_format"] = {"type": "json_object"}
+
+        response = self._client.chat.completions.create(**kwargs)
+
+        try:
+            content = response.choices[0].message.content
+        except (AttributeError, IndexError, TypeError):
+            return None
+        return content
+
+    @staticmethod
+    def _extract_json(text: str) -> dict | None:
+        """Try to extract a JSON object from a text response."""
+        # Try to find JSON between ```json and ``` or just { ... }
+        import re
+        # Try ```json block first
+        match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+        # Try ``` block
+        match = re.search(r'```\s*(.*?)\s*```', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(1))
+            except json.JSONDecodeError:
+                pass
+        # Try raw JSON object
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError:
+                pass
+        return None
 
     # ------------------------------------------------------------------
     # Mock response generators

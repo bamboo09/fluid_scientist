@@ -331,6 +331,80 @@ def list_sessions() -> dict:
     return {"session_ids": _session_persistence.list_sessions()}
 
 
+# ------------------------------------------------------------------
+# Model configuration (v5)
+# ------------------------------------------------------------------
+
+# Suggested model IDs per provider.
+_PROVIDER_BASE_URLS = {
+    "glm": "https://open.bigmodel.cn/api/paas/v4/",
+    "deepseek": "https://api.deepseek.com",
+    "openai": "https://api.openai.com/v1",
+}
+_PROVIDER_MODELS = {
+    "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4"],
+    "glm": ["glm-4-plus", "glm-4", "glm-4-flash", "glm-4-long"],
+    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+}
+
+
+class ModelConfigRequest(BaseModel):
+    """Request body for configuring the v5 LLM model."""
+    provider: str = Field(..., description="openai / glm / deepseek")
+    model: str = Field(..., description="Model ID, e.g. glm-4-flash")
+    api_key: str = Field(..., description="API key for the provider")
+
+
+class ModelConfigView(BaseModel):
+    """Current model configuration view."""
+    configured: bool = False
+    provider: str | None = None
+    model: str | None = None
+    is_mock: bool = True
+    suggested_models: dict[str, list[str]] | None = None
+
+
+@router.get("/model-config", response_model=ModelConfigView)
+def get_v5_model_config() -> ModelConfigView:
+    """Return the current v5 LLM model configuration."""
+    return ModelConfigView(
+        configured=not _llm_client.is_mock,
+        provider=_llm_client.provider,
+        model=_llm_client.model_name,
+        is_mock=_llm_client.is_mock,
+        suggested_models=_PROVIDER_MODELS,
+    )
+
+
+@router.post("/model-config", response_model=ModelConfigView)
+def configure_v5_model(request: ModelConfigRequest) -> ModelConfigView:
+    """Configure the v5 LLM model to use a real provider.
+
+    The API key is kept only in memory and never persisted to disk.
+    """
+    if request.provider not in _PROVIDER_BASE_URLS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown provider '{request.provider}'. Supported: {list(_PROVIDER_BASE_URLS.keys())}",
+        )
+    if not request.api_key or len(request.api_key) < 5:
+        raise HTTPException(status_code=422, detail="API key is too short")
+
+    _llm_client.reconfigure(
+        provider=request.provider,
+        model_name=request.model,
+        api_key=request.api_key,
+        base_url=_PROVIDER_BASE_URLS[request.provider],
+    )
+    return ModelConfigView(
+        configured=not _llm_client.is_mock,
+        provider=_llm_client.provider,
+        model=_llm_client.model_name,
+        is_mock=_llm_client.is_mock,
+        suggested_models=_PROVIDER_MODELS,
+    )
+
+
 @router.get("/sessions/{session_id}/llm-records")
 def get_llm_records(session_id: str) -> dict[str, Any]:
     """Return LLM call records for a session (debug/auditing endpoint)."""
@@ -441,9 +515,33 @@ def send_message(
             })
 
     elif route.input_type == "new_research_request":
-        # Single study
+        # Single study — also create a batch so the frontend can use
+        # /batches/{batch_id}/select-study uniformly.
         study, check_result = _decompose_single_study(request.message)
 
+        batch = BatchStudyPlan(
+            batch_id=f"batch_{uuid.uuid4().hex[:12]}",
+            input_type="single_study",
+            studies=[study],
+            batch_summary=study.title or study.research_objective[:80],
+            suggested_next_action="select_one_to_continue",
+        )
+        _batch_store[batch.batch_id] = batch
+
+        # Transition session and store batch_id
+        try:
+            session = _state_machine.transition(
+                session, DraftSessionStatus.BATCH_REVIEW
+            )
+            session.batch_id = batch.batch_id
+            _session_store.update_session(session)
+        except TransitionError:
+            pass
+
+        response_actions.append({
+            "action": "batch_review",
+            "batch": batch.model_dump(),
+        })
         response_actions.append({
             "action": "study_decomposed",
             "study": study.model_dump(),
@@ -527,17 +625,23 @@ def validate_draft(draft_id: str) -> ValidationResult:
 
 @router.post("/drafts/{draft_id}/confirm", response_model=ExperimentDraft)
 def confirm_draft(draft_id: str, request: ConfirmDraftRequest) -> ExperimentDraft:
-    """Confirm a draft, freezing it for compilation."""
+    """Confirm a draft, freezing it for compilation.
+
+    Blocking issues are recorded on the draft as advisory information but
+    do NOT prevent confirmation — the user can confirm and then resolve
+    issues via the change-proposal workflow.
+    """
     draft = _draft_store.get(draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
 
+    # Run validation but don't block — store results as advisory
     result = _validator.validate(draft)
+    draft.validation_result = result.model_dump()
+    # Store blocking issues on the draft so the UI can display them
     if not result.valid:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Draft has blocking issues: {result.blocking_issues}",
-        )
+        draft.blocking_issues = result.blocking_issues
+    _draft_store[draft_id] = draft
 
     confirmed = draft.confirm()
     _draft_store[draft_id] = confirmed
