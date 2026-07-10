@@ -279,6 +279,9 @@ function clearResearchSession() {
   if (welcomeMessage) welcomeMessage.hidden = false;
   if (researchForm) researchForm.hidden = false;
   if (startNewExperiment) startNewExperiment.hidden = true;
+  // Hide vertical workflow stepper
+  const stepper = byId("workflow-stepper");
+  if (stepper) stepper.hidden = true;
   if (promptInput) promptInput.value = "";
   setStatus("");
   updateContext();
@@ -1205,6 +1208,159 @@ function renderParameterRow(param, spec) {
   return row;
 }
 
+// ============================================================
+// Vertical Workflow Stepper (left sidebar)
+// ============================================================
+
+// Ordered workflow steps matching the design spec (top-to-bottom = left-to-right in original design)
+const WORKFLOW_STEPS = [
+  { id: "spec-save-btn",        text: "保存草案",         action: () => saveSpecDraft() },
+  { id: "spec-apply-btn",       text: "应用修改",         action: () => applyPendingParameterChanges() },
+  { id: "spec-discard-btn",     text: "放弃修改",         action: () => discardPendingParameterChanges() },
+  { id: "spec-accept-rec-btn",  text: "接受推荐值",       action: () => acceptAllRecommendations() },
+  { id: "spec-ready-btn",       text: "准备就绪",         action: () => transitionSpec("ready") },
+  { id: "spec-confirm-btn",     text: "确认实验版本",     action: () => transitionSpec("confirmed") },
+  { id: "spec-compile-btn",     text: "生成 Case",        action: () => compileSpec() },
+  { id: "spec-submit-btn",      text: "提交运行",         action: () => submitSpec() },
+  { id: "spec-run-status-btn",  text: "查看运行状态",     action: () => showRunStatus() },
+  { id: "spec-report-btn",      text: "查看分析报告",     action: () => showAnalysisReport() },
+  { id: "spec-capability-btn",  text: "查看缺失能力",     action: () => showMissingCapabilities() },
+  { id: "spec-clone-btn",       text: "修改参数（创建新版本）", action: () => cloneSpec() },
+  { id: "spec-error-btn",       text: "查看错误",         action: () => showErrorDetails() },
+  { id: "spec-back-draft-btn",  text: "回到草案",         action: () => backToDraft() },
+  { id: "spec-revalidate-btn",  text: "重新校验",         action: () => revalidateSpec() },
+];
+
+function buildWorkflowStepper() {
+  const stepper = byId("workflow-stepper");
+  if (!stepper) return;
+  stepper.innerHTML = "";
+
+  for (const step of WORKFLOW_STEPS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "wf-step";
+    btn.id = "wf-" + step.id;
+    btn.textContent = step.text;
+    btn.dataset.originalId = step.id;
+    btn.addEventListener("click", () => {
+      if (btn.disabled) return;
+      step.action();
+    });
+    stepper.append(btn);
+  }
+}
+
+function updateWorkflowStepper(spec) {
+  const stepper = byId("workflow-stepper");
+  if (!stepper) return;
+
+  if (!spec) {
+    stepper.hidden = true;
+    return;
+  }
+  stepper.hidden = false;
+
+  const status = spec.status;
+  const editable = isSpecEditable(spec);
+  const hasPendingChanges = pendingParameterChanges.size > 0;
+  const actions = getWorkbenchActions(status);
+
+  // Build a set of visible button IDs
+  const visibleIds = new Set();
+  if (actions.primaryId) visibleIds.add(actions.primaryId);
+  actions.secondary.forEach(s => visibleIds.add(s.id));
+
+  // Special cases always visible depending on state
+  if (status === "failed") {
+    visibleIds.add("spec-error-btn");
+    visibleIds.add("spec-back-draft-btn");
+  }
+  if (status === "awaiting_code_approval") {
+    visibleIds.add("spec-capability-btn");
+  }
+
+  // Compile button special handling
+  if (specCompiling) visibleIds.add("spec-compile-btn");
+
+  // Determine the "current active" step based on status
+  const activeStepMap = {
+    draft: "spec-apply-btn",
+    ready: "spec-confirm-btn",
+    confirmed: "spec-compile-btn",
+    compiling: "spec-compile-btn",
+    compiled: "spec-submit-btn",
+    running: "spec-run-status-btn",
+    completed: "spec-report-btn",
+    awaiting_code_approval: "spec-capability-btn",
+    failed: "spec-error-btn",
+    rejected: "spec-error-btn",
+  };
+  const activeId = activeStepMap[status] || null;
+
+  // Determine completed steps (steps before the active one that are in the normal flow)
+  const flowOrder = [
+    "spec-save-btn", "spec-apply-btn", "spec-discard-btn", "spec-accept-rec-btn",
+    "spec-ready-btn", "spec-confirm-btn", "spec-compile-btn", "spec-submit-btn",
+    "spec-run-status-btn", "spec-report-btn",
+  ];
+  const activeIdx = flowOrder.indexOf(activeId);
+
+  for (const step of WORKFLOW_STEPS) {
+    const btn = byId("wf-" + step.id);
+    if (!btn) continue;
+
+    const isVisible = visibleIds.has(step.id);
+    btn.style.display = isVisible ? "" : "none";
+
+    if (!isVisible) continue;
+
+    // Reset classes
+    btn.classList.remove("wf-active", "wf-completed", "wf-danger");
+    btn.disabled = false;
+
+    // Set active
+    if (step.id === activeId) {
+      btn.classList.add("wf-active");
+    }
+
+    // Set completed
+    const stepIdx = flowOrder.indexOf(step.id);
+    if (activeIdx >= 0 && stepIdx >= 0 && stepIdx < activeIdx) {
+      btn.classList.add("wf-completed");
+    }
+
+    // Danger state for error
+    if (step.id === "spec-error-btn" && (status === "failed" || status === "rejected")) {
+      btn.classList.add("wf-danger");
+      if (step.id === activeId) btn.classList.add("wf-active");
+    }
+
+    // Apply/discard disabled based on pending changes
+    if (step.id === "spec-apply-btn" || step.id === "spec-discard-btn") {
+      btn.disabled = !editable || !hasPendingChanges;
+    }
+
+    // Compile button during compilation
+    if (step.id === "spec-compile-btn" && specCompiling) {
+      btn.disabled = true;
+      btn.textContent = "正在编译...";
+    } else if (step.id === "spec-compile-btn") {
+      btn.textContent = "生成 Case";
+    }
+
+    // Back to draft only visible when failed or rejected
+    if (step.id === "spec-back-draft-btn") {
+      btn.style.display = (status === "failed" || status === "rejected") ? "" : "none";
+    }
+
+    // Revalidate only in ready state
+    if (step.id === "spec-revalidate-btn") {
+      btn.style.display = (status === "ready") ? "" : "none";
+    }
+  }
+}
+
 function getWorkbenchActions(status) {
   const actions = {
     primary: null,
@@ -1382,6 +1538,9 @@ function updateSpecControls(spec) {
   if (spec && status === "confirmed") {
     runPreCheck(spec);
   }
+
+  // Sync vertical workflow stepper
+  updateWorkflowStepper(spec);
 }
 
 function updateDisabledReason(spec) {
@@ -1556,8 +1715,11 @@ function renderSpecWorkbench(spec) {
   propagation.hidden = true;
   card.append(propagation);
 
+  // Hidden action buttons (kept in DOM for existing code references, but not visible — use vertical stepper instead)
   const actions = document.createElement("div");
   actions.className = "spec-actions card-actions";
+  actions.style.display = "none";
+  actions.id = "spec-actions-hidden";
   const saveBtn = document.createElement("button");
   saveBtn.type = "button";
   saveBtn.className = "button button-quiet";
@@ -1653,6 +1815,11 @@ function renderSpecWorkbench(spec) {
   actions.append(saveBtn, applyBtn, discardBtn, acceptRecBtn, readyBtn, confirmBtn, compileBtn, submitBtn, runStatusBtn, reportBtn, capabilityBtn, cloneBtn, errorBtn, backDraftBtn, revalidateBtn);
   card.append(actions);
 
+  // Build vertical workflow stepper (once)
+  if (!byId("wf-spec-save-btn")) {
+    buildWorkflowStepper();
+  }
+
   const disabledReason = document.createElement("div");
   disabledReason.className = "spec-disabled-reason";
   disabledReason.id = "spec-disabled-reason";
@@ -1660,6 +1827,7 @@ function renderSpecWorkbench(spec) {
   card.append(disabledReason);
 
   updateSpecControls(spec);
+  updateWorkflowStepper(spec);
 
   const taskHost = byId("task-card-host");
   if (stream && taskHost) stream.insertBefore(card, taskHost);
