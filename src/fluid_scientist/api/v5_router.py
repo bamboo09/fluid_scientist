@@ -1596,6 +1596,59 @@ def get_pipeline_progress(session_id: str) -> dict[str, Any]:
     }
 
 
+class PipelineModifyRequest(BaseModel):
+    session_id: str
+    modification_text: str
+    work_root: str | None = None
+
+
+@router.post("/pipeline/modify", response_model=PipelineRunResponse)
+def modify_compile_ready_pipeline(request: PipelineModifyRequest) -> PipelineRunResponse:
+    """Apply an incremental modification to an existing COMPILE_READY case.
+
+    This re-runs the affected pipeline stages (design -> closure -> case
+    generation -> validation) and returns the updated draft view.
+    """
+    from fluid_scientist.workflow_pipeline import (
+        V5WorkflowPipeline,
+    )
+    from fluid_scientist.capabilities import get_capability_registry
+
+    # Find work_root from an existing session directory or use request value
+    work_root = request.work_root
+    if not work_root:
+        # Look for the session in common work roots
+        for candidate in [tempfile.gettempdir(), os.getcwd()]:
+            if os.path.isdir(os.path.join(candidate, request.session_id)):
+                work_root = candidate
+                break
+        if not work_root:
+            work_root = tempfile.gettempdir()
+
+    registry = get_capability_registry()
+    pipeline = V5WorkflowPipeline(
+        work_root=work_root,
+        registry=registry,
+        llm_client=_llm_client,
+    )
+    state = pipeline.modify(
+        session_id=request.session_id,
+        modification_text=request.modification_text,
+    )
+    if state.draft_view:
+        _draft_store[state.draft_view.get("draft_id", state.session_id)] = _legacy_draft_from_view(state.draft_view)
+    return PipelineRunResponse(
+        session_id=state.session_id,
+        status=state.current_stage,
+        current_stage=state.current_stage,
+        stage_history=[s.model_dump() for s in state.stage_history],
+        compile_ready_view=state.draft_view,
+        failure=state.failure,
+        case_dir=state.case_dir,
+        generated_files=state.case_manifest.get("generated_files", []),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

@@ -104,42 +104,63 @@ _FOAM_BLOCK_END = re.compile(r"""^\s*\}\s*$""")
 
 
 def _validate_foam_dictionary_syntax(text: str) -> tuple[bool, str, list[tuple[int, str]]]:
-    """Basic structural validation of an OpenFOAM dictionary.
+    """Structural validation of an OpenFOAM dictionary.
 
     Returns (valid, error_message, [(line_no, line)]).
-    Checks: balanced braces, entries end with semicolons (except block
-    openers/closers), no stray content after a block is closed.
+    Checks: balanced braces and parentheses, proper termination.
     """
     brace_depth = 0
+    paren_depth = 0
     errors: list[tuple[int, str]] = []
+    in_block_comment = False
+
     for lineno, raw in enumerate(text.split("\n"), 1):
         line = raw.strip()
+
+        # Handle block comments
+        if in_block_comment:
+            if "*/" in line:
+                in_block_comment = False
+                line = line.split("*/", 1)[1].strip()
+            else:
+                continue
+        if line.startswith("/*"):
+            if "*/" not in line:
+                in_block_comment = True
+            continue
+
         if not line or line.startswith("//"):
             continue
         # Strip inline comments
         if "//" in line:
             line = line.split("//", 1)[0].strip()
-        if line.startswith("/*"):
-            continue
-        if line.endswith("*/"):
-            continue
-        if line in ("{", "("):
-            brace_depth += 1
-            continue
-        if line in ("}", ")"):
-            brace_depth -= 1
-            if brace_depth < 0:
-                errors.append((lineno, "unexpected closing brace"))
-            continue
-        if line.endswith("{"):
-            brace_depth += 1
-            continue
-        # Regular entries must end with ;
-        if not line.endswith(";") and not line.endswith("(") and not line.endswith(")"):
-            # Entries like "vertices", "blocks", "boundary" are followed by ( ... );
-            pass
+            if not line:
+                continue
+
+        # Count braces and parens character by character (since multiple can appear on one line)
+        i = 0
+        while i < len(line):
+            ch = line[i]
+            if ch == "{":
+                brace_depth += 1
+            elif ch == "}":
+                brace_depth -= 1
+                if brace_depth < 0:
+                    errors.append((lineno, "unexpected closing brace"))
+                    brace_depth = 0
+            elif ch == "(":
+                paren_depth += 1
+            elif ch == ")":
+                paren_depth -= 1
+                if paren_depth < 0:
+                    errors.append((lineno, "unexpected closing parenthesis"))
+                    paren_depth = 0
+            i += 1
+
     if brace_depth != 0:
         errors.append((0, f"unbalanced braces (depth={brace_depth})"))
+    if paren_depth != 0:
+        errors.append((0, f"unbalanced parentheses (depth={paren_depth})"))
     return len(errors) == 0, ("OK" if not errors else f"{len(errors)} syntax issue(s)"), errors
 
 
@@ -324,51 +345,100 @@ class CompileReadinessValidator:
             ))
             return
         bm_text = bm_path.read_text(encoding="utf-8", errors="replace")
-        # Extract patch names from boundary section
+        # Extract patch names from boundary section.
+        # Format: boundary ( patchName { type ...; faces (...); } ... );
         bm_patches: set[str] = set()
-        in_boundary = False
-        for line in bm_text.split("\n"):
-            s = line.strip()
-            if s == "boundary":
-                in_boundary = True
-                continue
-            if in_boundary and s == ");":
-                in_boundary = False
-                continue
-            if in_boundary:
-                # Patch name lines have 4 spaces then the name
-                m = re.match(r"^    (\w+)\s*$", s)
-                if m:
-                    bm_patches.add(m.group(1))
+        in_boundary_list = False
+        boundary_paren_depth = 0
+        # Find "boundary" keyword, then parse entries between outer ( ... )
+        lines = bm_text.split("\n")
+        i = 0
+        while i < len(lines):
+            s = lines[i].strip()
+            # Look for "boundary" followed by optional whitespace then "("
+            if not in_boundary_list and re.match(r"^boundary\s*$", s):
+                # Next non-empty line should be "("
+                j = i + 1
+                while j < len(lines) and not lines[j].strip():
+                    j += 1
+                if j < len(lines) and lines[j].strip() == "(":
+                    in_boundary_list = True
+                    boundary_paren_depth = 1
+                    i = j + 1
+                    continue
+            if in_boundary_list:
+                # Track paren depth
+                for ch in s:
+                    if ch == "(":
+                        boundary_paren_depth += 1
+                    elif ch == ")":
+                        boundary_paren_depth -= 1
+                if boundary_paren_depth <= 0:
+                    in_boundary_list = False
+                    i += 1
+                    continue
+                # A patch entry: a word (identifier) on its own line, followed by { on next line
+                # Patch names are identifiers that appear right before a { at depth 1
+                # We look for lines that are just a word (patch name) at depth 1
+                if re.match(r"^(\w+)\s*$", s) and boundary_paren_depth == 1:
+                    # Check if next non-empty line starts with {
+                    j = i + 1
+                    while j < len(lines) and not lines[j].strip():
+                        j += 1
+                    if j < len(lines) and lines[j].strip().startswith("{"):
+                        bm_patches.add(s)
+            i += 1
+
+        # Also check for patches added by snappyHexMesh/topoSet (look for snappyHexMeshDict or topoSetDict)
+        # These add patches dynamically; allow wall/cylinder etc if those files exist
+        dynamic_patches: set[str] = set()
+        for snappy_name in ("system/snappyHexMeshDict", "system/topoSetDict"):
+            if (case_path / snappy_name).is_file():
+                snappy_text = (case_path / snappy_name).read_text(encoding="utf-8", errors="replace")
+                # Extract patch names from add/faceZone controls
+                for m in re.finditer(r"(?:wall|patch|faceZone)\s+(\w+)", snappy_text):
+                    dynamic_patches.add(m.group(1))
+
         # Extract patches from U/p boundaryField
         def extract_bcs(text: str) -> set[str]:
             patches: set[str] = set()
             in_bf = False
+            bf_brace = 0
             for line in text.split("\n"):
                 s = line.strip()
                 if s.startswith("boundaryField"):
                     in_bf = True
-                    continue
-                if in_bf and s == "}":
-                    in_bf = False
+                    bf_brace = 0
                     continue
                 if in_bf:
-                    m = re.match(r"^(\w+)\s*\{?$", s)
+                    for ch in s:
+                        if ch == "{":
+                            bf_brace += 1
+                        elif ch == "}":
+                            bf_brace -= 1
+                    if bf_brace <= 0 and "{" not in s:
+                        in_bf = False
+                        continue
+                    # Match patch names: a word followed by optional {
+                    m = re.match(r"^(\w+)\s*\{?\s*$", s)
                     if m and m.group(1) not in ("type", "value"):
-                        patches.add(m.group(1))
+                        # Only count top-level patches (bf_brace == 1)
+                        if bf_brace == 1:
+                            patches.add(m.group(1))
             return patches
 
         u_patches = extract_bcs(u_path.read_text(encoding="utf-8"))
         p_patches = extract_bcs(p_path.read_text(encoding="utf-8"))
         all_bf_patches = u_patches | p_patches
-        # Allow front/back for 2D to be missing (empty BC created automatically)
-        expected_but_missing = {p for p in all_bf_patches if p not in bm_patches and p not in ("front", "back", "frontandback")}
+        # Allow dynamic patches and standard 2D front/back
+        allowed_extra = dynamic_patches | {"front", "back", "frontandback", "defaultFaces", "walls"}
+        expected_but_missing = {p for p in all_bf_patches if p not in bm_patches and p not in allowed_extra}
         report.add_check(ValidationCheckResult(
             check_name="patch_consistency",
             passed=len(expected_but_missing) == 0,
             severity="error",
             message="All boundary patches consistent between mesh and field files." if not expected_but_missing else f"Patches in field files not found in blockMesh boundary: {expected_but_missing}",
-            details={"mesh_patches": sorted(bm_patches), "field_patches": sorted(all_bf_patches)},
+            details={"mesh_patches": sorted(bm_patches), "field_patches": sorted(all_bf_patches), "dynamic_patches": sorted(dynamic_patches)},
         ))
 
     def _check_field_solver_compatibility(self, report: CompileReadinessReport, case_path: Path, case_dict: dict | None) -> None:

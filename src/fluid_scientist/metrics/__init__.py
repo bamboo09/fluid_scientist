@@ -550,6 +550,7 @@ class GoalToMetricCompiler:
         """
         bp = boundary_patches or {}
         wall_patches = bp.get("walls", ["body", "wall", "cylinder"])
+        fo_wall_patches = bp.get("fo_walls", wall_patches)
         inlet_patches = bp.get("inlets", ["inlet"])
         outlet_patches = bp.get("outlets", ["outlet"])
 
@@ -565,7 +566,7 @@ class GoalToMetricCompiler:
             new_metrics: list[MetricDefinition] = []
 
             if any(kw in phenomenon + " " + target_qty for kw in ("force", "drag", "lift", "阻力", "升力", "载荷")):
-                new_metrics = self._catalog.scientific_force_coefficients(goal_id, wall_patches)
+                new_metrics = self._catalog.scientific_force_coefficients(goal_id, fo_wall_patches)
             elif any(kw in phenomenon + " " + target_qty for kw in ("pressure drop", "flow rate", "压降", "流量")):
                 new_metrics = self._catalog.scientific_pressure_drop(goal_id, inlet_patches[0], outlet_patches[0])
             elif any(kw in phenomenon + " " + target_qty for kw in ("velocity profile", "wake", "尾迹", "剖面", "速度分布")):
@@ -577,7 +578,7 @@ class GoalToMetricCompiler:
             elif any(kw in phenomenon + " " + target_qty for kw in ("spectrum", "spectral", "frequency", "psf", "频谱", "频率")):
                 new_metrics = self._catalog.scientific_spectral_analysis(goal_id)
             elif any(kw in phenomenon + " " + target_qty for kw in ("heat", "nusselt", "传热", "热")):
-                new_metrics = self._catalog.scientific_heat_transfer(goal_id, wall_patches)
+                new_metrics = self._catalog.scientific_heat_transfer(goal_id, fo_wall_patches)
             else:
                 # Generic baseline
                 new_metrics = self._catalog.scientific_velocity_profile(goal_id, [])
@@ -587,8 +588,8 @@ class GoalToMetricCompiler:
                     scientific.append(m)
                     seen_ids.add(m.metric_id)
 
-        boundary_v = self._catalog.boundary_verification_metrics(wall_patches, inlet_patches, outlet_patches)
-        credibility = self._catalog.credibility_metrics(wall_patches)
+        boundary_v = self._catalog.boundary_verification_metrics(fo_wall_patches, inlet_patches, outlet_patches)
+        credibility = self._catalog.credibility_metrics(fo_wall_patches)
 
         return {
             "scientific": scientific,

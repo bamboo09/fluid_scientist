@@ -59,9 +59,9 @@ def _serialize_value(value: Any, indent: int = 4) -> str:
             return value  # dimension set
         return value
     if isinstance(value, list):
-        # Check if uniform vector
-        if len(value) == 3 and all(isinstance(v, (int, float)) for v in value):
-            return f"uniform ({_format_float(value[0])} {_format_float(value[1])} {_format_float(value[2])})"
+        # All list values are serialized as ( a b c ... ) in OpenFOAM syntax.
+        # The "uniform" prefix (for fields) must be added explicitly by the caller
+        # via a dict entry {"uniform": [...]}.
         if len(value) > 0 and all(isinstance(v, (int, float)) for v in value):
             return "( " + " ".join(_format_float(v) for v in value) + " )"
         # List of strings (face list, patch names)
@@ -82,71 +82,99 @@ def _format_float(v: float | int) -> str:
 
 
 def _serialize_dict(d: dict, indent: int = 4) -> str:
-    """Serialize a dict as an OpenFOAM sub-dictionary block."""
+    """Serialize a dict as an OpenFOAM sub-dictionary block.
+
+    Handles arbitrary nesting depth correctly.
+    """
     pad = " " * indent
     lines: list[str] = []
     for key, val in d.items():
-        if isinstance(val, dict):
-            if key in ("vertices", "blocks", "boundary", "faces"):
-                # blockMeshDict structures
-                lines.append(f"{pad}{key}")
-                lines.append(f"{pad}(")
-                lines.append(_serialize_blockmesh_list(val, key, indent + 4))
-                lines.append(f"{pad});")
-            elif key == "functions":
-                lines.append(f"{pad}functions")
-                lines.append(f"{pad}{{")
-                for fo_name, fo_val in val.items():
-                    lines.append(_serialize_function_object(fo_name, fo_val, indent + 4))
-                lines.append(f"{pad}}}")
-            elif key in ("fields", "relaxationFactors"):
-                lines.append(f"{pad}{key}")
-                lines.append(f"{pad}{{")
-                for k2, v2 in val.items():
-                    if isinstance(v2, dict):
-                        lines.append(f"{pad}    {k2}")
-                        lines.append(f"{pad}    {{")
-                        for k3, v3 in v2.items():
-                            lines.append(f"{pad}        {k3}  {_serialize_value(v3, indent+8)};")
-                        lines.append(f"{pad}    }}")
-                    else:
-                        lines.append(f"{pad}    {k2}  {_serialize_value(v2, indent+4)};")
-                lines.append(f"{pad}}}")
-            else:
-                lines.append(f"{pad}{key}")
-                lines.append(f"{pad}{{")
-                for subkey, subval in val.items():
-                    if isinstance(subval, dict):
-                        lines.append(f"{pad}    {subkey}")
-                        lines.append(f"{pad}    {{")
-                        for k3, v3 in subval.items():
-                            lines.append(f"{pad}        {k3}  {_serialize_value(v3, indent+8)};")
-                        lines.append(f"{pad}    }}")
-                    elif isinstance(subval, list) and subval and isinstance(subval[0], dict):
-                        # e.g. list of field dicts
-                        lines.append(f"{pad}    {subkey}")
-                        lines.append(f"{pad}    (")
-                        for item in subval:
-                            lines.append(f"{pad}        {{")
-                            for k3, v3 in item.items():
-                                lines.append(f"{pad}            {k3}  {_serialize_value(v3, indent+12)};")
-                            lines.append(f"{pad}        }}")
-                        lines.append(f"{pad}    );")
-                    else:
-                        lines.append(f"{pad}    {subkey}  {_serialize_value(subval, indent+4)};")
-                lines.append(f"{pad}}}")
-        elif isinstance(val, list) and val and isinstance(val[0], dict):
-            lines.append(f"{pad}{key}")
-            lines.append(f"{pad}(")
+        lines.extend(_serialize_kv(key, val, indent))
+    return "\n".join(lines)
+
+
+def _serialize_kv(key: str, val: Any, indent: int) -> list[str]:
+    """Serialize a single key-value pair at the given indent level.
+
+    Returns a list of lines.
+    """
+    pad = " " * indent
+    # Special blockMesh list structures
+    if key in ("vertices", "blocks", "boundary", "faces", "edges", "mergePatchPairs") and isinstance(val, (dict, list)):
+        return _serialize_blockmesh_kv(key, val, indent)
+    if key == "functions" and isinstance(val, dict):
+        lines = [f"{pad}functions", f"{pad}{{"]
+        for fo_name, fo_val in val.items():
+            lines.append(_serialize_function_object(fo_name, fo_val, indent + 4))
+        lines.append(f"{pad}}}")
+        return lines
+    if isinstance(val, dict):
+        # Generic sub-dictionary: recurse
+        lines = [f"{pad}{key}", f"{pad}{{"]
+        for subkey, subval in val.items():
+            lines.extend(_serialize_kv(subkey, subval, indent + 4))
+        lines.append(f"{pad}}}")
+        return lines
+    if isinstance(val, list):
+        if val and isinstance(val[0], dict):
+            # List of sub-dicts (e.g., in parens)
+            lines = [f"{pad}{key}", f"{pad}("]
             for item in val:
                 lines.append(f"{pad}    {{")
                 for k2, v2 in item.items():
-                    lines.append(f"{pad}        {k2}  {_serialize_value(v2, indent+8)};")
+                    lines.extend(_serialize_kv(k2, v2, indent + 8))
                 lines.append(f"{pad}    }}")
             lines.append(f"{pad});")
-        else:
-            lines.append(f"{pad}{key}  {_serialize_value(val, indent)};")
-    return "\n".join(lines)
+            return lines
+        if val and isinstance(val[0], list):
+            # List of vectors (e.g. probeLocations)
+            lines = [f"{pad}{key}", f"{pad}("]
+            for vec in val:
+                lines.append(f"{pad}    ( {' '.join(_format_float(c) for c in vec)} )")
+            lines.append(f"{pad});")
+            return lines
+        # Simple list (numbers/strings)
+        return [f"{pad}{key}  {_serialize_value(val, indent)};"]
+    # Scalar value
+    return [f"{pad}{key}  {_serialize_value(val, indent)};"]
+
+
+def _serialize_blockmesh_kv(key: str, val: Any, indent: int) -> list[str]:
+    """Serialize a blockMesh-specific key (vertices, blocks, boundary, etc.)."""
+    pad = " " * indent
+    lines = [f"{pad}{key}", f"{pad}("]
+    if key == "vertices" and isinstance(val, list):
+        for v in val:
+            lines.append(f"{pad}    ( {' '.join(_format_float(c) for c in v)} )")
+    elif key == "blocks" and isinstance(val, list):
+        for b in val:
+            hex_vals = " ".join(str(x) for x in b.get("hex", []))
+            cells = " ".join(str(x) for x in b.get("cells", []))
+            grading = b.get("grading", "simpleGrading")
+            ratios = b.get("ratios", [1, 1, 1])
+            ratio_str = " ".join(str(x) for x in ratios)
+            lines.append(f"{pad}    hex ( {hex_vals} ) ( {cells} ) {grading} ( {ratio_str} )")
+    elif key == "edges":
+        pass  # no edges for now
+    elif key == "boundary" and isinstance(val, dict):
+        for pname, pdata in val.items():
+            lines.append(f"{pad}    {pname}")
+            lines.append(f"{pad}    {{")
+            lines.append(f"{pad}        type  {pdata.get('type', 'patch')};")
+            if pdata.get("neighbourPatch"):
+                lines.append(f"{pad}        neighbourPatch  {pdata['neighbourPatch']};")
+            faces = pdata.get("faces", [])
+            if faces:
+                lines.append(f"{pad}        faces")
+                lines.append(f"{pad}        (")
+                for f in faces:
+                    lines.append(f"{pad}            ( {' '.join(str(x) for x in f)} )")
+                lines.append(f"{pad}        );")
+            lines.append(f"{pad}    }}")
+    elif key == "mergePatchPairs":
+        pass
+    lines.append(f"{pad});")
+    return lines
 
 
 def _serialize_blockmesh_list(val: dict, key: str, indent: int) -> str:
