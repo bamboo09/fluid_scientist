@@ -54,6 +54,7 @@ from fluid_scientist.draft_session.state_machine import (
     DraftSessionStateMachine,
     TransitionError,
 )
+from fluid_scientist.draft_session.v5_storage import V5Repository
 from fluid_scientist.llm import LLMClient
 from fluid_scientist.measurement.boundary_verification_compiler import (
     BoundaryVerificationCompiler,
@@ -77,16 +78,14 @@ from fluid_scientist.workbench.experiment_design_synthesizer import (
 
 router = APIRouter(prefix="/api/v5", tags=["v5-workflow"])
 
-# Shared in-memory stores (production would use a database)
 # Shared JSON-file-backed session persistence (so sessions survive restarts)
 _session_persistence = JsonSessionPersistence()
 _session_store = DraftSessionStore(persistence=_session_persistence)
-_draft_store: dict[str, ExperimentDraft] = {}
-_proposal_store: dict[str, ChangeProposal] = {}
-_case_plan_store: dict[str, CasePlan] = {}
-_extension_store: dict[str, CodeExtensionSpec] = {}
-_batch_store: dict[str, BatchStudyPlan] = {}
-_case_store: dict[str, dict[str, Any]] = {}  # case_plan_id -> {case_dir, compiled_structure}
+
+# SQLite-backed repository for all V5 workflow entities (drafts, proposals,
+# case plans, batches, compiled cases, code extensions, audit events).
+# Replaces the former in-memory dictionaries so data survives restarts.
+_repo = V5Repository()
 
 # Shared LLM client. It is configured by the main model-settings endpoint.
 _llm_client: LLMClient | None = None
@@ -314,7 +313,7 @@ def _decompose_message(message: str) -> BatchStudyPlan:
         studies=ranked,
         batch_summary=f"识别到 {len(ranked)} 个研究任务",
     )
-    _batch_store[batch.batch_id] = batch
+    _repo.save_batch(batch)
     return batch
 
 
@@ -549,7 +548,7 @@ def _classify_with_llm(
     if route.confidence >= 0.9 and route.intent != "NEW_RESEARCH":
         return route
 
-    draft = _draft_store.get(session.current_draft_id or "")
+    draft = _repo.get_draft(session.current_draft_id or "")
     payload = {
         "session": session.model_dump(mode="json"),
         "active_study_id": session.selected_study_id,
@@ -623,7 +622,7 @@ def _classify_with_llm(
 
 
 def _answer_draft_question(session: DraftSession, user_message: str) -> str:
-    draft = _draft_store.get(session.current_draft_id or "")
+    draft = _repo.get_draft(session.current_draft_id or "")
     if draft is None:
         return "当前没有可解释的草案。"
     lower = user_message.lower()
@@ -746,7 +745,6 @@ def send_message(
             })
 
     elif route.input_type == "new_research_request":
-        # Single study
         try:
             study, check_result = _decompose_single_study(
                 request.message,
@@ -780,7 +778,8 @@ def send_message(
                 ),
             )
             if proposal.clarification_required and not proposal.changes:
-                _proposal_store.pop(proposal.proposal_id, None)
+                proposal.status = "cancelled"
+                _repo.save_proposal(proposal)
                 refreshed = _session_store.get_session(session_id)
                 if refreshed and refreshed.pending_proposal_id == proposal.proposal_id:
                     refreshed.pending_proposal_id = None
@@ -827,9 +826,10 @@ def send_message(
 
     elif route.input_type == "proposal_cancel":
         if session.pending_proposal_id:
-            proposal = _proposal_store.get(session.pending_proposal_id)
+            proposal = _repo.get_proposal(session.pending_proposal_id)
             if proposal:
                 proposal.status = "cancelled"
+                _repo.save_proposal(proposal)
             session.pending_proposal_id = None
             _session_store.update_session(session)
             response_actions.append({"action": "proposal_cancelled"})
@@ -851,7 +851,7 @@ def generate_draft(request: GenerateDraftRequest) -> ExperimentDraft:
     """Generate an experiment draft from a study intent."""
     draft = _draft_generator.generate(request.study)
     draft.session_id = request.session_id
-    _draft_store[draft.draft_id] = draft
+    _repo.save_draft(draft)
 
     session = _session_store.get_session(request.session_id)
     if session:
@@ -863,13 +863,19 @@ def generate_draft(request: GenerateDraftRequest) -> ExperimentDraft:
             )
         _session_store.update_session(session)
 
+    _repo.log_audit(
+        event_id=f"audit_{uuid.uuid4().hex[:12]}",
+        session_id=request.session_id,
+        event_type="draft_generated",
+        payload={"draft_id": draft.draft_id, "version": draft.version},
+    )
     return draft
 
 
 @router.get("/drafts/{draft_id}", response_model=ExperimentDraft)
 def get_draft(draft_id: str) -> ExperimentDraft:
     """Get a draft by ID."""
-    draft = _draft_store.get(draft_id)
+    draft = _repo.get_draft(draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
     return draft
@@ -878,19 +884,19 @@ def get_draft(draft_id: str) -> ExperimentDraft:
 @router.post("/drafts/{draft_id}/validate", response_model=ValidationResult)
 def validate_draft(draft_id: str) -> ValidationResult:
     """Validate a draft."""
-    draft = _draft_store.get(draft_id)
+    draft = _repo.get_draft(draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
     result = _validator.validate(draft)
     draft.validation_result = result.model_dump()
-    _draft_store[draft_id] = draft
+    _repo.save_draft(draft)
     return result
 
 
 @router.post("/drafts/{draft_id}/confirm", response_model=ExperimentDraft)
 def confirm_draft(draft_id: str, request: ConfirmDraftRequest) -> ExperimentDraft:
     """Confirm a draft, freezing it for compilation."""
-    draft = _draft_store.get(draft_id)
+    draft = _repo.get_draft(draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
     if not _draft_is_compile_ready(draft):
@@ -911,7 +917,14 @@ def confirm_draft(draft_id: str, request: ConfirmDraftRequest) -> ExperimentDraf
         )
 
     confirmed = draft.confirm()
-    _draft_store[draft_id] = confirmed
+    _repo.save_draft(confirmed)
+
+    _repo.log_audit(
+        event_id=f"audit_{uuid.uuid4().hex[:12]}",
+        session_id=request.session_id,
+        event_type="draft_confirmed",
+        payload={"draft_id": draft_id, "version": confirmed.version},
+    )
 
     session = _session_store.get_session(request.session_id)
     if session:
@@ -938,7 +951,7 @@ def request_draft_change(
     If the draft is read-only (locked/confirmed), it is automatically
     cloned to a new editable version before proposal generation.
     """
-    draft = _draft_store.get(draft_id)
+    draft = _repo.get_draft(draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
 
@@ -946,7 +959,7 @@ def request_draft_change(
     if draft.is_read_only() or draft.locked or draft.status == DraftStatus.CONFIRMED:
         new_draft_id = f"draft_{uuid.uuid4().hex[:12]}"
         cloned = draft.clone(new_draft_id)
-        _draft_store[cloned.draft_id] = cloned
+        _repo.save_draft(cloned)
         draft = cloned
 
         session = _session_store.get_session(request.session_id)
@@ -964,7 +977,7 @@ def request_draft_change(
     proposal = _change_agent.generate(
         draft, request.user_message, request.session_id
     )
-    _proposal_store[proposal.proposal_id] = proposal
+    _repo.save_proposal(proposal)
 
     session = _session_store.get_session(request.session_id)
     if session:
@@ -983,11 +996,11 @@ def apply_proposal(
     proposal_id: str, request: ApplyProposalRequest
 ) -> ExperimentDraft:
     """Apply a confirmed proposal to create a new draft version."""
-    proposal = _proposal_store.get(proposal_id)
+    proposal = _repo.get_proposal(proposal_id)
     if not proposal:
         raise HTTPException(status_code=404, detail="Proposal not found")
 
-    draft = _draft_store.get(proposal.draft_id)
+    draft = _repo.get_draft(proposal.draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
 
@@ -998,7 +1011,19 @@ def apply_proposal(
     except ProposalNotPendingError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    _draft_store[new_draft.draft_id] = new_draft
+    _repo.save_draft(new_draft)
+
+    _repo.log_audit(
+        event_id=f"audit_{uuid.uuid4().hex[:12]}",
+        session_id=request.session_id,
+        event_type="proposal_applied",
+        payload={
+            "proposal_id": proposal_id,
+            "old_draft_id": proposal.draft_id,
+            "new_draft_id": new_draft.draft_id,
+            "new_version": new_draft.version,
+        },
+    )
 
     session = _session_store.get_session(request.session_id)
     if session:
@@ -1022,7 +1047,7 @@ def apply_proposal(
 @router.post("/case-plans/generate", response_model=CasePlan)
 def generate_case_plan(request: GenerateCasePlanRequest) -> CasePlan:
     """Generate a case plan from a confirmed draft."""
-    draft = _draft_store.get(request.draft_id)
+    draft = _repo.get_draft(request.draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
     if not _draft_is_compile_ready(draft):
@@ -1039,7 +1064,14 @@ def generate_case_plan(request: GenerateCasePlanRequest) -> CasePlan:
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    _case_plan_store[case_plan.case_plan_id] = case_plan
+    _repo.save_case_plan(case_plan)
+
+    _repo.log_audit(
+        event_id=f"audit_{uuid.uuid4().hex[:12]}",
+        session_id=request.session_id,
+        event_type="case_plan_generated",
+        payload={"case_plan_id": case_plan.case_plan_id, "draft_id": request.draft_id},
+    )
 
     session = _session_store.get_session(request.session_id)
     if session:
@@ -1055,7 +1087,7 @@ def generate_case_plan(request: GenerateCasePlanRequest) -> CasePlan:
 @router.get("/case-plans/{case_plan_id}", response_model=CasePlan)
 def get_case_plan(case_plan_id: str) -> CasePlan:
     """Get a case plan by ID."""
-    plan = _case_plan_store.get(case_plan_id)
+    plan = _repo.get_case_plan(case_plan_id)
     if not plan:
         raise HTTPException(status_code=404, detail="Case plan not found")
     return plan
@@ -1076,14 +1108,14 @@ def create_code_extension(
     spec = _extension_workflow.create_spec(
         missing_capability, session_id, draft_id
     )
-    _extension_store[spec.extension_id] = spec
+    _repo.save_extension(spec)
     return spec
 
 
 @router.get("/code-extensions/{extension_id}", response_model=CodeExtensionSpec)
 def get_code_extension(extension_id: str) -> CodeExtensionSpec:
     """Get a code extension by ID."""
-    spec = _extension_store.get(extension_id)
+    spec = _repo.get_extension(extension_id)
     if not spec:
         raise HTTPException(status_code=404, detail="Code extension not found")
     return spec
@@ -1094,14 +1126,14 @@ def approve_code_extension(
     extension_id: str, review_notes: str = ""
 ) -> CodeExtensionSpec:
     """Approve a code extension."""
-    spec = _extension_store.get(extension_id)
+    spec = _repo.get_extension(extension_id)
     if not spec:
         raise HTTPException(status_code=404, detail="Code extension not found")
     try:
         approved = _extension_workflow.approve(spec, review_notes)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    _extension_store[extension_id] = approved
+    _repo.save_extension(approved)
     return approved
 
 
@@ -1124,7 +1156,7 @@ def decompose_studies(request: DecomposeRequest) -> BatchStudyPlan:
 @router.get("/batches/{batch_id}")
 def get_batch(batch_id: str) -> dict[str, Any]:
     """Get a batch study plan by ID."""
-    batch = _batch_store.get(batch_id)
+    batch = _repo.get_batch(batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
     return batch.model_dump()
@@ -1136,7 +1168,7 @@ def select_study(batch_id: str, request: SelectStudyRequest) -> dict[str, Any]:
 
     Stores the selection in the session, transitions to draft generation.
     """
-    batch = _batch_store.get(batch_id)
+    batch = _repo.get_batch(batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found")
 
@@ -1210,13 +1242,13 @@ def clone_draft(
     draft_id: str, request: CloneDraftRequest | None = None
 ) -> ExperimentDraft:
     """Clone a draft to a new editable version."""
-    draft = _draft_store.get(draft_id)
+    draft = _repo.get_draft(draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
 
     new_draft_id = f"draft_{uuid.uuid4().hex[:12]}"
     cloned = draft.clone(new_draft_id)
-    _draft_store[cloned.draft_id] = cloned
+    _repo.save_draft(cloned)
 
     if request and request.session_id:
         session = _session_store.get_session(request.session_id)
@@ -1236,7 +1268,7 @@ def clone_draft(
 @router.get("/proposals/{proposal_id}", response_model=ChangeProposal)
 def get_proposal(proposal_id: str) -> ChangeProposal:
     """Get a proposal by ID."""
-    proposal = _proposal_store.get(proposal_id)
+    proposal = _repo.get_proposal(proposal_id)
     if not proposal:
         raise HTTPException(status_code=404, detail="Proposal not found")
     return proposal
@@ -1247,7 +1279,7 @@ def cancel_proposal(
     proposal_id: str, request: CancelProposalRequest | None = None
 ) -> ChangeProposal:
     """Cancel a pending proposal."""
-    proposal = _proposal_store.get(proposal_id)
+    proposal = _repo.get_proposal(proposal_id)
     if not proposal:
         raise HTTPException(status_code=404, detail="Proposal not found")
     if proposal.status != "pending":
@@ -1256,6 +1288,7 @@ def cancel_proposal(
             detail=f"Cannot cancel proposal in status '{proposal.status}'",
         )
     proposal.status = "cancelled"
+    _repo.save_proposal(proposal)
 
     if request and request.session_id:
         session = _session_store.get_session(request.session_id)
@@ -1278,7 +1311,7 @@ def compile_case_plan(case_plan_id: str) -> dict[str, Any]:
     Returns the compiled case structure and the directory path where files
     were written.
     """
-    case_plan = _case_plan_store.get(case_plan_id)
+    case_plan = _repo.get_case_plan(case_plan_id)
     if not case_plan:
         raise HTTPException(status_code=404, detail="Case plan not found")
 
@@ -1291,11 +1324,7 @@ def compile_case_plan(case_plan_id: str) -> dict[str, Any]:
     case_dir = tempfile.mkdtemp(prefix=f"fluid_case_{case_plan_id}_")
     _write_case_to_disk(compiled, case_dir)
 
-    _case_store[case_plan_id] = {
-        "case_plan_id": case_plan_id,
-        "case_dir": case_dir,
-        "compiled_structure": compiled,
-    }
+    _repo.save_compiled_case(case_plan_id, case_dir, compiled)
 
     return {
         "case_plan_id": case_plan_id,
@@ -1350,7 +1379,7 @@ def generate_code_extension(
     the endpoint falls back to a deterministic placeholder string so
     that the workflow can still complete.
     """
-    spec = _extension_store.get(extension_id)
+    spec = _repo.get_extension(extension_id)
     if not spec:
         raise HTTPException(status_code=404, detail="Code extension not found")
 
@@ -1411,7 +1440,7 @@ def generate_code_extension(
         }
     )
 
-    _extension_store[extension_id] = spec
+    _repo.save_extension(spec)
     return spec
 
 
@@ -1423,7 +1452,7 @@ def test_code_extension(
 
     Transitions generated -> testing -> tested and stores mock test results.
     """
-    spec = _extension_store.get(extension_id)
+    spec = _repo.get_extension(extension_id)
     if not spec:
         raise HTTPException(status_code=404, detail="Code extension not found")
 
@@ -1432,7 +1461,7 @@ def test_code_extension(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    _extension_store[extension_id] = spec
+    _repo.save_extension(spec)
     return spec
 
 
@@ -1450,7 +1479,7 @@ def review_code_extension(
     automated feedback.  LLM failures are silently ignored so the
     workflow is never blocked.
     """
-    spec = _extension_store.get(extension_id)
+    spec = _repo.get_extension(extension_id)
     if not spec:
         raise HTTPException(status_code=404, detail="Code extension not found")
 
@@ -1508,7 +1537,7 @@ def review_code_extension(
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
-    _extension_store[extension_id] = spec
+    _repo.save_extension(spec)
     return spec
 
 
@@ -1517,7 +1546,7 @@ def register_code_extension(
     extension_id: str, request: CodeExtensionRegisterRequest | None = None
 ) -> CodeExtensionSpec:
     """Register an approved extension to the capability registry."""
-    spec = _extension_store.get(extension_id)
+    spec = _repo.get_extension(extension_id)
     if not spec:
         raise HTTPException(status_code=404, detail="Code extension not found")
 
@@ -1526,7 +1555,7 @@ def register_code_extension(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    _extension_store[extension_id] = spec
+    _repo.save_extension(spec)
     return spec
 
 
@@ -1607,7 +1636,7 @@ def _run_compile_ready_pipeline_for_study(
 
     draft = _legacy_draft_from_view(state.draft_view)
     draft = draft.model_copy(update={"session_id": session_id, "study_id": study.study_id})
-    _draft_store[draft.draft_id] = draft
+    _repo.save_draft(draft)
     return {
         "type": "draft_ready",
         **payload,
@@ -1643,7 +1672,7 @@ def run_compile_ready_pipeline(request: PipelineRunRequest) -> PipelineRunRespon
     )
     # Store only truly compile-ready draft views.
     if state.current_stage == PipelineStatus.COMPILE_READY and state.draft_view:
-        _draft_store[state.draft_view.get("draft_id", state.session_id)] = _legacy_draft_from_view(state.draft_view)
+        _repo.save_draft(_legacy_draft_from_view(state.draft_view))
     return PipelineRunResponse(
         session_id=state.session_id,
         status=state.current_stage,
@@ -1715,7 +1744,7 @@ def modify_compile_ready_pipeline(request: PipelineModifyRequest) -> PipelineRun
         modification_text=request.modification_text,
     )
     if state.draft_view:
-        _draft_store[state.draft_view.get("draft_id", state.session_id)] = _legacy_draft_from_view(state.draft_view)
+        _repo.save_draft(_legacy_draft_from_view(state.draft_view))
     return PipelineRunResponse(
         session_id=state.session_id,
         status=state.current_stage,
