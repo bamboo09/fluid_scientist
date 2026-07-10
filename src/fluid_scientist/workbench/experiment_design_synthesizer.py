@@ -135,6 +135,9 @@ class ExperimentDesignSynthesizer:
         match = re.search(r"\bre\s*[=:]?\s*(\d+(?:\.\d+)?)", text)
         if match:
             return float(match.group(1))
+        match = re.search(r"雷诺数\s*([0-9]+(?:\.[0-9]+)?)", study.raw_text)
+        if match:
+            return float(match.group(1))
         return 3900.0 if "3900" in text else None
 
     @staticmethod
@@ -177,6 +180,8 @@ class ExperimentDesignSynthesizer:
         else:
             result.setdefault("inlet", {"type": "inlet_velocity", "value": "U_ref", "source": "SYSTEM_SELECTED"})
             result.setdefault("outlet", {"type": "outlet_advective", "source": "SYSTEM_SELECTED"})
+            if geometry_type == "cylinder_external_flow":
+                result.setdefault("cylinder", {"type": "no_slip", "source": "TEMPLATE_DEFAULT"})
             result.setdefault("top", {"type": "free_slip", "source": "TEMPLATE_DEFAULT"})
             result.setdefault("bottom", {"type": "free_slip", "source": "TEMPLATE_DEFAULT"})
         return result

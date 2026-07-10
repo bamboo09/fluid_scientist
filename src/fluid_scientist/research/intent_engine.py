@@ -266,6 +266,14 @@ class IntentEngine:
             requested_metrics.append("drag_coefficient")
         if any(kw in combined_lower for kw in ("速度", "velocity")):
             requested_metrics.append("velocity_profile")
+        if any(kw in combined_lower for kw in ("阻升力", "升力", "lift", "频谱", "spectrum")):
+            requested_metrics.append("force_spectrum")
+        if any(kw in combined_lower for kw in ("尾迹偏斜", "wake deflection")):
+            requested_metrics.append("wake_deflection")
+        if any(kw in combined_lower for kw in ("展向翻转", "spanwise reversal")):
+            requested_metrics.append("spanwise_reversal")
+        if any(kw in combined_lower for kw in ("壁面涡", "涡结构", "wall vortex", "lambda2")):
+            requested_metrics.append("wall_vortex_structure")
 
         # --- 指标识别（从已确认事实回退） ---
         for fact in confirmed_facts:
@@ -279,6 +287,14 @@ class IntentEngine:
         # --- 目标现象识别 ---
         if any(kw in combined_lower for kw in ("二次流", "secondary flow")):
             target_phenomena.append("secondary_flow")
+        if any(kw in combined_lower for kw in ("尾迹偏斜", "wake deflection")):
+            target_phenomena.append("wake_deflection")
+        if any(kw in combined_lower for kw in ("展向翻转", "spanwise reversal")):
+            target_phenomena.append("spanwise_reversal")
+        if any(kw in combined_lower for kw in ("壁面涡", "涡结构", "wall vortex", "lambda2")):
+            target_phenomena.append("wall_vortex_structure")
+        if any(kw in combined_lower for kw in ("阻升力", "升力", "频谱", "force spectrum")):
+            target_phenomena.append("force_spectrum")
 
         # --- 流态关键词检测（用于置信度计算） ---
         has_flow_regime_keyword = any(
@@ -357,6 +373,8 @@ class IntentEngine:
 
         if not parts:
             return user_message if len(user_message) >= 10 else None
+        if len(user_message) >= 20:
+            return user_message
 
         if len(parts) > 1:
             return "研究" + "的".join(parts)

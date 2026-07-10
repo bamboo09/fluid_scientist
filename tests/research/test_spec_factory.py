@@ -152,10 +152,16 @@ def test_spec_has_parameters_from_dynamic_schema(
     assert len(spec.parameters) > 0
     # 验证包含几何参数
     param_ids = {p.parameter_id for p in spec.parameters}
-    assert "diameter" in param_ids
-    # 验证参数有正确的 source（system_recommended）
+    assert "D" in param_ids
+    assert "solver_name" in param_ids
+    assert "mesh_strategy_target_cells" in param_ids
+    # 验证参数直接闭合为有效草案值
     for param in spec.parameters:
-        assert param.source.type == ParameterSource.SYSTEM_RECOMMENDED
+        assert param.source.type != ParameterSource.SYSTEM_RECOMMENDED
+        assert param.source.type != ParameterSource.UNKNOWN
+        assert param.status.value == "accepted"
+        assert param.confirmation_policy.value == "auto_accept"
+        assert param.value is not None
     # 验证参数有 criticality 和 confirmation_policy
     for param in spec.parameters:
         assert param.criticality in Criticality
@@ -201,12 +207,13 @@ def test_spec_physics_converted_correctly(
         physics_spec=physics_spec,
     )
 
-    assert spec.physics.dimensions == Dimensions.TWO_D
+    assert spec.physics.dimensions == Dimensions.THREE_D
     assert spec.physics.phases == PhaseType.SINGLE_PHASE
     assert spec.physics.compressibility == Compressibility.INCOMPRESSIBLE
     assert spec.physics.flow_regime == FlowRegime.LAMINAR
-    assert spec.physics.temporal_type == TemporalType.STEADY
-    assert spec.physics.gravity_enabled is None
+    assert spec.physics.temporal_type == TemporalType.TRANSIENT
+    assert spec.physics.gravity_enabled is False
+    assert spec.physics.solver == "pimpleFoam"
 
 
 # --------------------------------------------------------------------------- #
@@ -226,11 +233,11 @@ def test_spec_factory_with_default_physics(
         physics_spec=None,
     )
 
-    assert spec.physics.dimensions is None
-    assert spec.physics.phases is None
-    assert spec.physics.compressibility is None
-    assert spec.physics.flow_regime is None
-    assert spec.physics.temporal_type is None
+    assert spec.physics.dimensions == Dimensions.THREE_D
+    assert spec.physics.phases == PhaseType.SINGLE_PHASE
+    assert spec.physics.compressibility == Compressibility.INCOMPRESSIBLE
+    assert spec.physics.flow_regime in FlowRegime
+    assert spec.physics.temporal_type == TemporalType.TRANSIENT
 
 
 # --------------------------------------------------------------------------- #

@@ -1,34 +1,54 @@
-"""从 Dynamic Schema 生成 ExperimentSpec 的工厂。"""
+"""ExperimentSpec factory for the research-session draft workflow."""
 
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import uuid4
 
 from fluid_scientist.compat import UTC
-from fluid_scientist.dynamic_schema.schema_engine import generate_schema
 from fluid_scientist.experiment_spec.models import (
     Compressibility,
+    ConfirmationPolicy,
+    Criticality,
     Dimensions,
     ExperimentSpec,
     ExperimentStatus,
     FlowRegime,
     InteractionMode,
+    ParameterConstraints,
+    ParameterProvenance,
+    ParameterSource,
+    ParameterSourceInfo,
+    ParameterSpec,
+    ParameterStatus,
     PhaseType,
+    PhysicsFieldMeta,
+    PhysicsFieldStatus,
     PhysicsSpec,
     ResearchSpec,
     TaskType,
     TemporalType,
 )
+from fluid_scientist.measurement.boundary_verification_compiler import (
+    BoundaryVerificationCompiler,
+)
+from fluid_scientist.measurement.goal_metric_compiler import GoalMetricCompiler
 from fluid_scientist.research.models import (
     IntentAssessment,
     ResearchPhysicsSpec,
     ResearchSession,
 )
+from fluid_scientist.study_decomposition.models import ExtractedParameter, StudyIntent
+from fluid_scientist.workbench.design_closure_engine import DesignClosureEngine
+from fluid_scientist.workbench.experiment_design_synthesizer import (
+    DesignField,
+    ExperimentDesign,
+    ExperimentDesignSynthesizer,
+)
 
 
-def _to_float(value):
-    """安全转换为 float。"""
+def _to_float(value: Any) -> float | None:
     if value is None:
         return None
     if isinstance(value, (int, float)):
@@ -40,7 +60,7 @@ def _to_float(value):
 
 
 class ExperimentSpecFactory:
-    """从 Dynamic Schema 生成 ExperimentSpec。"""
+    """Build a closed, editable draft instead of an empty parameter checklist."""
 
     def create_from_schema(
         self,
@@ -48,218 +68,455 @@ class ExperimentSpecFactory:
         intent: IntentAssessment,
         physics_spec: ResearchPhysicsSpec | None,
     ) -> ExperimentSpec:
-        """从研究会话和物理规格生成实验规格。
+        """Create an ``ExperimentSpec`` for the legacy research-session route.
 
-        流程:
-        1. 将 ResearchPhysicsSpec 转换为 experiment_spec.PhysicsSpec
-        2. 从会话事实中提取已有参数值
-        3. 调用 generate_schema() 生成参数 schema（含已有值）
-        4. 构造 ExperimentSpec
+        The actual V5 page still calls ``/api/research-sessions``.  This method
+        therefore runs the complete design chain here: full design synthesis,
+        parameter closure, metric compilation, boundary verification, then
+        capability checks outside this factory.
         """
-        # 1. 转换 PhysicsSpec
-        esp_physics = self._convert_physics_spec(physics_spec)
-
-        # 2. 从会话事实中提取参数值
-        existing_params = self._extract_existing_params(session, physics_spec)
-
-        # 3. 调用 Dynamic Schema Engine（传入已有参数值）
-        schema_result = generate_schema(esp_physics, existing_params=existing_params)
-
-        # 3a. 从 ResearchContext 填充 ParameterProvenance
-        schema_params = list(schema_result.parameters)
-        if session.research_context is not None:
-            rc = session.research_context
-            updated_params = []
-            for param in schema_params:
-                # 尝试找到匹配的 confirmed fact
-                matching_fact = None
-                for f in rc.confirmed_facts:
-                    if f.key.lower() in (
-                        param.parameter_id.lower(),
-                        param.display_name.lower(),
-                    ):
-                        matching_fact = f
-                        break
-
-                if matching_fact:
-                    new_provenance = param.provenance.model_copy(update={
-                        "source_type": "user",
-                        "research_session_id": session.session_id,
-                        "turn_id": matching_fact.turn_id,
-                        "source_text": matching_fact.source_text,
-                    })
-                    updated_params.append(
-                        param.model_copy(update={"provenance": new_provenance})
-                    )
-                else:
-                    # System recommended
-                    new_provenance = param.provenance.model_copy(update={
-                        "source_type": "system_recommended",
-                        "research_session_id": session.session_id,
-                    })
-                    updated_params.append(
-                        param.model_copy(update={"provenance": new_provenance})
-                    )
-            schema_params = updated_params
-
-        # 4. 构造 ExperimentSpec
         experiment_id = f"exp-{uuid4().hex[:16]}"
         now = datetime.now(UTC).isoformat()
+        study = self._build_study_intent(session, intent, physics_spec)
+        design = ExperimentDesignSynthesizer().synthesize(study)
+        design = DesignClosureEngine().close(design)
+        design = self._apply_explicit_physics(design, physics_spec)
+        metric_groups = GoalMetricCompiler().compile(design)
+        boundary_metrics = BoundaryVerificationCompiler().compile(design)
 
-        # 从 intent 提取研究信息
+        design = design.model_copy(
+            update={
+                "scientific_metrics": metric_groups["scientific"],
+                "boundary_verification_metrics": boundary_metrics,
+                "credibility_metrics": metric_groups["credibility"],
+            }
+        )
+
         research = ResearchSpec(
-            title=intent.research_objective or session.original_request[:100],
+            title=(intent.research_objective or session.original_request)[:512],
             objective=intent.research_objective or session.original_request,
-            hypothesis=None,
+            hypothesis=(
+                design.research_hypotheses[0]
+                if design.research_hypotheses
+                else None
+            ),
             comparison_target=intent.physical_system,
             user_questions=[session.original_request],
         )
 
-        # 确定 task_type
-        task_type = self._map_task_type(intent.task_type)
-
-        spec = ExperimentSpec(
+        return ExperimentSpec(
             experiment_id=experiment_id,
             schema_version="1.0.0",
             experiment_version=1,
             status=ExperimentStatus.DRAFT,
-            task_type=task_type,
+            task_type=self._map_task_type(intent.task_type),
             interaction_mode=InteractionMode.STANDARD,
             research=research,
-            physics=esp_physics,
-            parameters=schema_params,
-            metrics=[],  # 将在 Commit 5 填充
+            physics=self._physics_from_design(design, physics_spec),
+            parameters=self._parameters_from_design(design, session, now),
+            metrics=self._metrics_from_design(design, metric_groups, boundary_metrics),
+            sampling_plan={
+                "sampling_strategy": design.sampling_strategy,
+                "output_control": design.output_control,
+            },
+            validation_plan={
+                "boundary_verification_metrics": boundary_metrics,
+                "credibility_metrics": metric_groups["credibility"],
+            },
+            compute_plan=design.compute_resources,
             created_at=now,
             updated_at=now,
         )
 
-        return spec
+    def _build_study_intent(
+        self,
+        session: ResearchSession,
+        intent: IntentAssessment,
+        physics_spec: ResearchPhysicsSpec | None,
+    ) -> StudyIntent:
+        full_text = session.accumulated_context.get("all_messages") or session.original_request
+        known_parameters = [
+            ExtractedParameter(
+                canonical_id=key,
+                display_name=key,
+                value=value,
+                unit=None,
+                source_text=str(value),
+                source="user_provided",
+                confidence=0.9,
+            )
+            for key, value in self._extract_existing_params(session, physics_spec).items()
+        ]
+        boundary_conditions = self._boundary_conditions_from_physics(physics_spec)
+        geometry = dict(physics_spec.geometry_facts) if physics_spec else {}
+        if intent.physical_system and "type" not in geometry:
+            geometry["type"] = self._geometry_type(intent.physical_system, full_text)
+
+        analysis_goals = [
+            *intent.target_phenomena,
+            *intent.requested_metrics,
+            *intent.explicitly_requested_metrics,
+        ]
+        if intent.research_objective:
+            analysis_goals.append(intent.research_objective)
+
+        return StudyIntent(
+            study_id=f"study-{session.session_id}",
+            title=(intent.research_objective or session.original_request)[:200],
+            raw_text=full_text,
+            study_type=geometry.get("type") or intent.physical_system or "unknown",
+            research_objective=intent.research_objective or session.original_request,
+            geometry=geometry,
+            physical_models=self._physical_models_from_physics(physics_spec),
+            initial_conditions=(
+                [dict(physics_spec.initial_condition_facts)]
+                if physics_spec and physics_spec.initial_condition_facts
+                else []
+            ),
+            boundary_conditions=boundary_conditions,
+            known_parameters=known_parameters,
+            analysis_goals=analysis_goals,
+            target_phenomena=list(intent.target_phenomena),
+            boundary_facts=dict(physics_spec.boundary_facts) if physics_spec else {},
+            readiness_level="draftable",
+        )
+
+    @staticmethod
+    def _apply_explicit_physics(
+        design: ExperimentDesign,
+        physics_spec: ResearchPhysicsSpec | None,
+    ) -> ExperimentDesign:
+        if physics_spec is None or physics_spec.flow_regime != "turbulent":
+            return design
+        closed = design.model_copy(deep=True)
+        closed.turbulence_model = {
+            "model": "LES",
+            "source": "USER_SPECIFIED",
+            "reason": "User explicitly described the flow as turbulent.",
+        }
+        closed.dimensionless_parameters["target_y_plus"] = DesignField(
+            value=1.0,
+            source="SYSTEM_SELECTED",
+            reason="Wall-resolved near-wall target selected for turbulent flow.",
+            confidence=0.9,
+        )
+        return closed
+
+    @staticmethod
+    def _boundary_conditions_from_physics(
+        physics_spec: ResearchPhysicsSpec | None,
+    ) -> list[dict[str, Any]]:
+        if physics_spec is None or not physics_spec.boundary_facts:
+            return []
+        result: list[dict[str, Any]] = []
+        for key, value in physics_spec.boundary_facts.items():
+            if isinstance(value, dict):
+                patch = value.get("patch") or value.get("location") or key
+                result.append({"patch": patch, "location": patch, **value})
+            else:
+                result.append({"patch": key, "location": key, "type": value})
+        return result
+
+    @staticmethod
+    def _physical_models_from_physics(
+        physics_spec: ResearchPhysicsSpec | None,
+    ) -> dict[str, Any]:
+        if physics_spec is None:
+            return {}
+        return {
+            "dimensions": physics_spec.dimensions,
+            "temporal_type": physics_spec.temporal_type,
+            "phases": physics_spec.phases,
+            "compressibility": physics_spec.compressibility,
+            "flow_regime": physics_spec.flow_regime,
+        }
+
+    @staticmethod
+    def _geometry_type(physical_system: str, text: str) -> str:
+        lower = text.lower()
+        if physical_system == "internal_flow":
+            return "pipe"
+        if physical_system == "external_flow":
+            return "cylinder_external_flow" if ("圆柱" in text or "cylinder" in lower) else "external_flow"
+        if physical_system == "cavity_flow":
+            return "cavity"
+        return physical_system
+
+    @staticmethod
+    def _physics_from_design(
+        design: ExperimentDesign,
+        research_physics: ResearchPhysicsSpec | None,
+    ) -> PhysicsSpec:
+        re_value = design.dimensionless_parameters.get("Re")
+        flow_regime = (
+            FlowRegime.TURBULENT
+            if re_value and float(re_value.value) >= 3000
+            else FlowRegime.LAMINAR
+        )
+        if research_physics and research_physics.flow_regime:
+            flow_regime = (
+                FlowRegime.TURBULENT
+                if research_physics.flow_regime == "turbulent"
+                else FlowRegime.LAMINAR
+            )
+        solver_name = str(design.solver.get("name", "pimpleFoam"))
+        turbulence_model = str(design.turbulence_model.get("model", "laminar"))
+        return PhysicsSpec(
+            dimensions=Dimensions.THREE_D,
+            phases=PhaseType.SINGLE_PHASE,
+            compressibility=Compressibility.INCOMPRESSIBLE,
+            flow_regime=flow_regime,
+            temporal_type=TemporalType.TRANSIENT,
+            gravity_enabled=False,
+            solver=solver_name,
+            turbulence_model=turbulence_model,
+            field_status={
+                "dimensions": PhysicsFieldMeta(
+                    value=Dimensions.THREE_D.value,
+                    status=PhysicsFieldStatus.DERIVED,
+                    confidence="medium",
+                    reason="Closed by the draft design generator.",
+                    requires_confirmation=False,
+                ),
+                "solver": PhysicsFieldMeta(
+                    value=solver_name,
+                    status=PhysicsFieldStatus.DERIVED,
+                    confidence="high",
+                    reason=str(design.solver.get("reason", "")),
+                    requires_confirmation=False,
+                ),
+                "turbulence_model": PhysicsFieldMeta(
+                    value=turbulence_model,
+                    status=PhysicsFieldStatus.DERIVED,
+                    confidence="high",
+                    reason=str(design.turbulence_model.get("reason", "")),
+                    requires_confirmation=False,
+                ),
+            },
+        )
+
+    def _parameters_from_design(
+        self,
+        design: ExperimentDesign,
+        session: ResearchSession,
+        now: str,
+    ) -> list[ParameterSpec]:
+        params: list[ParameterSpec] = []
+        for key, field in design.material_properties.items():
+            params.append(self._field_param(key, key, "material", field, session, now))
+        for key, field in design.dimensionless_parameters.items():
+            params.append(self._field_param(key, key, "dimensionless", field, session, now))
+        for key, field in design.parameterization_strategy.items():
+            params.append(self._field_param(key, key, "reference", field, session, now))
+        for key, value in design.computational_domain.items():
+            params.append(self._plain_param(f"domain_{key}", key, "geometry", value, session, now))
+        for patch, bc in design.boundary_conditions.items():
+            params.append(
+                self._plain_param(
+                    f"bc_{patch}",
+                    f"{patch} boundary",
+                    "boundary_condition",
+                    dict(bc),
+                    session,
+                    now,
+                )
+            )
+        for field, initial in design.initial_conditions.items():
+            params.append(
+                self._plain_param(
+                    f"initial_{field}",
+                    f"initial {field}",
+                    "initial_condition",
+                    dict(initial),
+                    session,
+                    now,
+                )
+            )
+        grouped = {
+            "solver": design.solver,
+            "turbulence_model": design.turbulence_model,
+            "numerical_schemes": design.numerical_schemes,
+            "pressure_velocity_coupling": design.pressure_velocity_coupling,
+            "mesh_strategy": design.mesh_strategy,
+            "near_wall_strategy": design.near_wall_strategy,
+            "time_control": design.time_control,
+            "sampling_strategy": design.sampling_strategy,
+            "output_control": design.output_control,
+            "post_processing": design.post_processing,
+            "compute_resources": design.compute_resources,
+        }
+        for category, values in grouped.items():
+            for key, value in values.items():
+                if key in {"source", "reason"}:
+                    continue
+                params.append(
+                    self._plain_param(
+                        f"{category}_{key}",
+                        key,
+                        category,
+                        value,
+                        session,
+                        now,
+                        source=str(values.get("source", "SYSTEM_SELECTED")),
+                        reason=str(values.get("reason", "")),
+                    )
+                )
+        return self._dedupe(params)
+
+    def _field_param(
+        self,
+        parameter_id: str,
+        display_name: str,
+        category: str,
+        field: DesignField,
+        session: ResearchSession,
+        now: str,
+    ) -> ParameterSpec:
+        return self._param(
+            parameter_id=parameter_id,
+            display_name=display_name,
+            category=category,
+            value=field.value,
+            unit=field.unit,
+            source=field.source,
+            reason=field.reason,
+            confidence=field.confidence,
+            editable=field.modifiable,
+            session=session,
+            now=now,
+        )
+
+    def _plain_param(
+        self,
+        parameter_id: str,
+        display_name: str,
+        category: str,
+        value: Any,
+        session: ResearchSession,
+        now: str,
+        source: str = "SYSTEM_SELECTED",
+        reason: str = "",
+    ) -> ParameterSpec:
+        return self._param(
+            parameter_id=parameter_id,
+            display_name=display_name,
+            category=category,
+            value=value,
+            unit=None,
+            source=source,
+            reason=reason,
+            confidence=0.85,
+            editable=True,
+            session=session,
+            now=now,
+        )
+
+    @staticmethod
+    def _param(
+        parameter_id: str,
+        display_name: str,
+        category: str,
+        value: Any,
+        unit: str | None,
+        source: str,
+        reason: str,
+        confidence: float,
+        editable: bool,
+        session: ResearchSession,
+        now: str,
+    ) -> ParameterSpec:
+        normalized_value, data_type = _normalize_value(value)
+        mapped_source = _map_source(source)
+        return ParameterSpec(
+            parameter_id=_safe_id(parameter_id),
+            display_name=display_name.replace("_", " "),
+            category=category,
+            value=normalized_value,
+            unit=unit,
+            data_type=data_type,
+            source=ParameterSourceInfo(
+                type=mapped_source,
+                reason=reason or "Closed by the experiment design generator.",
+                confidence="high" if confidence >= 0.85 else "medium",
+                risk_level="low",
+            ),
+            status=ParameterStatus.ACCEPTED,
+            editable=editable,
+            visible_level=InteractionMode.STANDARD,
+            criticality=Criticality.MEDIUM,
+            confirmation_policy=ConfirmationPolicy.AUTO_ACCEPT,
+            constraints=ParameterConstraints(),
+            provenance=ParameterProvenance(
+                created_by="system",
+                created_at=now,
+                source_type=mapped_source.value,
+                research_session_id=session.session_id,
+            ),
+        )
+
+    @staticmethod
+    def _metrics_from_design(
+        design: ExperimentDesign,
+        metric_groups: dict[str, list[dict[str, Any]]],
+        boundary_metrics: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        return [
+            {
+                "kind": "analysis_goals",
+                "analysis_goals": [goal.model_dump() for goal in design.analysis_goals],
+                "target_phenomena": design.target_phenomena,
+                "boundary_facts": design.boundary_facts,
+            },
+            {
+                "kind": "compiled_metrics",
+                "scientific_metrics": metric_groups["scientific"],
+                "boundary_verification_metrics": boundary_metrics,
+                "credibility_metrics": metric_groups["credibility"],
+                "comparison_metrics": metric_groups["comparison"],
+                "optional_diagnostics": metric_groups["optional_diagnostics"],
+            },
+        ]
+
+    @staticmethod
+    def _dedupe(parameters: list[ParameterSpec]) -> list[ParameterSpec]:
+        seen: set[str] = set()
+        result: list[ParameterSpec] = []
+        for param in parameters:
+            if param.parameter_id in seen:
+                continue
+            seen.add(param.parameter_id)
+            result.append(param)
+        return result
 
     @staticmethod
     def _extract_existing_params(
         session: ResearchSession,
         physics_spec: ResearchPhysicsSpec | None,
-    ) -> dict:
-        """从会话的 confirmed_facts 和累积上下文中提取参数值。
-
-        将用户在对话中提到的数值（如管径、流速、密度等）映射到
-        Dynamic Schema Engine 的 existing_params 字典中。
-        """
-        params = {}
-
-        # 从 confirmed_facts 中提取
+    ) -> dict[str, float]:
+        params: dict[str, float] = {}
         for fact in session.confirmed_facts:
-            key = fact.key
-            value = fact.value
-
-            # 映射事实键到参数 ID
-            key_lower = key.lower() if isinstance(key, str) else str(key).lower()
-
-            # 直接匹配常见参数名
-            if key_lower in ("diameter", "管径", "pipe_diameter"):
-                params["diameter"] = _to_float(value)
-            elif key_lower in ("length", "管长", "pipe_length"):
-                params["length"] = _to_float(value)
-            elif key_lower in ("inlet_velocity", "入口速度", "velocity", "流速"):
-                params["inlet_velocity"] = _to_float(value)
-            elif key_lower in ("mean_velocity", "平均速度"):
-                params["mean_velocity"] = _to_float(value)
-            elif key_lower in ("density", "密度", "fluid_density"):
-                params["density"] = _to_float(value)
-            elif key_lower in ("kinematic_viscosity", "运动粘度", "viscosity"):
-                params["kinematic_viscosity"] = _to_float(value)
-            elif key_lower in ("reynolds_number", "reynolds", "雷诺数"):
-                params["reynolds_number"] = _to_float(value)
-            elif key_lower in ("lid_velocity", "盖板速度"):
-                params["lid_velocity"] = _to_float(value)
-            elif key_lower in ("side_length", "边长"):
-                params["side_length"] = _to_float(value)
-
-        # 从原始请求中提取数值（正则匹配）
-        import re
-
-        full_text = session.accumulated_context.get("all_messages", "") or session.original_request
-
-        # 管径: "管径0.05米" 或 "diameter 0.05m"
-        m = re.search(r"管径\s*([0-9.]+)", full_text)
-        if m and "diameter" not in params:
-            params["diameter"] = float(m.group(1))
-
-        # 流速: "流速0.02米每秒" 或 "流速 0.02 m/s"
-        m = re.search(r"流速\s*([0-9.]+)", full_text)
-        if m and "inlet_velocity" not in params:
-            params["inlet_velocity"] = float(m.group(1))
-
-        # 密度: "密度1000" 或 "density 1000"
-        m = re.search(r"密度\s*([0-9.]+)", full_text)
-        if m and "density" not in params:
-            params["density"] = float(m.group(1))
-
-        # 运动粘度: "粘度1e-6" 或 "viscosity 1e-6"
-        m = re.search(r"粘度\s*([0-9.eE-]+)", full_text)
-        if m and "kinematic_viscosity" not in params:
-            params["kinematic_viscosity"] = float(m.group(1))
-
-        # 从 material_facts 提取
-        if physics_spec and physics_spec.material_facts:
-            mf = physics_spec.material_facts
-            if "density" in mf and "density" not in params:
-                params["density"] = _to_float(mf["density"])
-            if "kinematic_viscosity" in mf and "kinematic_viscosity" not in params:
-                params["kinematic_viscosity"] = _to_float(mf["kinematic_viscosity"])
-
-        # 从 geometry_facts 提取
-        if physics_spec and physics_spec.geometry_facts:
-            gf = physics_spec.geometry_facts
-            if "diameter" in gf and "diameter" not in params:
-                params["diameter"] = _to_float(gf["diameter"])
-            if "length" in gf and "length" not in params:
-                params["length"] = _to_float(gf["length"])
-
-        # 从 operating_conditions 提取
-        if physics_spec and physics_spec.operating_conditions:
-            oc = physics_spec.operating_conditions
-            if "inlet_velocity" in oc and "inlet_velocity" not in params:
-                params["inlet_velocity"] = _to_float(oc["inlet_velocity"])
-            if "mean_velocity" in oc and "mean_velocity" not in params:
-                params["mean_velocity"] = _to_float(oc["mean_velocity"])
-
-        # 清除 None 值
-        return {k: v for k, v in params.items() if v is not None}
-
-    @staticmethod
-    def _convert_physics_spec(
-        research_physics: ResearchPhysicsSpec | None,
-    ) -> PhysicsSpec:
-        """将 ResearchPhysicsSpec 转换为 experiment_spec.PhysicsSpec。
-
-        当 ResearchPhysicsSpec 的字段为 None 时，PhysicsSpec 的对应字段
-        也保持 None（未知），不再静默填充硬编码默认值。
-        """
-        if research_physics is None:
-            return PhysicsSpec()  # 所有高风险字段为 None（未知）
-
-        # 安全地转换字符串到枚举，None 保留为 None
-        def safe_enum(enum_cls, value):
-            if value is None:
-                return None
-            try:
-                return enum_cls(value)
-            except (ValueError, KeyError):
-                return None
-
-        return PhysicsSpec(
-            dimensions=safe_enum(Dimensions, research_physics.dimensions),
-            phases=safe_enum(PhaseType, research_physics.phases),
-            compressibility=safe_enum(Compressibility, research_physics.compressibility),
-            flow_regime=safe_enum(FlowRegime, research_physics.flow_regime),
-            temporal_type=safe_enum(TemporalType, research_physics.temporal_type),
-            gravity_enabled=None,
-        )
+            key_lower = str(fact.key).lower()
+            if key_lower in {"re", "reynolds", "reynolds_number"}:
+                value = _to_float(fact.value)
+                if value is not None:
+                    params["Re"] = value
+            elif key_lower in {"diameter", "pipe_diameter", "d"}:
+                value = _to_float(fact.value)
+                if value is not None:
+                    params["D"] = value
+        if physics_spec:
+            for key, value in {
+                **physics_spec.geometry_facts,
+                **physics_spec.material_facts,
+                **physics_spec.operating_conditions,
+            }.items():
+                numeric = _to_float(value)
+                if numeric is not None:
+                    params[key] = numeric
+        return params
 
     @staticmethod
     def _map_task_type(task_type_str: str) -> TaskType:
-        """将意图评估的 task_type 映射到 ExperimentSpec 的 TaskType。"""
         mapping = {
             "new_simulation": TaskType.NEW_SIMULATION,
             "parameter_sensitivity": TaskType.PARAMETER_SENSITIVITY,
@@ -271,6 +528,41 @@ class ExperimentSpecFactory:
             "case_diagnosis": TaskType.CASE_DIAGNOSIS,
         }
         return mapping.get(task_type_str, TaskType.NEW_SIMULATION)
+
+
+def _safe_id(raw: str) -> str:
+    safe = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in raw)
+    while "__" in safe:
+        safe = safe.replace("__", "_")
+    return safe.strip("_")[:128] or f"param_{uuid4().hex[:8]}"
+
+
+def _normalize_value(value: Any) -> tuple[float | int | str | bool, str]:
+    if isinstance(value, bool):
+        return value, "boolean"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value, "integer"
+    if isinstance(value, float):
+        return value, "float"
+    if isinstance(value, (dict, list, tuple)):
+        return _compact(value), "string"
+    return str(value), "string"
+
+
+def _compact(value: Any) -> str:
+    import json
+
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _map_source(source: str) -> ParameterSource:
+    return {
+        "USER_SPECIFIED": ParameterSource.USER,
+        "SYSTEM_DERIVED": ParameterSource.DERIVED,
+        "SYSTEM_SELECTED": ParameterSource.DERIVED,
+        "TEMPLATE_DEFAULT": ParameterSource.TEMPLATE_DEFAULT,
+        "ASSUMED_BASELINE": ParameterSource.TEMPLATE_DEFAULT,
+    }.get(source, ParameterSource.DERIVED)
 
 
 __all__ = ["ExperimentSpecFactory"]

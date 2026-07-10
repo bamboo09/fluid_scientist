@@ -177,8 +177,8 @@ const specStatusLabels = {
 
 const sourceLabels = {
   user: "用户输入",
-  derived: "派生计算",
-  system_recommended: "系统推荐",
+  derived: "系统确定",
+  system_recommended: "系统选择",
   template_default: "模板默认",
   literature: "文献参考",
   generated_by_code: "代码生成",
@@ -1252,17 +1252,17 @@ function getWorkbenchActions(status) {
 
   switch (status) {
     case "draft":
-      actions.primary = "接受推荐并校验";
+      actions.primary = "校验草案";
       actions.primaryId = "spec-ready-btn";
       actions.secondary = [
         { id: "spec-save-btn", text: "保存草案" },
         { id: "spec-apply-btn", text: "应用修改" },
         { id: "spec-discard-btn", text: "放弃修改" },
-        { id: "spec-accept-rec-btn", text: "接受推荐值" },
       ];
       actions.hidden = [
         "spec-compile-btn", "spec-submit-btn", "spec-clone-btn",
         "spec-run-status-btn", "spec-report-btn", "spec-capability-btn",
+        "spec-accept-rec-btn",
       ];
       break;
     case "ready":
@@ -1619,7 +1619,7 @@ function renderSpecWorkbench(spec) {
   acceptRecBtn.type = "button";
   acceptRecBtn.className = "button button-secondary";
   acceptRecBtn.id = "spec-accept-rec-btn";
-  acceptRecBtn.textContent = "接受推荐值";
+  acceptRecBtn.textContent = "接受系统选择";
   acceptRecBtn.addEventListener("click", () => acceptAllRecommendations());
   const readyBtn = document.createElement("button");
   readyBtn.type = "button";
