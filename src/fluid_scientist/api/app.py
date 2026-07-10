@@ -572,6 +572,10 @@ def create_app(
         lifespan=lifespan,
     )
     application.mount("/assets", StaticFiles(directory=WEB_ROOT), name="assets")
+
+    # Mount the v5 study-decomposer draft-workflow API
+    from fluid_scientist.api.v5_router import router as _v5_router
+    application.include_router(_v5_router)
     application.state.execution_targets = configured_targets
     application.state.model_configuration = configured_models
     application.state.planning_operation_service = planning_service
