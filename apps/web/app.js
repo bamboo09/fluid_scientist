@@ -3489,7 +3489,7 @@ function openDialog(id) {
 
 // === Workstation Management ===
 
-async function loadWorkstationStatus() {
+async function loadWorkstationStatus(skipTextUpdate = false) {
   try {
     const data = await requestJson("/api/workstation/status");
     const indicator = document.querySelector("#workstation-status .ws-indicator");
@@ -3498,7 +3498,7 @@ async function loadWorkstationStatus() {
 
     if (data.connected) {
       indicator.dataset.state = "connected";
-      text.textContent = "已连接";
+      if (!skipTextUpdate) text.textContent = "已连接";
       details.hidden = false;
       document.getElementById("ws-host").textContent = data.host || "-";
       document.getElementById("ws-foam").textContent = data.foam_version || "-";
@@ -3507,14 +3507,24 @@ async function loadWorkstationStatus() {
       document.getElementById("ws-disk").textContent = data.disk_free_gb ? data.disk_free_gb.toFixed(1) + " GB" : "-";
     } else {
       indicator.dataset.state = "disconnected";
-      text.textContent = data.error ? "连接失败" : "未连接";
+      if (!skipTextUpdate) {
+        if (data.error) {
+          text.textContent = "连接失败: " + data.error;
+        } else if (!data.host) {
+          text.textContent = "未配置工作站";
+        } else {
+          text.textContent = "未连接";
+        }
+      }
       details.hidden = true;
     }
+    return data;
   } catch (e) {
     const indicator = document.querySelector("#workstation-status .ws-indicator");
     const text = document.querySelector("#workstation-status .ws-text");
     if (indicator) indicator.dataset.state = "disconnected";
-    if (text) text.textContent = "状态未知";
+    if (!skipTextUpdate && text) text.textContent = "状态未知: " + (e.message || "网络错误");
+    return null;
   }
 }
 
@@ -3525,10 +3535,17 @@ async function reconnectWorkstation() {
   if (text) text.textContent = "重连中...";
 
   try {
-    await requestJson("/api/workstation/reconnect", { method: "POST" });
-    await loadWorkstationStatus();
+    const data = await requestJson("/api/workstation/reconnect", { method: "POST" });
+    if (data.connected) {
+      if (text) text.textContent = "已连接";
+    } else {
+      const reason = data.error || (data.host ? "连接被拒绝" : "未配置工作站");
+      if (text) text.textContent = "重连失败: " + reason;
+    }
+    // Refresh details but don't overwrite the error text we just set
+    await loadWorkstationStatus(true);
   } catch (e) {
-    if (text) text.textContent = "重连失败";
+    if (text) text.textContent = "重连失败: " + (e.message || "网络错误");
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -3545,11 +3562,12 @@ async function testWorkstationSsh() {
     if (data.success) {
       if (text) text.textContent = "SSH 连接成功";
     } else {
-      if (text) text.textContent = "SSH 失败: " + (data.error || "unknown");
+      if (text) text.textContent = "SSH 失败: " + (data.error || "未知错误");
     }
-    await loadWorkstationStatus();
+    // Refresh details but don't overwrite the status text we just set
+    await loadWorkstationStatus(true);
   } catch (e) {
-    if (text) text.textContent = "测试失败";
+    if (text) text.textContent = "测试失败: " + (e.message || "网络错误");
   } finally {
     if (btn) btn.disabled = false;
   }

@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import uuid4
 
-from fastapi import Body, FastAPI, HTTPException, status
+from fastapi import Body, FastAPI, HTTPException, Request, status
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import (
@@ -572,6 +572,14 @@ def create_app(
         lifespan=lifespan,
     )
     application.mount("/assets", StaticFiles(directory=WEB_ROOT), name="assets")
+
+    # Prevent browser from caching stale JS/CSS during development
+    @application.middleware("http")
+    async def no_cache_static(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path.startswith("/assets/"):
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return response
 
     # Mount the v5 study-decomposer draft-workflow API
     from fluid_scientist.api.v5_router import router as _v5_router
