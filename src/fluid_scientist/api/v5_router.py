@@ -14,9 +14,11 @@ import json
 import os
 import tempfile
 import uuid
+from collections.abc import Awaitable, Callable
+from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from fluid_scientist.capabilities.models import CapabilityRegistry
@@ -1824,6 +1826,217 @@ def _route_to_message_type(route_type: str) -> str:
         "unknown": "error",
     }
     return mapping.get(route_type, "error")
+
+
+# ---------------------------------------------------------------------------
+# Workstation submission endpoints (Phase 5)
+# ---------------------------------------------------------------------------
+
+
+def _get_workstation_target(request: Request):
+    """Get the workstation execution target from the FastAPI app state."""
+    targets = getattr(request.app.state, "execution_targets", ())
+    if not targets:
+        raise HTTPException(
+            status_code=503,
+            detail="No workstation configured. Use /api/workstation/configure first.",
+        )
+    # Use the first available target
+    return targets[0]
+
+
+def _package_case_dir_as_tar(case_dir: str) -> bytes:
+    """Package a case directory into a tar.gz archive for remote submission."""
+    import tarfile
+    import io
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for root, _dirs, files in os.walk(case_dir):
+            for fname in files:
+                full_path = os.path.join(root, fname)
+                arcname = os.path.relpath(full_path, case_dir)
+                tar.add(full_path, arcname=arcname)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+@router.post("/cases/{case_plan_id}/submit")
+def submit_case_to_workstation(
+    case_plan_id: str,
+    request: Request,
+    target_id: str = "",
+) -> dict[str, Any]:
+    """Submit a compiled case to the workstation for execution.
+
+    This endpoint packages the compiled OpenFOAM case directory into a
+    tar.gz archive and uploads it to the workstation via the existing
+    ``WorkstationOpenFOAMTarget.submit_custom`` method.
+
+    The case must have been previously compiled via
+    ``POST /api/v5/case-plans/{case_plan_id}/compile``.
+    """
+    compiled_record = _repo.get_compiled_case(case_plan_id)
+    if not compiled_record:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No compiled case found for case_plan_id={case_plan_id}. "
+            "Compile the case first via POST /api/v5/case-plans/{case_plan_id}/compile",
+        )
+
+    case_dir = compiled_record["case_dir"]
+    if not os.path.isdir(case_dir):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Case directory no longer exists: {case_dir}",
+        )
+
+    target = _get_workstation_target(request)
+
+    # Generate a unique job ID
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    job_id = f"v5-{timestamp}-{case_plan_id[:8]}"
+
+    # Package the case directory
+    archive_bytes = _package_case_dir_as_tar(case_dir)
+
+    # Submit via the existing workstation target adapter
+    try:
+        submit_fn = getattr(target, "submit_custom", None)
+        if submit_fn is None:
+            raise HTTPException(
+                status_code=501,
+                detail="Workstation target does not support submit_custom",
+            )
+        job_record = submit_fn(job_id, archive_bytes)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Workstation submission failed: {e}",
+        ) from e
+
+    # Persist job info as an audit event
+    _repo.log_audit(
+        event_id=f"audit_{uuid.uuid4().hex[:12]}",
+        session_id=None,
+        event_type="job_submitted",
+        payload={
+            "job_id": job_id,
+            "case_plan_id": case_plan_id,
+            "case_dir": case_dir,
+            "state": str(getattr(job_record, "state", "unknown")),
+        },
+    )
+
+    # Return the job record as a dict
+    if hasattr(job_record, "model_dump"):
+        job_data = job_record.model_dump()
+    elif hasattr(job_record, "__dict__"):
+        job_data = job_record.__dict__
+    else:
+        job_data = {"job_id": job_id, "state": str(job_record)}
+
+    return {
+        "success": True,
+        "job": job_data,
+        "job_id": job_id,
+        "case_plan_id": case_plan_id,
+        "warnings": [],
+        "errors": [],
+    }
+
+
+@router.get("/jobs/{job_id}")
+def get_job_status(
+    job_id: str,
+    request: Request,
+    target_id: str = "",
+) -> dict[str, Any]:
+    """Poll the status of a submitted job on the workstation."""
+    target = _get_workstation_target(request)
+
+    try:
+        job_record = target.status(job_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to query job status: {e}",
+        ) from e
+
+    if hasattr(job_record, "model_dump"):
+        return job_record.model_dump()
+    elif hasattr(job_record, "__dict__"):
+        return job_record.__dict__
+    return {"job_id": job_id, "state": str(job_record)}
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(
+    job_id: str,
+    request: Request,
+    target_id: str = "",
+) -> dict[str, Any]:
+    """Cancel a running job on the workstation."""
+    target = _get_workstation_target(request)
+
+    try:
+        job_record = target.cancel(job_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to cancel job: {e}",
+        ) from e
+
+    _repo.log_audit(
+        event_id=f"audit_{uuid.uuid4().hex[:12]}",
+        session_id=None,
+        event_type="job_cancelled",
+        payload={"job_id": job_id},
+    )
+
+    if hasattr(job_record, "model_dump"):
+        return job_record.model_dump()
+    elif hasattr(job_record, "__dict__"):
+        return job_record.__dict__
+    return {"job_id": job_id, "state": "cancelled"}
+
+
+@router.get("/jobs/{job_id}/results")
+def get_job_results(
+    job_id: str,
+    request: Request,
+    target_id: str = "",
+) -> dict[str, Any]:
+    """Collect results from a completed job on the workstation."""
+    target = _get_workstation_target(request)
+
+    try:
+        collection = target.collect(job_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to collect results: {e}",
+        ) from e
+
+    if hasattr(collection, "model_dump"):
+        result = collection.model_dump()
+    elif hasattr(collection, "__dict__"):
+        result = collection.__dict__
+    elif isinstance(collection, dict):
+        result = collection
+    else:
+        result = {"raw": str(collection)}
+
+    _repo.log_audit(
+        event_id=f"audit_{uuid.uuid4().hex[:12]}",
+        session_id=None,
+        event_type="results_collected",
+        payload={"job_id": job_id},
+    )
+
+    return result
 
 
 __all__ = ["router"]

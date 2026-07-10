@@ -59,6 +59,10 @@ const API = {
   generateCasePlan: (sessionId, draftId) => api("/api/v5/case-plans/generate", { method: "POST", body: JSON.stringify({ session_id: sessionId, draft_id: draftId }) }),
   getCasePlan: (id) => api(`/api/v5/case-plans/${id}`),
   compileCasePlan: (id) => api(`/api/v5/case-plans/${id}/compile`, { method: "POST" }),
+  submitCase: (casePlanId) => api(`/api/v5/cases/${casePlanId}/submit`, { method: "POST" }),
+  getJobStatus: (jobId) => api(`/api/v5/jobs/${jobId}`),
+  cancelJob: (jobId) => api(`/api/v5/jobs/${jobId}/cancel`, { method: "POST" }),
+  getJobResults: (jobId) => api(`/api/v5/jobs/${jobId}/results`),
   systemVersion: () => api("/api/system/version"),
   listTargets: () => api("/api/execution-targets"),
   workstationStatus: () => api("/api/workstation/status"),
@@ -78,6 +82,8 @@ const state = {
   draft: null,
   proposal: null,
   casePlan: null,
+  compiledCase: null,
+  job: null,
   conversations: [],  // {role, text, timestamp, actions?}
   modelConfigured: false,
   allowedActions: [],
@@ -428,10 +434,18 @@ function updateActionBar() {
   } else if (state.draft?.status === "confirmed" && !state.casePlan) {
     actions.push({ text: "生成 CasePlan", class: "button-primary", fn: () => generateCasePlan() });
   } else if (state.casePlan) {
-    if (state.casePlan.can_compile) {
+    if (state.casePlan.can_compile && !state.compiledCase) {
       actions.push({ text: "编译算例", class: "button-primary", fn: () => compileCase() });
+    } else if (state.compiledCase) {
+      if (!state.job) {
+        actions.push({ text: "提交工作站", class: "button-primary", fn: () => submitToWorkstation() });
+      } else if (state.job.state === "running" || state.job.state === "queued") {
+        actions.push({ text: "刷新状态", class: "button-secondary", fn: () => pollJobStatus() });
+        actions.push({ text: "取消任务", class: "button-secondary", fn: () => cancelJob() });
+      } else if (state.job.state === "succeeded") {
+        actions.push({ text: "查看结果", class: "button-primary", fn: () => fetchJobResults() });
+      }
     }
-    actions.push({ text: "提交工作站", class: "button-secondary", fn: () => submitToWorkstation() });
   }
 
   if (actions.length === 0) {
@@ -703,7 +717,9 @@ async function compileCase() {
   try {
     addMessage("assistant", "正在编译算例...");
     const result = await API.compileCasePlan(state.casePlan.case_plan_id);
-    addMessage("assistant", `算例编译完成。${result.case_dir ? `目录: ${result.case_dir}` : ""}`);
+    state.compiledCase = result;
+    const fileList = result.files?.length ? `\n生成文件: ${result.files.join(", ")}` : "";
+    addMessage("assistant", `算例编译完成。共 ${result.file_count || 0} 个文件。${fileList}`);
     renderAll();
   } catch (e) {
     addMessage("system", `编译失败: ${e.message}`, { error: e.message });
@@ -711,7 +727,62 @@ async function compileCase() {
 }
 
 async function submitToWorkstation() {
-  addMessage("system", "工作站提交功能正在接入中，敬请期待。");
+  if (!state.casePlan) return;
+  if (!state.compiledCase) {
+    addMessage("system", "请先编译算例再提交。");
+    return;
+  }
+  try {
+    addMessage("assistant", "正在提交到工作站...");
+    const result = await API.submitCase(state.casePlan.case_plan_id);
+    state.job = result.job || { job_id: result.job_id, state: "queued" };
+    addMessage("assistant", `任务已提交。Job ID: ${state.job.job_id}\n状态: ${state.job.state || "queued"}`, { job: state.job });
+    renderAll();
+    // Auto-poll after 5 seconds
+    setTimeout(() => pollJobStatus(), 5000);
+  } catch (e) {
+    addMessage("system", `提交失败: ${e.message}`, { error: e.message });
+  }
+}
+
+async function pollJobStatus() {
+  if (!state.job?.job_id) return;
+  try {
+    const status = await API.getJobStatus(state.job.job_id);
+    state.job = status;
+    const stateLabel = { queued: "排队中", running: "运行中", succeeded: "已完成", failed: "失败", cancelled: "已取消" }[status.state] || status.state;
+    addMessage("assistant", `任务状态: ${stateLabel}${status.error ? `\n错误: ${status.error}` : ""}`);
+    renderAll();
+    // Continue polling if running
+    if (status.state === "running" || status.state === "queued") {
+      setTimeout(() => pollJobStatus(), 10000);
+    }
+  } catch (e) {
+    addMessage("system", `查询状态失败: ${e.message}`, { error: e.message });
+  }
+}
+
+async function cancelJob() {
+  if (!state.job?.job_id) return;
+  try {
+    const result = await API.cancelJob(state.job.job_id);
+    state.job = result;
+    addMessage("assistant", "任务已取消。");
+    renderAll();
+  } catch (e) {
+    addMessage("system", `取消失败: ${e.message}`, { error: e.message });
+  }
+}
+
+async function fetchJobResults() {
+  if (!state.job?.job_id) return;
+  try {
+    const results = await API.getJobResults(state.job.job_id);
+    addMessage("assistant", `结果已获取。${JSON.stringify(results).slice(0, 200)}...`, { results });
+    renderAll();
+  } catch (e) {
+    addMessage("system", `获取结果失败: ${e.message}`, { error: e.message });
+  }
 }
 
 // ---- System loading ----
