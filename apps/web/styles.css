@@ -1823,16 +1823,23 @@ body:has(.workflow-stepper:not([hidden])) .workbench-shell {
   padding: 12px;
   background: #fffbf0;
 }
-.conv-proposal h4 { margin: 0 0 6px; font-size: 12px; color: var(--amber); }
-.conv-proposal-diff {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-  margin: 8px 0;
-}
-.conv-proposal-diff .diff-col { padding: 6px; border-radius: 4px; font-size: 11px; }
-.conv-proposal-diff .diff-before { background: #f8d7da; color: #721c24; }
-.conv-proposal-diff .diff-after { background: #d4edda; color: #155724; }
+.conv-proposal .proposal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.conv-proposal h4 { margin: 0; font-size: 12px; color: var(--amber); }
+.conv-proposal .proposal-version { font-size: 10px; color: var(--faint); font-family: var(--mono); }
+.conv-proposal .proposal-summary { font-size: 11px; color: var(--muted); margin-bottom: 8px; }
+.proposal-diff-table { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 11px; }
+.proposal-diff-table th { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); font-size: 10px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.04em; }
+.proposal-diff-table td { padding: 4px 6px; border-bottom: 1px solid var(--line); }
+.proposal-diff-table .diff-old { color: #721c24; text-decoration: line-through; }
+.proposal-diff-table .diff-new { color: #155724; font-weight: 600; }
+.conv-proposal .proposal-impact { margin: 8px 0; padding: 6px 8px; background: var(--amber-pale); border-radius: 4px; }
+.conv-proposal .proposal-impact-title { font-size: 10px; font-weight: 600; color: var(--amber); margin-bottom: 3px; }
+.conv-proposal .proposal-impact-item { font-size: 11px; color: #856404; line-height: 1.5; }
+.conv-proposal .proposal-invalidates { font-size: 10px; color: var(--faint); margin: 4px 0; font-family: var(--mono); }
+.conv-proposal .proposal-actions { margin-top: 8px; display: flex; gap: 6px; }
+.conv-proposal .proposal-status { margin-top: 6px; font-size: 11px; font-weight: 600; }
+.conv-proposal .proposal-status.applied { color: #155724; }
+.conv-proposal .proposal-status.cancelled { color: #721c24; }
 
 /* Action bar */
 .action-bar {

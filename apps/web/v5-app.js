@@ -152,24 +152,69 @@ function renderMessageExtra(msg) {
   if (msg.proposal) {
     const p = msg.proposal;
     const diffDiv = el("div", { class: "conv-proposal" }, [
-      el("h4", { text: `修改提案: ${p.summary?.slice(0, 60) || ""}` }),
+      el("div", { class: "proposal-header" }, [
+        el("h4", { text: "修改提案" }),
+        el("span", { class: "proposal-version", text: `基于 Draft v${p.base_draft_version || "?"}` }),
+      ]),
     ]);
-    if (p.changes?.length) {
-      for (const c of p.changes.slice(0, 5)) {
-        diffDiv.appendChild(el("div", { style: "font-size:11px;margin:4px 0;" }, [
-          el("span", { class: "change-type", text: c.change_type || c.op || "修改", style: "font-weight:600;color:var(--teal-dark);margin-right:4px;" }),
-          document.createTextNode(c.description || c.target || c.path || JSON.stringify(c).slice(0, 100)),
-        ]));
-      }
+    if (p.summary) {
+      diffDiv.appendChild(el("div", { class: "proposal-summary", text: p.summary }));
     }
+    // Change diff table
+    if (p.changes?.length) {
+      const tbl = el("table", { class: "proposal-diff-table" }, [
+        el("thead", {}, [el("tr", {}, [
+          el("th", { text: "字段" }),
+          el("th", { text: "修改前" }),
+          el("th", { text: "修改后" }),
+          el("th", { text: "类型" }),
+        ])]),
+        el("tbody", {}, p.changes.map(c => {
+          const path = c.target_path || c.target || c.path || "?";
+          const oldVal = c.old_value != null ? String(c.old_value) : "—";
+          const newVal = c.new_value != null ? String(c.new_value) : "—";
+          const unit = c.unit ? ` ${c.unit}` : "";
+          const ct = c.change_type || c.op || "修改";
+          const changeLabels = {
+            set_parameter: "修改参数", add_parameter: "新增参数", remove_parameter: "删除参数",
+            change_boundary_condition: "修改边界", change_initial_condition: "修改初场",
+            change_physics_model: "修改物理模型", change_mesh: "修改网格", change_solver: "修改求解器",
+            change_geometry: "修改几何", change_numerics: "修改数值格式",
+            add_output: "新增观测量", remove_output: "删除观测量",
+            add_assumption: "新增假设", question: "提问", clarification_required: "需澄清",
+          };
+          return el("tr", {}, [
+            el("td", { text: path }),
+            el("td", { class: "diff-old", text: oldVal + unit }),
+            el("td", { class: "diff-new", text: newVal + unit }),
+            el("td", { text: changeLabels[ct] || ct }),
+          ]);
+        })),
+      ]);
+      diffDiv.appendChild(tbl);
+    }
+    // Impact summary
     if (p.impact_summary?.length) {
-      diffDiv.appendChild(el("div", { style: "font-size:11px;color:#856404;margin-top:6px;", text: "影响: " + p.impact_summary.join("; ") }));
+      diffDiv.appendChild(el("div", { class: "proposal-impact" }, [
+        el("div", { class: "proposal-impact-title", text: "影响分析" }),
+        ...p.impact_summary.map(imp => el("div", { class: "proposal-impact-item", text: `• ${imp}` })),
+      ]));
+    }
+    // Invalidated downstream
+    if (p.invalidates?.length) {
+      diffDiv.appendChild(el("div", { class: "proposal-invalidates", text: `失效项: ${p.invalidates.join(", ")}` }));
     }
     // Action buttons
-    diffDiv.appendChild(el("div", { style: "margin-top:8px;display:flex;gap:6px;" }, [
-      el("button", { class: "button button-primary button-small", text: "确认修改", onclick: () => applyProposal(p) }),
-      el("button", { class: "button button-secondary button-small", text: "取消", onclick: () => cancelProposal(p) }),
-    ]));
+    if (p.status === "pending") {
+      diffDiv.appendChild(el("div", { class: "proposal-actions" }, [
+        el("button", { class: "button button-primary button-small", text: "确认修改", onclick: () => applyProposal(p) }),
+        el("button", { class: "button button-secondary button-small", text: "取消修改", onclick: () => cancelProposal(p) }),
+      ]));
+    } else if (p.status === "applied") {
+      diffDiv.appendChild(el("div", { class: "proposal-status applied", text: "✓ 已应用" }));
+    } else if (p.status === "cancelled") {
+      diffDiv.appendChild(el("div", { class: "proposal-status cancelled", text: "✗ 已取消" }));
+    }
     extras.push(diffDiv);
   }
   // CasePlan in conversation
@@ -273,8 +318,8 @@ function renderDraftViewer() {
   const params = d.control_parameters || [];
   if (params.length) {
     const tbl = el("table", { class: "draft-param-table-mini" }, [
-      el("thead", el("tr", [el("th", { text: "参数" }), el("th", { text: "值" }), el("th", { text: "单位" }), el("th", { text: "来源" })])),
-      el("tbody", params.map(p => el("tr", [
+      el("thead", {}, [el("tr", {}, [el("th", { text: "参数" }), el("th", { text: "值" }), el("th", { text: "单位" }), el("th", { text: "来源" })])]),
+      el("tbody", {}, params.map(p => el("tr", {}, [
         el("td", { text: p.display_name || p.parameter_id || "?" }),
         el("td", { text: p.value != null ? String(p.value) : "—" }),
         el("td", { text: p.unit || "—" }),
@@ -590,7 +635,26 @@ async function validateDraft() {
   }
 }
 
+function updateProposalInConversation(proposalId, status) {
+  for (const msg of state.conversations) {
+    if (msg.proposal && msg.proposal.proposal_id === proposalId) {
+      msg.proposal.status = status;
+    }
+  }
+  // Re-render conversation timeline
+  const tl = byId("conversation-timeline");
+  tl.innerHTML = "";
+  for (const msg of state.conversations) {
+    renderMessage(msg);
+  }
+  scrollConversationToBottom();
+}
+
 async function applyProposal(proposal) {
+  if (proposal.status && proposal.status !== "pending") {
+    addMessage("system", `该提案状态为 ${proposal.status}，无法重复操作。`);
+    return;
+  }
   let newDraft;
   try {
     newDraft = await API.applyProposal(proposal.proposal_id, state.sessionId);
@@ -600,14 +664,20 @@ async function applyProposal(proposal) {
   }
   state.proposal = null;
   state.draft = newDraft;
+  updateProposalInConversation(proposal.proposal_id, "applied");
   addMessage("assistant", `修改已应用，草案更新为版本 v${newDraft.version}。`);
   try { renderAll(); } catch (e) { console.error("Render error:", e); }
 }
 
 async function cancelProposal(proposal) {
+  if (proposal.status && proposal.status !== "pending") {
+    addMessage("system", `该提案状态为 ${proposal.status}，无法重复操作。`);
+    return;
+  }
   try {
     await API.cancelProposal(proposal.proposal_id);
     state.proposal = null;
+    updateProposalInConversation(proposal.proposal_id, "cancelled");
     addMessage("assistant", "修改提案已取消，草案未变化。");
     renderAll();
   } catch (e) {
