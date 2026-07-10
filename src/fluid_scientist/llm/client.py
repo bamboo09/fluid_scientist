@@ -9,6 +9,8 @@ as an :class:`~fluid_scientist.draft_session.models.LLMCallRecord`.
 
 from __future__ import annotations
 
+import json
+import time
 import uuid
 from typing import Any
 
@@ -43,10 +45,23 @@ class LLMClient:
     responses based on prompt type, while recording all calls via LLMCallRecord.
     """
 
-    def __init__(self, provider: str = "mock", model_name: str = "mock-v1") -> None:
+    def __init__(
+        self,
+        provider: str = "mock",
+        model_name: str = "mock-v1",
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        timeout_seconds: float = 120.0,
+        client: Any | None = None,
+    ) -> None:
         self._records: list[LLMCallRecord] = []
         self._provider = provider
         self._model_name = model_name
+        self._api_key = api_key
+        self._base_url = base_url
+        self._timeout_seconds = timeout_seconds
+        self._client = client
 
     # ------------------------------------------------------------------
     # Public API
@@ -82,6 +97,7 @@ class LLMClient:
         """
         call_id = f"llm_{uuid.uuid4().hex[:12]}"
         refs = list(input_refs) if input_refs else []
+        started = time.perf_counter()
 
         # Decide whether to use the real provider or fall back to mock.
         use_mock = self._provider == "mock"
@@ -105,13 +121,20 @@ class LLMClient:
                     "status": "error",
                     "message": f"mock response failed: {exc}",
                 }
-        else:  # pragma: no cover - future real-provider path
-            # Placeholder for real provider integration.
-            fallback_reason = "Real provider not yet implemented; falling back to mock"
-            parsed_output = self._mock_response(
-                purpose, user_message, output_schema
-            )
-            raw_output = str(parsed_output)
+        else:
+            try:
+                parsed_output, raw_output = self._real_response(
+                    system_prompt=system_prompt,
+                    user_message=user_message,
+                    output_schema=output_schema,
+                )
+            except Exception as exc:
+                success = False
+                error = str(exc)
+                parsed_output = {
+                    "status": "error",
+                    "message": str(exc),
+                }
 
         # Coerce unknown purposes to a valid Literal value so the record
         # always validates; the original purpose is preserved in the
@@ -124,6 +147,7 @@ class LLMClient:
         # default ("mock-1"), else empty for real provider.
         resolved_prompt_version = prompt_version or ("mock-1" if use_mock else "")
 
+        latency_ms = round((time.perf_counter() - started) * 1000, 3)
         record = LLMCallRecord(
             call_id=call_id,
             session_id=session_id,
@@ -142,8 +166,14 @@ class LLMClient:
             fallback_reason=fallback_reason,
             original_purpose=record_original_purpose,
             error=error,
+            latency_ms=latency_ms,
         )
         self._records.append(record)
+        if not success and not use_mock:
+            raise RuntimeError(
+                f"LLM call failed: purpose={purpose}, provider={self._provider}, "
+                f"model={self._model_name}, error={error}"
+            )
         return parsed_output, record
 
     def get_records(self, session_id: str | None = None) -> list[LLMCallRecord]:
@@ -160,6 +190,55 @@ class LLMClient:
     # ------------------------------------------------------------------
     # Mock response generators
     # ------------------------------------------------------------------
+
+    def _real_response(
+        self,
+        *,
+        system_prompt: str,
+        user_message: str,
+        output_schema: dict | None,
+    ) -> tuple[dict[str, Any], str]:
+        """Call the configured OpenAI-compatible provider and parse JSON."""
+        if not self._api_key and self._client is None:
+            raise RuntimeError("LLM provider is configured without an api_key")
+        client = self._client
+        if client is None:
+            from openai import OpenAI
+
+            kwargs: dict[str, Any] = {
+                "api_key": self._api_key,
+                "timeout": self._timeout_seconds,
+                "max_retries": 0,
+            }
+            if self._base_url:
+                kwargs["base_url"] = self._base_url
+            client = OpenAI(**kwargs)
+            self._client = client
+
+        schema_note = ""
+        if output_schema:
+            schema_note = (
+                "\nReturn only JSON matching this schema: "
+                + json.dumps(output_schema, ensure_ascii=False)
+            )
+        response = client.chat.completions.create(
+            model=self._model_name,
+            messages=[
+                {"role": "system", "content": system_prompt + schema_note},
+                {"role": "user", "content": user_message},
+            ],
+            response_format={"type": "json_object"},
+        )
+        content = response.choices[0].message.content
+        if not content:
+            raise RuntimeError("provider returned empty response")
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("provider returned non-JSON response") from exc
+        if not isinstance(parsed, dict):
+            raise RuntimeError("provider JSON root must be an object")
+        return parsed, content
 
     def _mock_response(
         self,

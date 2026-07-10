@@ -21,6 +21,7 @@ from __future__ import annotations
 import os
 import tempfile
 import uuid
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -37,6 +38,20 @@ from fluid_scientist.study_decomposition.models import (
     AmbiguityItem,
     StudyIntent,
 )
+
+
+class _ConfiguredFakeLLM:
+    def call(self, **kwargs: Any) -> tuple[dict[str, Any], Any]:
+        purpose = kwargs.get("purpose")
+        if purpose == "input_routing":
+            return {
+                "intent": "NEW_RESEARCH",
+                "confidence": 0.95,
+                "reason": "test configured model",
+            }, None
+        if purpose == "study_decomposition":
+            return {"studies": []}, None
+        return {}, None
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
@@ -68,11 +83,13 @@ def isolated_router() -> None:
     original_store = v5_router._session_store
     original_drafts = dict(v5_router._draft_store)
     original_batches = dict(v5_router._batch_store)
+    original_llm = v5_router._llm_client
 
     v5_router._session_persistence = persistence
     v5_router._session_store = store
     v5_router._draft_store.clear()
     v5_router._batch_store.clear()
+    v5_router._llm_client = _ConfiguredFakeLLM()
     try:
         yield
     finally:
@@ -82,6 +99,7 @@ def isolated_router() -> None:
         v5_router._draft_store.update(original_drafts)
         v5_router._batch_store.clear()
         v5_router._batch_store.update(original_batches)
+        v5_router._llm_client = original_llm
         # Best-effort cleanup of the temp dir
         import shutil
 

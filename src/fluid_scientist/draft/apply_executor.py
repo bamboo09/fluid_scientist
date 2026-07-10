@@ -312,6 +312,7 @@ class ApplyProposalExecutor:
                     for t in extension_triggers
                 ]
             )
+        self._refresh_capability_preview(new_draft)
 
         # 8. Update status based on validation
         if result.valid and not extension_triggers:
@@ -320,6 +321,53 @@ class ApplyProposalExecutor:
             new_draft.status = DraftStatus.DRAFT
 
         return new_draft, result
+
+    def _refresh_capability_preview(self, draft: ExperimentDraft) -> None:
+        fields = dict((draft.capability_preview or {}).get("fields", {}))
+        fields.setdefault(
+            "solver",
+            {
+                "value_status": "MISSING_REQUIRED",
+                "capability_status": "SUPPORTED_NATIVE",
+                "display_value": "待选择",
+            },
+        )
+        fields.setdefault(
+            "mesh",
+            {
+                "value_status": "MISSING_REQUIRED",
+                "capability_status": "SUPPORTED_NATIVE",
+                "display_value": "待设计",
+            },
+        )
+        fields.setdefault(
+            "requested_outputs",
+            {
+                "value_status": "MISSING_REQUIRED",
+                "capability_status": "SUPPORTED_NATIVE",
+                "display_value": "待补充",
+            },
+        )
+        for boundary, spec in draft.boundary_conditions.items():
+            bc_type = spec.get("type") if isinstance(spec, dict) else None
+            fields[f"boundary_conditions.{boundary}"] = {
+                "value_status": "USER_EXTRACTED" if bc_type else "MISSING_REQUIRED",
+                "capability_status": (
+                    "SUPPORTED_NATIVE"
+                    if bc_type
+                    in {
+                        "no_slip",
+                        "free_slip",
+                        "inlet_velocity",
+                        "outlet_pressure",
+                        "outlet_advective",
+                        "periodic",
+                    }
+                    else "NOT_CHECKED"
+                ),
+                "display_value": str(bc_type or "待补充"),
+            }
+        draft.capability_preview = {"fields": fields}
 
     # ------------------------------------------------------------------ change application
     def _apply_change(
@@ -501,6 +549,10 @@ class ApplyProposalExecutor:
         new_value = change.new_value
         if new_value and isinstance(new_value, dict):
             draft.geometry.update(new_value)
+            if "spanwise_length" in new_value:
+                domain = draft.physical_system.setdefault("computational_domain", {})
+                if isinstance(domain, dict):
+                    domain["spanwise_length"] = new_value["spanwise_length"]
 
     def _apply_change_numerics(
         self, draft: ExperimentDraft, change: DraftChange

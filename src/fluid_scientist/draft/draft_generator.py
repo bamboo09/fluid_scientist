@@ -45,6 +45,11 @@ _SOURCE_MAP: dict[str, ParameterSource] = {
     "derived": ParameterSource.DERIVED,
     "assumed": ParameterSource.ASSUMPTION,
     "unknown_required": ParameterSource.UNKNOWN_REQUIRED,
+    "USER_SPECIFIED": ParameterSource.USER_PROVIDED,
+    "SYSTEM_DERIVED": ParameterSource.DERIVED,
+    "SYSTEM_SELECTED": ParameterSource.SYSTEM_RECOMMENDED,
+    "TEMPLATE_DEFAULT": ParameterSource.CAPABILITY_DEFAULT,
+    "ASSUMED_BASELINE": ParameterSource.ASSUMPTION,
 }
 
 # Severity used by :class:`AmbiguityItem` for blocking ambiguities.
@@ -100,6 +105,9 @@ class DraftGenerator:
         control_parameters.extend(
             self._convert_parameters(study.unknown_required_parameters)
         )
+        design = study.experiment_design or {}
+        if design:
+            control_parameters.extend(_parameters_from_design(design))
 
         draft = ExperimentDraft(
             # 15-16. Identity & lifecycle.
@@ -109,20 +117,60 @@ class DraftGenerator:
             version=1,
             status=DraftStatus.DRAFT,
             # 1-2. Objective & study type.
-            objective=study.research_objective,
+            objective=design.get("research_objective", study.research_objective),
             study_type=study.study_type,
             # 3. Geometry.
-            geometry=dict(study.geometry),
+            geometry=_design_or_study_dict(design, "geometry", study.geometry),
+            physical_system={
+                "research_hypotheses": design.get("research_hypotheses", []),
+                "target_phenomena": design.get("target_phenomena", []),
+                "boundary_facts": design.get("boundary_facts", {}),
+                "parameterization_strategy": design.get("parameterization_strategy", {}),
+                "computational_domain": design.get("computational_domain", {}),
+                "dimensionless_parameters": design.get("dimensionless_parameters", {}),
+            } if design else {},
+            materials=dict(design.get("material_properties", {})) if design else {},
             # 8. Physics models.
-            physics_models=dict(study.physical_models),
+            physics_models=(
+                {
+                    **dict(design.get("physical_models", {})),
+                    "turbulence_model": design.get("turbulence_model", {}),
+                }
+                if design
+                else dict(study.physical_models)
+            ),
             # 9. Initial conditions (list[dict] -> dict keyed by field).
-            initial_conditions=_list_to_dict(study.initial_conditions, "field"),
+            initial_conditions=(
+                dict(design.get("initial_conditions", {}))
+                if design
+                else _list_to_dict(study.initial_conditions, "field")
+            ),
             # 10. Boundary conditions (list[dict] -> dict keyed by type).
-            boundary_conditions=_list_to_dict(study.boundary_conditions, "type"),
+            boundary_conditions=(
+                dict(design.get("boundary_conditions", {}))
+                if design
+                else _list_to_dict(study.boundary_conditions, "type")
+            ),
             # 4-7. Parameters.
             control_parameters=control_parameters,
+            solver=dict(design.get("solver", {})) if design else {},
+            numerics={
+                "schemes": design.get("numerical_schemes", {}),
+                "pressure_velocity_coupling": design.get("pressure_velocity_coupling", {}),
+                "time_control": design.get("time_control", {}),
+            } if design else {},
+            mesh={
+                "strategy": design.get("mesh_strategy", {}),
+                "near_wall_strategy": design.get("near_wall_strategy", {}),
+            } if design else {},
             # 11. Observables -> requested outputs.
-            requested_outputs=[obs.model_dump() for obs in study.observables],
+            requested_outputs=(
+                _requested_outputs_from_design(study)
+                if design
+                else [obs.model_dump() for obs in study.observables]
+            ),
+            measurement_plan=_measurement_plan_from_design(study),
+            postprocess_plan=dict(design.get("post_processing", {})) if design else {},
             # 12. Analysis goals.
             analysis_goals=list(study.analysis_goals),
             # 13. Assumptions from assumed parameters.
@@ -134,6 +182,7 @@ class DraftGenerator:
                 if item.severity == _BLOCKING_SEVERITY
             ],
         )
+        draft.capability_preview = _field_capability_preview(draft)
 
         # Optional LLM enhancement: produce a richer title if the LLM
         # returns one.  The whole step is best-effort: any failure is
@@ -232,6 +281,135 @@ def _list_to_dict(items: Iterable[Mapping], key_field: str) -> dict:
         used.add(key)
         result[key] = dict(item)
     return result
+
+
+def _design_or_study_dict(design: dict, key: str, fallback: Mapping) -> dict:
+    value = design.get(key)
+    if isinstance(value, Mapping):
+        return dict(value)
+    return dict(fallback)
+
+
+def _parameters_from_design(design: dict) -> list[DraftParameter]:
+    params: list[DraftParameter] = []
+    buckets = {
+        "material_properties": "material",
+        "dimensionless_parameters": "dimensionless",
+        "parameterization_strategy": "parameterization",
+    }
+    for bucket, category in buckets.items():
+        values = design.get(bucket, {})
+        if not isinstance(values, Mapping):
+            continue
+        for name, spec in values.items():
+            if not isinstance(spec, Mapping):
+                continue
+            source = _SOURCE_MAP.get(
+                str(spec.get("source", "")),
+                ParameterSource.SYSTEM_RECOMMENDED,
+            )
+            params.append(
+                DraftParameter(
+                    parameter_id=str(name),
+                    display_name=str(name),
+                    value=spec.get("value"),
+                    unit=spec.get("unit"),
+                    source=source,
+                    source_reason=str(spec.get("reason", "")),
+                    category=category,
+                    editable=bool(spec.get("modifiable", True)),
+                )
+            )
+    return params
+
+
+def _requested_outputs_from_design(study: StudyIntent) -> list[dict]:
+    outputs: list[dict] = []
+    for layer, metrics in (
+        ("scientific", study.scientific_metrics),
+        ("boundary_verification", study.boundary_verification_metrics),
+        ("numerical_credibility", study.credibility_metrics),
+        ("comparison", study.comparison_metrics),
+        ("optional_diagnostics", study.optional_diagnostics),
+    ):
+        for metric in metrics:
+            outputs.append({**metric, "category": layer})
+    return outputs
+
+
+def _measurement_plan_from_design(study: StudyIntent) -> dict:
+    if not study.experiment_design:
+        return {}
+    return {
+        "sampling_strategy": study.experiment_design.get("sampling_strategy", {}),
+        "output_control": study.experiment_design.get("output_control", {}),
+        "scientific_metrics": study.scientific_metrics,
+        "boundary_verification_metrics": study.boundary_verification_metrics,
+        "credibility_metrics": study.credibility_metrics,
+        "comparison_metrics": study.comparison_metrics,
+        "optional_diagnostics": study.optional_diagnostics,
+    }
+
+
+def _field_capability_preview(draft: ExperimentDraft) -> dict:
+    native_bcs = {
+        "no_slip",
+        "free_slip",
+        "inlet_velocity",
+        "outlet_pressure",
+        "outlet_advective",
+        "periodic",
+    }
+
+    def value_status(value: object, missing_label: str = "MISSING_REQUIRED") -> str:
+        if value in ({}, [], None, ""):
+            return missing_label
+        return "USER_EXTRACTED"
+
+    fields: dict[str, dict[str, str]] = {
+        "solver": {
+            "value_status": value_status(draft.solver),
+            "capability_status": "SUPPORTED_NATIVE",
+            "display_value": "待选择" if not draft.solver else str(draft.solver),
+        },
+        "mesh": {
+            "value_status": value_status(draft.mesh),
+            "capability_status": "SUPPORTED_NATIVE",
+            "display_value": "待设计" if not draft.mesh else str(draft.mesh),
+        },
+        "requested_outputs": {
+            "value_status": value_status(draft.requested_outputs),
+            "capability_status": "SUPPORTED_NATIVE",
+            "display_value": "待补充" if not draft.requested_outputs else str(draft.requested_outputs),
+        },
+    }
+    fields["solver"] = {
+        "value_status": "SYSTEM_DERIVED" if draft.solver else "MISSING_REQUIRED",
+        "capability_status": "SUPPORTED_NATIVE",
+        "display_value": "待选择" if not draft.solver else str(draft.solver),
+    }
+    fields["mesh"] = {
+        "value_status": "SYSTEM_DERIVED" if draft.mesh else "MISSING_REQUIRED",
+        "capability_status": "SUPPORTED_NATIVE",
+        "display_value": "待设计" if not draft.mesh else str(draft.mesh),
+    }
+    fields["requested_outputs"] = {
+        "value_status": "SYSTEM_DERIVED" if draft.requested_outputs else "MISSING_REQUIRED",
+        "capability_status": "SUPPORTED_NATIVE",
+        "display_value": "待补充" if not draft.requested_outputs else str(draft.requested_outputs),
+    }
+    for boundary, spec in draft.boundary_conditions.items():
+        bc_type = spec.get("type") if isinstance(spec, dict) else None
+        fields[f"boundary_conditions.{boundary}"] = {
+            "value_status": "USER_EXTRACTED" if bc_type else "MISSING_REQUIRED",
+            "capability_status": (
+                "SUPPORTED_NATIVE"
+                if bc_type in native_bcs
+                else "UNKNOWN" if bc_type else "NOT_CHECKED"
+            ),
+            "display_value": str(bc_type or "待补充"),
+        }
+    return {"fields": fields}
 
 
 __all__ = ["DraftGenerator"]

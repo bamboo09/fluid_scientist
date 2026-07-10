@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from datetime import datetime
 from typing import Any
 
@@ -36,9 +37,8 @@ class JsonSessionPersistence:
     """
 
     def __init__(self, storage_dir: str | None = None) -> None:
-        # Default to a .fluid_scientist_sessions directory in user's home
         self._storage_dir = storage_dir or os.path.join(
-            os.path.expanduser("~"), ".fluid_scientist_sessions"
+            tempfile.gettempdir(), "fluid_scientist_sessions"
         )
         os.makedirs(self._storage_dir, exist_ok=True)
 

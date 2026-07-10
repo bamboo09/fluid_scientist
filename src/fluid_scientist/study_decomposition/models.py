@@ -151,9 +151,17 @@ class StudyIntent(BaseModel):
     assumed_parameters: list[ExtractedParameter] = Field(default_factory=list)
     observables: list[ObservableSpec] = Field(default_factory=list)
     analysis_goals: list[str] = Field(default_factory=list)
+    target_phenomena: list[str] = Field(default_factory=list)
+    boundary_facts: dict[str, Any] = Field(default_factory=dict)
     ambiguity_report: list[AmbiguityItem] = Field(default_factory=list)
     capability_requirements: list[str] = Field(default_factory=list)
     likely_missing_capabilities: list[dict] = Field(default_factory=list)
+    experiment_design: dict[str, Any] = Field(default_factory=dict)
+    scientific_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    boundary_verification_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    credibility_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    comparison_metrics: list[dict[str, Any]] = Field(default_factory=list)
+    optional_diagnostics: list[dict[str, Any]] = Field(default_factory=list)
     readiness_level: Literal[
         "draftable", "needs_clarification", "not_compilable_yet"
     ] = "needs_clarification"

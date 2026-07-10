@@ -216,6 +216,18 @@ class InputRoute(BaseModel):
         "run_request",
         "unknown",
     ]
+    intent: Literal[
+        "NEW_RESEARCH",
+        "MODIFY_DRAFT",
+        "SUPPLEMENT_DRAFT",
+        "ANSWER_CLARIFICATION",
+        "ASK_ABOUT_DRAFT",
+        "CONFIRM_PROPOSAL",
+        "REJECT_PROPOSAL",
+        "CONFIRM_DRAFT",
+        "SELECT_STUDY",
+        "UNRESOLVED",
+    ] = "UNRESOLVED"
     confidence: float
     reason: str
     should_call_llm: bool
@@ -270,6 +282,7 @@ class LLMCallRecord(BaseModel):
     fallback_reason: str | None = None
     original_purpose: str | None = None
     error: str | None = None
+    latency_ms: float | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 

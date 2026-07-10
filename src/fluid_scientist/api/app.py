@@ -209,6 +209,10 @@ class ModelConfigurationRequest(StrictRequest):
         StringConstraints(strip_whitespace=True, min_length=1, max_length=128),
     ]
     api_key: SecretStr = Field(min_length=1)
+    base_url: Annotated[
+        str | None,
+        StringConstraints(strip_whitespace=True, min_length=1, max_length=256),
+    ] = None
 
     @field_validator("api_key")
     @classmethod
@@ -847,6 +851,15 @@ def create_app(
             legacy_designer=legacy_designer,
         )
         application.state.model_configuration = configured_models
+        from fluid_scientist.api import v5_router as _v5_workflow
+
+        _v5_workflow.configure_llm_client(
+            provider=provider_settings.provider,
+            model=provider_settings.model,
+            api_key=provider_settings.api_key.get_secret_value(),
+            base_url=request.base_url,
+            timeout_seconds=provider_settings.timeout_seconds,
+        )
         return ModelConfigurationView(
             configured=True,
             provider=provider_settings.provider,

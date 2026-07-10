@@ -199,6 +199,25 @@ const paramStatusLabels = {
   rejected: "已拒绝",
 };
 
+const valueStatusLabels = {
+  USER_CONFIRMED: "用户确认",
+  USER_EXTRACTED: "用户提供",
+  MODEL_INFERRED: "模型推断",
+  SYSTEM_DERIVED: "系统推导",
+  MISSING_REQUIRED: "待补充",
+  CONFLICT: "存在冲突",
+  NOT_APPLICABLE: "不适用",
+};
+
+const capabilityStatusLabels = {
+  SUPPORTED_NATIVE: "原生支持",
+  SUPPORTED_EXTENSION: "扩展支持",
+  UNSUPPORTED: "能力缺失",
+  UNKNOWN: "待确认",
+  NOT_CHECKED: "未检查",
+  NOT_APPLICABLE: "不适用",
+};
+
 const categoryLabels = {
   geometry: "几何",
   boundary_condition: "边界条件",
@@ -908,6 +927,8 @@ function renderDraftReadyCard(result) {
       }
     }
 
+    renderCapabilityPreview(card, result.capability_preview || result.draft?.capability_preview);
+
     const note = document.createElement("p");
     note.className = "muted";
     note.textContent = "实验规格正在生成中，请稍后刷新页面。";
@@ -915,6 +936,22 @@ function renderDraftReadyCard(result) {
 
     container.appendChild(card);
   }
+}
+
+function renderCapabilityPreview(card, preview) {
+  const fields = preview?.fields;
+  if (!fields || typeof fields !== "object") return;
+  const list = document.createElement("ul");
+  list.className = "capability-preview-list";
+  for (const [name, info] of Object.entries(fields)) {
+    const item = document.createElement("li");
+    const value = valueStatusLabels[info.value_status] || info.value_status || "待补充";
+    const capability = capabilityStatusLabels[info.capability_status] || info.capability_status || "未检查";
+    const display = info.display_value ? `：${info.display_value}` : "";
+    item.textContent = `${name}${display} / ${value} / ${capability}`;
+    list.appendChild(item);
+  }
+  card.appendChild(list);
 }
 
 // 渲染不支持卡片

@@ -200,10 +200,10 @@ class TestLLMDecompositionMerge:
         assert len(llm_studies) == 1
         assert llm_studies[0]["study_type"] == "thermal_cfd"
 
-    def test_llm_failure_does_not_break_endpoint(
+    def test_llm_failure_returns_clear_error(
         self, isolated_router: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """If the LLM call raises, the deterministic batch must still be returned."""
+        """If the configured LLM raises, the endpoint must return a clear error."""
         client = _build_client()
         session_id = _create_session(client)
 
@@ -218,13 +218,8 @@ class TestLLMDecompositionMerge:
             f"/api/v5/sessions/{session_id}/messages",
             json={"session_id": session_id, "message": "1. Pipe flow"},
         )
-        assert response.status_code == 200, response.text
-        body = response.json()
-        batch_action = [a for a in body["actions"] if a["action"] == "batch_review"]
-        assert len(batch_action) == 1
-        studies = batch_action[0]["batch"]["studies"]
-        assert len(studies) == 1
-        assert studies[0]["title"] == "Pipe flow"
+        assert response.status_code == 502, response.text
+        assert "LLM simulated failure" in response.text
 
     def test_llm_returns_no_studies_key(
         self, isolated_router: None, monkeypatch: pytest.MonkeyPatch

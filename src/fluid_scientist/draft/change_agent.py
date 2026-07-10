@@ -80,6 +80,7 @@ class DraftChangeAgent:
 
         # --- Detect parameter changes ---
         changes.extend(self._detect_param_changes(draft, user_message, msg_lower))
+        changes.extend(self._detect_design_field_changes(draft, user_message, msg_lower))
 
         # --- Detect boundary condition changes ---
         bc_changes = self._detect_bc_changes(user_message, msg_lower)
@@ -151,16 +152,25 @@ class DraftChangeAgent:
 
         # --- If no changes detected, mark as clarification_required ---
         if not changes:
-            clarifications.append(
-                {
-                    "field": "user_intent",
-                    "issue": "无法从用户输入中识别明确的修改意图",
-                    "suggested_question": (
-                        "请明确您希望修改哪部分：参数、边界条件、"
-                        "物理模型、输出变量、网格、还是求解器？"
-                    ),
-                }
-            )
+            if self._looks_like_boundary_condition(msg_lower):
+                clarifications.append(
+                    {
+                        "field": "boundary_conditions.boundary",
+                        "issue": "缺少需要修改的具体边界",
+                        "suggested_question": "哪个边界需要设为自由滑移？",
+                    }
+                )
+            else:
+                clarifications.append(
+                    {
+                        "field": "user_intent",
+                        "issue": "无法从用户输入中识别明确的修改意图",
+                        "suggested_question": (
+                            "请明确您希望修改哪部分：参数、边界条件、"
+                            "物理模型、输出变量、网格、还是求解器？"
+                        ),
+                    }
+                )
 
         return ChangeProposal(
             proposal_id=proposal_id,
@@ -181,6 +191,12 @@ class DraftChangeAgent:
         self, draft: ExperimentDraft, message: str, msg_lower: str
     ) -> list[DraftChange]:
         """Detect set_parameter / add_parameter changes."""
+        if (
+            "展向长度" in message
+            or "spanwise" in msg_lower
+            or ("lambda2" in msg_lower and ("q" in msg_lower or "q 准则" in msg_lower))
+        ):
+            return []
         changes: list[DraftChange] = []
         # Pattern: "把 Re 改成 5000" / "Re=5000" / "将直径设为 0.2"
         set_patterns = [
@@ -222,13 +238,65 @@ class DraftChangeAgent:
                     )
         return changes
 
+    def _detect_design_field_changes(
+        self, draft: ExperimentDraft, message: str, msg_lower: str
+    ) -> list[DraftChange]:
+        """Detect structured design edits that should preserve other fields."""
+        changes: list[DraftChange] = []
+        span_values = re.findall(r"(\d+(?:\.\d+)?)\s*d", message, re.I)
+        if ("展向长度" in message or "spanwise" in msg_lower or "span" in msg_lower) and span_values:
+            new_span = f"{span_values[-1]}D"
+            domain = {}
+            if isinstance(draft.physical_system, dict):
+                domain = dict(draft.physical_system.get("computational_domain", {}))
+            old_span = domain.get("spanwise_length") or draft.geometry.get("spanwise_length")
+            changes.append(
+                DraftChange(
+                    change_type="change_geometry",
+                    target_path="geometry.computational_domain.spanwise_length",
+                    old_value=old_span,
+                    new_value={"spanwise_length": new_span},
+                    reason="用户修改展向长度",
+                    confidence=0.95,
+                )
+            )
+
+        if (
+            ("q" in msg_lower or "q 准则" in msg_lower or "q准则" in msg_lower)
+            and "lambda2" in msg_lower
+        ):
+            changes.append(
+                DraftChange(
+                    change_type="add_output",
+                    target_path="requested_outputs.lambda2",
+                    old_value="q_criterion",
+                    new_value={
+                        "metric_id": "lambda2",
+                        "display_name": "lambda2 vortex criterion",
+                        "replaces": "q_criterion",
+                        "category": "scientific",
+                    },
+                    reason="用户将涡识别准则从 Q criterion 改为 lambda2",
+                    confidence=0.95,
+                )
+            )
+        return changes
+
     def _detect_bc_changes(self, message: str, msg_lower: str) -> list[DraftChange]:
         """Detect boundary condition changes."""
         changes: list[DraftChange] = []
-        bc_keywords = ["边界", "boundary", "入口", "inlet", "出口", "outlet", "壁面", "wall"]
+        bc_keywords = [
+            "边界", "boundary", "入口", "inlet", "出口", "outlet",
+            "壁面", "wall", "上边界", "下边界", "左边界", "右边界",
+            "top", "bottom", "left", "right", "自由滑移", "free slip",
+            "free_slip",
+        ]
         if not any(kw in msg_lower for kw in bc_keywords):
             return changes
-        change_keywords = ["改成", "改为", "设为", "换成", "修改", "change", "set"]
+        change_keywords = [
+            "改成", "改为", "设为", "换成", "修改", "补充", "是",
+            "change", "set",
+        ]
         if not any(kw in msg_lower for kw in change_keywords):
             return changes
 
@@ -238,20 +306,50 @@ class DraftChangeAgent:
             boundary = "inlet"
         elif "出口" in msg_lower or "outlet" in msg_lower:
             boundary = "outlet"
+        elif "上边界" in msg_lower or "top" in msg_lower:
+            boundary = "top"
+        elif "下边界" in msg_lower or "bottom" in msg_lower:
+            boundary = "bottom"
+        elif "左边界" in msg_lower or "left" in msg_lower:
+            boundary = "left"
+        elif "右边界" in msg_lower or "right" in msg_lower:
+            boundary = "right"
         elif "壁面" in msg_lower or "wall" in msg_lower:
             boundary = "wall"
 
         if boundary:
+            bc_type = None
+            if (
+                "自由滑移" in msg_lower
+                or "free slip" in msg_lower
+                or "free_slip" in msg_lower
+            ):
+                bc_type = "free_slip"
             changes.append(
                 DraftChange(
                     change_type="change_boundary_condition",
                     target_path=f"boundary_conditions.{boundary}",
                     old_value=None,
-                    new_value=None,
+                    new_value={"type": bc_type} if bc_type else None,
                     reason=f"用户修改 {boundary} 边界条件",
+                    confidence=0.9,
                 )
             )
         return changes
+
+    def _looks_like_boundary_condition(self, msg_lower: str) -> bool:
+        """Return True when the message mentions a boundary condition."""
+        return any(
+            keyword in msg_lower
+            for keyword in (
+                "边界",
+                "边界条件",
+                "自由滑移",
+                "free slip",
+                "free_slip",
+                "boundary",
+            )
+        )
 
     def _detect_ic_changes(self, message: str, msg_lower: str) -> list[DraftChange]:
         """Detect initial condition changes."""

@@ -471,7 +471,6 @@ def test_openai_reconfiguration_is_atomically_visible_to_readers() -> None:
     [
         {"provider": "anthropic", "model": "m", "api_key": "key"},
         {"provider": "glm", "model": "m", "api_key": "   "},
-        {"provider": "glm", "model": "m", "api_key": "key", "base_url": "x"},
     ],
 )
 def test_model_configuration_rejects_invalid_or_extra_fields(payload: dict[str, str]) -> None:
@@ -480,6 +479,23 @@ def test_model_configuration_rejects_invalid_or_extra_fields(payload: dict[str, 
     response = api.post("/api/model-configurations", json=payload)
 
     assert response.status_code == 422
+
+
+def test_model_configuration_accepts_base_url() -> None:
+    api = TestClient(create_app(plan_provider_factory=lambda settings: FakePlanDesigner()))
+
+    response = api.post(
+        "/api/model-configurations",
+        json={
+            "provider": "glm",
+            "model": "glm-4-flash",
+            "api_key": "key",
+            "base_url": "https://open.bigmodel.cn/api/paas/v4/",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["model"] == "glm-4-flash"
 
 
 def test_experiment_capabilities_are_ui_safe_and_complete() -> None:

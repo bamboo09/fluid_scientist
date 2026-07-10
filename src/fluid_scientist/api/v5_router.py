@@ -55,6 +55,10 @@ from fluid_scientist.draft_session.state_machine import (
     TransitionError,
 )
 from fluid_scientist.llm import LLMClient
+from fluid_scientist.measurement.boundary_verification_compiler import (
+    BoundaryVerificationCompiler,
+)
+from fluid_scientist.measurement.goal_metric_compiler import GoalMetricCompiler
 from fluid_scientist.study_decomposition.ambiguity_detector import AmbiguityDetector
 from fluid_scientist.study_decomposition.capability_checker import (
     CapabilityPreChecker,
@@ -66,6 +70,10 @@ from fluid_scientist.study_decomposition.models import (
 )
 from fluid_scientist.study_decomposition.physics_extractor import PhysicsFrameExtractor
 from fluid_scientist.study_decomposition.splitter import StudySplitter
+from fluid_scientist.workbench.design_closure_engine import DesignClosureEngine
+from fluid_scientist.workbench.experiment_design_synthesizer import (
+    ExperimentDesignSynthesizer,
+)
 
 router = APIRouter(prefix="/api/v5", tags=["v5-workflow"])
 
@@ -80,8 +88,8 @@ _extension_store: dict[str, CodeExtensionSpec] = {}
 _batch_store: dict[str, BatchStudyPlan] = {}
 _case_store: dict[str, dict[str, Any]] = {}  # case_plan_id -> {case_dir, compiled_structure}
 
-# Shared LLM client (defaults to mock backend)
-_llm_client = LLMClient()
+# Shared LLM client. It is configured by the main model-settings endpoint.
+_llm_client: LLMClient | None = None
 
 # Shared service instances
 _splitter = StudySplitter()
@@ -89,7 +97,7 @@ _extractor = PhysicsFrameExtractor()
 _detector = AmbiguityDetector()
 _checker = CapabilityPreChecker()
 _ranker = PriorityRanker()
-_draft_generator = DraftGenerator(llm_client=_llm_client)
+_draft_generator = DraftGenerator(llm_client=None)
 _validator = DraftValidator()
 _change_agent = DraftChangeAgent()
 _apply_executor = ApplyProposalExecutor()
@@ -99,6 +107,49 @@ _input_router = InputRouter()
 _extension_workflow = CodeExtensionWorkflow()
 _case_compiler = NativeCaseCompiler()
 _capability_registry = CapabilityRegistry()
+_design_synthesizer = ExperimentDesignSynthesizer()
+_design_closure_engine = DesignClosureEngine()
+_goal_metric_compiler = GoalMetricCompiler()
+_boundary_metric_compiler = BoundaryVerificationCompiler()
+
+_PROVIDER_BASE_URLS = {
+    "openai": None,
+    "glm": "https://open.bigmodel.cn/api/paas/v4/",
+    "deepseek": "https://api.deepseek.com",
+}
+
+
+def configure_llm_client(
+    *,
+    provider: str,
+    model: str,
+    api_key: str,
+    base_url: str | None = None,
+    timeout_seconds: float = 120.0,
+    client: Any | None = None,
+) -> LLMClient:
+    """Configure the v5 workflow LLM from the page's model settings."""
+    global _llm_client, _draft_generator
+    resolved_base_url = base_url if base_url is not None else _PROVIDER_BASE_URLS.get(provider)
+    _llm_client = LLMClient(
+        provider=provider,
+        model_name=model,
+        api_key=api_key,
+        base_url=resolved_base_url,
+        timeout_seconds=timeout_seconds,
+        client=client,
+    )
+    _draft_generator = DraftGenerator(llm_client=_llm_client)
+    return _llm_client
+
+
+def _require_llm_client() -> LLMClient:
+    if _llm_client is None:
+        raise HTTPException(
+            status_code=503,
+            detail="LLM provider is not configured for the v5 workflow",
+        )
+    return _llm_client
 
 
 # ---------------------------------------------------------------------------
@@ -241,6 +292,7 @@ def _decompose_message(message: str) -> BatchStudyPlan:
         )
         ambiguities = _detector.detect(study)
         study.ambiguity_report = ambiguities
+        study = _complete_experiment_design(study)
         study_intents.append(study)
 
     # Check capabilities and rank
@@ -266,7 +318,76 @@ def _decompose_message(message: str) -> BatchStudyPlan:
     return batch
 
 
-def _decompose_single_study(message: str) -> tuple[StudyIntent, Any]:
+def _merge_llm_study(study: StudyIntent, llm_study: dict[str, Any]) -> StudyIntent:
+    """Merge model analysis into deterministic extraction without overwriting facts."""
+    updates: dict[str, Any] = {}
+    for field in ("study_type", "research_objective"):
+        value = llm_study.get(field)
+        if value and (field != "study_type" or study.study_type == "unknown"):
+            updates[field] = value
+    for field in (
+        "geometry",
+        "physical_models",
+        "initial_conditions",
+        "boundary_conditions",
+        "observables",
+        "analysis_goals",
+    ):
+        value = llm_study.get(field)
+        current = getattr(study, field)
+        if value and (not current or current == {"type": "unknown"}):
+            updates[field] = value
+    missing = llm_study.get("missing_information") or llm_study.get("missing_info")
+    if isinstance(missing, list):
+        updates["ambiguity_report"] = [
+            *study.ambiguity_report,
+            *[
+                {
+                    "field": str(item.get("field", "unknown")) if isinstance(item, dict) else "unknown",
+                    "issue": str(item.get("issue", item)) if isinstance(item, dict) else str(item),
+                    "severity": "blocking_for_case_generation",
+                    "reason": "model_inferred_missing_information",
+                }
+                for item in missing
+            ],
+        ]
+    merged = study.model_copy(update=updates)
+    assumptions = llm_study.get("model_inferences")
+    if isinstance(assumptions, dict):
+        merged.physical_models.setdefault("_model_inferred", assumptions)
+    return merged
+
+
+def _complete_experiment_design(study: StudyIntent) -> StudyIntent:
+    """Attach complete design and layered metrics before capability checks."""
+    design = _design_synthesizer.synthesize(study)
+    design = _design_closure_engine.close(design)
+    metric_layers = _goal_metric_compiler.compile(design)
+    boundary_metrics = _boundary_metric_compiler.compile(design)
+    design.scientific_metrics = metric_layers["scientific"]
+    design.boundary_verification_metrics = boundary_metrics
+    design.credibility_metrics = metric_layers["credibility"]
+    return study.model_copy(
+        update={
+            "experiment_design": design.model_dump(),
+            "target_phenomena": list(design.target_phenomena),
+            "boundary_facts": dict(design.boundary_facts),
+            "scientific_metrics": metric_layers["scientific"],
+            "boundary_verification_metrics": boundary_metrics,
+            "credibility_metrics": metric_layers["credibility"],
+            "comparison_metrics": metric_layers["comparison"],
+            "optional_diagnostics": metric_layers["optional_diagnostics"],
+            "analysis_goals": [goal.description for goal in design.analysis_goals],
+        }
+    )
+
+
+def _decompose_single_study(
+    message: str,
+    *,
+    session_id: str = "",
+    input_refs: list[str] | None = None,
+) -> tuple[StudyIntent, Any]:
     """Decompose a message into a single StudyIntent + capability check."""
     frame = _extractor.extract(message)
     params = _extractor.extract_parameters(message)
@@ -296,8 +417,36 @@ def _decompose_single_study(message: str) -> tuple[StudyIntent, Any]:
         observables=observables,
         analysis_goals=goals,
     )
+    llm_output, _record = _require_llm_client().call(
+        purpose="study_decomposition",
+        prompt_name="v5_single_study_analysis",
+        system_prompt=(
+            "Analyze a CFD research request as structured JSON. Include "
+            "research object/type, geometry, physical parameters, initial "
+            "conditions, boundary conditions, turbulence/physics models, "
+            "observables, analysis goals, missing information, required "
+            "system capabilities, and model_inferences for inferred values. "
+            "Do not treat inferred values as user-confirmed."
+        ),
+        user_message=message,
+        output_schema={
+            "type": "object",
+            "properties": {
+                "study": {"type": "object"},
+                "missing_information": {"type": "array"},
+                "required_capabilities": {"type": "array"},
+            },
+        },
+        session_id=session_id,
+        input_refs=input_refs or [],
+    )
+    llm_study = llm_output.get("study") if isinstance(llm_output, dict) else None
+    if isinstance(llm_study, dict):
+        study = _merge_llm_study(study, llm_study)
+
     ambiguities = _detector.detect(study)
     study.ambiguity_report = ambiguities
+    study = _complete_experiment_design(study)
     check_result = _checker.check(study)
     study.readiness_level = check_result.readiness_level
     return study, check_result
@@ -337,12 +486,156 @@ def get_llm_records(session_id: str) -> dict[str, Any]:
     session = _session_store.get_session(session_id)
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
-    records = _llm_client.get_records(session_id)
+    records = _llm_client.get_records(session_id) if _llm_client is not None else []
     return {
         "session_id": session_id,
         "count": len(records),
-        "records": [r.model_dump(mode="json") for r in records],
+        "records": [
+            {**r.model_dump(mode="json"), "model": r.model_name}
+            for r in records
+        ],
     }
+
+
+def _recent_messages(session_id: str, limit: int = 6) -> list[dict[str, str]]:
+    messages = _session_store.get_messages(session_id)
+    return [
+        {"role": m.role, "type": m.message_type, "content": m.content[:500]}
+        for m in messages[-limit:]
+    ]
+
+
+def _draft_summary(draft: ExperimentDraft | None) -> dict[str, Any] | None:
+    if draft is None:
+        return None
+    return {
+        "draft_id": draft.draft_id,
+        "version": draft.version,
+        "objective": draft.objective,
+        "study_type": draft.study_type,
+        "geometry": draft.geometry,
+        "boundary_conditions": draft.boundary_conditions,
+        "solver": draft.solver,
+        "mesh": draft.mesh,
+        "requested_outputs": draft.requested_outputs,
+    }
+
+
+def _allowed_actions(session: DraftSession) -> list[str]:
+    actions = ["NEW_RESEARCH", "UNRESOLVED"]
+    if session.pending_question_ids:
+        actions.insert(0, "ANSWER_CLARIFICATION")
+    if session.current_draft_id:
+        actions[0:0] = ["MODIFY_DRAFT", "SUPPLEMENT_DRAFT", "ASK_ABOUT_DRAFT"]
+    if session.pending_proposal_id:
+        actions[0:0] = ["CONFIRM_PROPOSAL", "REJECT_PROPOSAL"]
+    if session.status is DraftSessionStatus.BATCH_REVIEW:
+        actions.insert(0, "SELECT_STUDY")
+    return list(dict.fromkeys(actions))
+
+
+def _classify_with_llm(
+    route: Any,
+    *,
+    session: DraftSession,
+    user_message: str,
+    message_id: str,
+) -> Any:
+    """Refine ambiguous routing with the configured model."""
+    if not route.should_call_llm:
+        return route
+    if route.input_type == "batch_research_request" and route.confidence >= 0.9:
+        return route
+    if route.confidence >= 0.9 and route.intent != "NEW_RESEARCH":
+        return route
+
+    draft = _draft_store.get(session.current_draft_id or "")
+    payload = {
+        "session": session.model_dump(mode="json"),
+        "active_study_id": session.selected_study_id,
+        "active_draft": _draft_summary(draft),
+        "pending_clarification": session.pending_question_ids,
+        "pending_proposal": session.pending_proposal_id,
+        "recent_messages": _recent_messages(session.session_id),
+        "allowed_actions": _allowed_actions(session),
+        "rule_route": route.model_dump(),
+        "user_message": user_message,
+    }
+    try:
+        output, _record = _require_llm_client().call(
+            purpose="input_routing",
+            prompt_name="v5_message_intent",
+            system_prompt=(
+                "Classify the user turn for a conversational CFD draft workflow. "
+                "Return JSON with intent, confidence, reason. Prefer active draft "
+                "modification/question/clarification over NEW_RESEARCH unless the "
+                "user explicitly asks for a new study."
+            ),
+            user_message=json.dumps(payload, ensure_ascii=False),
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "intent": {"type": "string"},
+                    "confidence": {"type": "number"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["intent", "confidence", "reason"],
+            },
+            session_id=session.session_id,
+            input_refs=[message_id],
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    intent = str(output.get("intent", "UNRESOLVED")).upper()
+    confidence = float(output.get("confidence", route.confidence))
+    reason = str(output.get("reason", "Model classified the message intent."))
+    mapping = {
+        "NEW_RESEARCH": "new_research_request",
+        "MODIFY_DRAFT": "draft_change_request",
+        "SUPPLEMENT_DRAFT": "draft_change_request",
+        "ANSWER_CLARIFICATION": "clarification_answer",
+        "ASK_ABOUT_DRAFT": "question_about_draft",
+        "CONFIRM_PROPOSAL": "proposal_confirmation",
+        "REJECT_PROPOSAL": "proposal_cancel",
+        "CONFIRM_DRAFT": "unknown",
+        "SELECT_STUDY": "study_selection",
+        "UNRESOLVED": route.input_type,
+    }
+    if (
+        session.current_draft_id
+        and intent == "NEW_RESEARCH"
+        and confidence < 0.85
+        and not any(k in user_message.lower() for k in ("新建", "另一个", "new", "another"))
+    ):
+        intent = "UNRESOLVED"
+    return route.model_copy(
+        update={
+            "input_type": mapping.get(intent, route.input_type),
+            "intent": intent,
+            "confidence": confidence,
+            "reason": reason,
+            "should_call_llm": False,
+        }
+    )
+
+
+def _answer_draft_question(session: DraftSession, user_message: str) -> str:
+    draft = _draft_store.get(session.current_draft_id or "")
+    if draft is None:
+        return "当前没有可解释的草案。"
+    lower = user_message.lower()
+    if "自由滑移" in lower or "free slip" in lower or "free_slip" in lower:
+        return (
+            "自由滑移边界通常用于表示切向速度梯度为零、法向无穿透的理想滑移边界。"
+            "是否适用取决于你的物理场景；如果要修改它，我会先生成变更提案等待确认。"
+        )
+    return (
+        "我会基于当前草案回答，不会修改草案。当前草案目标是："
+        f"{draft.objective or '尚未填写'}"
+    )
 
 
 @router.post("/sessions/{session_id}/messages")
@@ -354,12 +647,20 @@ def send_message(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # Route the input
+    # Route the input. Ambiguous routes are refined with the configured model
+    # before mutating session state.
     route = _input_router.route(request.message, session)
+    message_id = f"msg_{uuid.uuid4().hex[:12]}"
+    route = _classify_with_llm(
+        route,
+        session=session,
+        user_message=request.message,
+        message_id=message_id,
+    )
 
     # Store the user message
     msg = SessionMessage(
-        message_id=f"msg_{uuid.uuid4().hex[:12]}",
+        message_id=message_id,
         session_id=session_id,
         role="user",
         message_type=_route_to_message_type(route.input_type),
@@ -377,8 +678,8 @@ def send_message(
         # Optionally invoke LLM for study decomposition; merge any additional
         # studies it suggests that the deterministic splitter did not find.
         llm_studies_output: list[dict] | None = None
-        with contextlib.suppress(Exception):
-            llm_output, _record = _llm_client.call(
+        try:
+            llm_output, _record = _require_llm_client().call(
                 purpose="study_decomposition",
                 prompt_name="study_decomposer",
                 system_prompt="Decompose the user's research request into one or more CFD studies.",
@@ -386,10 +687,14 @@ def send_message(
                 session_id=session_id,
                 input_refs=[msg.message_id],
             )
-            if isinstance(llm_output, dict):
-                studies_val = llm_output.get("studies")
-                if isinstance(studies_val, list):
-                    llm_studies_output = studies_val
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        if isinstance(llm_output, dict):
+            studies_val = llm_output.get("studies")
+            if isinstance(studies_val, list):
+                llm_studies_output = studies_val
 
         if llm_studies_output:
             existing_titles = {s.title.strip().lower() for s in batch.studies}
@@ -442,12 +747,62 @@ def send_message(
 
     elif route.input_type == "new_research_request":
         # Single study
-        study, check_result = _decompose_single_study(request.message)
+        try:
+            study, check_result = _decompose_single_study(
+                request.message,
+                session_id=session_id,
+                input_refs=[msg.message_id],
+            )
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         response_actions.append({
             "action": "study_decomposed",
             "study": study.model_dump(),
             "capability_check": check_result.model_dump(),
+        })
+
+    elif route.input_type == "draft_change_request":
+        if not session.current_draft_id:
+            response_actions.append({
+                "action": "clarification_required",
+                "question": "当前没有可修改的草案。请先选择或生成一个草案。",
+            })
+        else:
+            proposal = request_draft_change(
+                session.current_draft_id,
+                DraftChangeRequest(
+                    session_id=session_id,
+                    draft_id=session.current_draft_id,
+                    user_message=request.message,
+                ),
+            )
+            if proposal.clarification_required and not proposal.changes:
+                _proposal_store.pop(proposal.proposal_id, None)
+                refreshed = _session_store.get_session(session_id)
+                if refreshed and refreshed.pending_proposal_id == proposal.proposal_id:
+                    refreshed.pending_proposal_id = None
+                    refreshed.status = DraftSessionStatus.DRAFT_READY
+                    _session_store.update_session(refreshed)
+                response_actions.append({
+                    "action": "clarification_required",
+                    "questions": proposal.clarification_required,
+                    "message": proposal.clarification_required[0].get(
+                        "suggested_question", "请补充需要修改的具体位置。"
+                    ),
+                })
+            else:
+                response_actions.append({
+                    "action": "change_proposal",
+                    "proposal": proposal.model_dump(),
+                })
+
+    elif route.input_type == "question_about_draft":
+        response_actions.append({
+            "action": "answer",
+            "message": _answer_draft_question(session, request.message),
         })
 
     elif route.input_type == "study_selection":
@@ -458,9 +813,16 @@ def send_message(
 
     elif route.input_type == "proposal_confirmation":
         if session.pending_proposal_id:
+            new_draft = apply_proposal(
+                session.pending_proposal_id,
+                ApplyProposalRequest(
+                    session_id=session_id,
+                    proposal_id=session.pending_proposal_id,
+                ),
+            )
             response_actions.append({
-                "action": "apply_proposal",
-                "proposal_id": session.pending_proposal_id,
+                "action": "draft_updated",
+                "draft": new_draft.model_dump(),
             })
 
     elif route.input_type == "proposal_cancel":

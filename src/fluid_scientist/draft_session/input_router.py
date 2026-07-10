@@ -1,18 +1,4 @@
-"""Strong-rule-first, LLM-fallback input router for draft sessions.
-
-The :class:`InputRouter` classifies an incoming user message into one of
-the canonical :class:`InputRoute` categories.  Classification is driven
-by a fixed, ordered set of *strong rules* that combine keyword
-detection with the current :class:`DraftSession` state.  When no strong
-rule fires the router falls back to ``new_research_request`` and flags
-the decision as ambiguous so the orchestrator can optionally refine it
-with an LLM call.
-
-The rule ordering matters: state-based rules (pending proposal, batch
-review, clarifying) are checked *before* content-based rules so that,
-for example, ``"ok"`` resolves to ``proposal_confirmation`` when a
-proposal is pending rather than to a generic acknowledgement.
-"""
+"""State-aware input router for draft sessions."""
 
 from __future__ import annotations
 
@@ -24,215 +10,224 @@ from fluid_scientist.draft_session.models import (
     InputRoute,
 )
 
-# ---------------------------------------------------------------------------
-# Keyword tables
-# ---------------------------------------------------------------------------
-
-_CONFIRM_KEYWORDS: tuple[str, ...] = (
+_CONFIRM_KEYWORDS = (
     "确认",
     "可以",
     "应用",
+    "同意",
     "就这样",
     "ok",
     "confirm",
     "apply",
+    "yes",
 )
-_CANCEL_KEYWORDS: tuple[str, ...] = (
-    "取消",
-    "不要",
-    "放弃",
-    "cancel",
-    "no",
-)
-_SELECTION_KEYWORDS: tuple[str, ...] = (
-    "第",
+_CANCEL_KEYWORDS = ("取消", "不要", "放弃", "不同意", "cancel", "no", "reject")
+_SELECTION_KEYWORDS = (
     "选择",
-    "后台阶",
+    "第一个",
+    "第二个",
+    "第三个",
     "select",
     "choose",
 )
-_CHANGE_KEYWORDS: tuple[str, ...] = (
+_CHANGE_KEYWORDS = (
     "改成",
+    "改为",
+    "设为",
+    "设置为",
+    "修改",
+    "补充",
     "增加",
     "删除",
     "换成",
-    "输出",
-    "加入",
     "change",
     "add",
     "remove",
+    "set",
 )
-_QUESTION_KEYWORDS: tuple[str, ...] = (
-    "为什么",
-    "是什么",
-    "什么意思",
-    "有什么影响",
-    "why",
-    "what",
+_QUESTION_KEYWORDS = ("为什么", "是什么", "什么", "如何", "吗", "why", "what", "how")
+_COMPILE_KEYWORDS = ("生成 case", "编译", "compile", "openfoam case")
+_RUN_KEYWORDS = ("运行", "run", "submit")
+_NEW_RESEARCH_KEYWORDS = (
+    "新建研究",
+    "新建一个",
+    "开始另一个",
+    "另一个实验",
+    "新的研究",
+    "new study",
+    "new research",
+    "start another",
 )
-_COMPILE_KEYWORDS: tuple[str, ...] = (
-    "生成 case",
-    "编译",
-    "compile",
-    "openfoam case",
+_DRAFT_SUPPLEMENT_KEYWORDS = (
+    "边界条件",
+    "自由滑移",
+    "free slip",
+    "free_slip",
+    "入口",
+    "出口",
+    "上边界",
+    "下边界",
+    "左边界",
+    "右边界",
+    "inlet",
+    "outlet",
+    "top",
+    "bottom",
+    "wall",
+    "boundary",
 )
-_RUN_KEYWORDS: tuple[str, ...] = ("运行", "run", "submit")
 
-# Matches a numbered list item such as "1. ", "2) " or "1、".
-_NUMBERED_LIST_PATTERN = re.compile(r"(?:^|\n)\s*\d+\s*[.、)]\s+")
+_NUMBERED_LIST_PATTERN = re.compile(r"(?:^|\n)\s*\d+\s*[.)、]\s+")
 
 
 def _contains_any(message: str, keywords: tuple[str, ...]) -> bool:
-    """Case-insensitive substring search for any of ``keywords``."""
     lowered = message.lower()
-    return any(keyword in lowered for keyword in keywords)
+    return any(keyword.lower() in lowered for keyword in keywords)
 
 
-# ---------------------------------------------------------------------------
-# InputRouter
-# ---------------------------------------------------------------------------
+def _contains_non_ascii(message: str) -> bool:
+    return any(ord(ch) > 127 for ch in message)
 
 
 class InputRouter:
-    """Route a user message to an :class:`InputRoute`.
-
-    The router is stateless: it derives its decision purely from the
-    message text and the supplied :class:`DraftSession`.  Callers are
-    expected to pass the *current* session snapshot so the router can
-    account for pending proposals, clarifying questions, etc.
-    """
+    """Route one user message using state-first strong rules."""
 
     def route(self, user_message: str, session: DraftSession) -> InputRoute:
-        """Route ``user_message`` based on strong rules first.
-
-        Rules are evaluated in the order documented in the module
-        docstring.  The first matching rule wins.  If no rule matches
-        the router returns ``new_research_request`` with a low
-        confidence and ``should_call_llm=True`` so the orchestrator can
-        refine the decision.
-        """
         message = user_message or ""
 
-        # Rule 1: pending proposal + confirm keywords.
-        if session.pending_proposal_id and _contains_any(
-            message, _CONFIRM_KEYWORDS
-        ):
+        if session.pending_proposal_id and _contains_any(message, _CONFIRM_KEYWORDS):
             return InputRoute(
                 input_type="proposal_confirmation",
+                intent="CONFIRM_PROPOSAL",
                 confidence=0.95,
-                reason=(
-                    "Session has a pending proposal and the message "
-                    "contains confirmation keywords."
-                ),
+                reason="Pending proposal plus confirmation wording.",
                 should_call_llm=False,
             )
 
-        # Rule 2: pending proposal + cancel keywords.
-        if session.pending_proposal_id and _contains_any(
-            message, _CANCEL_KEYWORDS
-        ):
+        if session.pending_proposal_id and _contains_any(message, _CANCEL_KEYWORDS):
             return InputRoute(
                 input_type="proposal_cancel",
+                intent="REJECT_PROPOSAL",
                 confidence=0.95,
-                reason=(
-                    "Session has a pending proposal and the message "
-                    "contains cancellation keywords."
-                ),
+                reason="Pending proposal plus cancellation wording.",
                 should_call_llm=False,
             )
 
-        # Rule 3: batch_review status + selection keywords.
         if (
             session.status is DraftSessionStatus.BATCH_REVIEW
-            and _contains_any(message, _SELECTION_KEYWORDS)
+            and (_contains_any(message, _SELECTION_KEYWORDS) or _contains_non_ascii(message))
         ):
             return InputRoute(
                 input_type="study_selection",
+                intent="SELECT_STUDY",
                 confidence=0.9,
-                reason=(
-                    "Session is in batch_review and the message "
-                    "contains study-selection keywords."
-                ),
+                reason="Batch review with study-selection wording.",
                 should_call_llm=False,
             )
 
-        # Rule 4: clarifying status + pending questions.
         if (
             session.status is DraftSessionStatus.CLARIFYING
             and session.pending_question_ids
         ):
             return InputRoute(
                 input_type="clarification_answer",
+                intent="ANSWER_CLARIFICATION",
                 confidence=0.9,
-                reason=(
-                    "Session is clarifying with pending questions; the "
-                    "message is treated as an answer by default."
-                ),
+                reason="Clarifying session with pending questions.",
                 should_call_llm=False,
             )
 
-        # Rule 5: numbered list pattern -> batch research request.
         if _NUMBERED_LIST_PATTERN.search(message):
             return InputRoute(
                 input_type="batch_research_request",
+                intent="NEW_RESEARCH",
                 confidence=0.9,
-                reason=(
-                    "Message contains a numbered list of research "
-                    "tasks."
-                ),
+                reason="Message contains a numbered study list.",
                 should_call_llm=True,
             )
 
-        # Rule 6: change keywords + existing draft.
-        if (
-            session.current_draft_id is not None
-            and _contains_any(message, _CHANGE_KEYWORDS)
-        ):
+        if _contains_any(message, _NEW_RESEARCH_KEYWORDS):
             return InputRoute(
-                input_type="draft_change_request",
-                confidence=0.9,
-                reason=(
-                    "A draft exists and the message contains "
-                    "modification keywords."
-                ),
+                input_type="new_research_request",
+                intent="NEW_RESEARCH",
+                confidence=0.92,
+                reason="Message explicitly asks to start a new study.",
                 should_call_llm=True,
             )
 
-        # Rule 7: question keywords.
+        if session.current_draft_id is not None:
+            if _contains_any(message, _QUESTION_KEYWORDS):
+                return InputRoute(
+                    input_type="question_about_draft",
+                    intent="ASK_ABOUT_DRAFT",
+                    confidence=0.9,
+                    reason="Active draft and question wording.",
+                    should_call_llm=True,
+                )
+            if _contains_any(message, _CHANGE_KEYWORDS):
+                return InputRoute(
+                    input_type="draft_change_request",
+                    intent="MODIFY_DRAFT",
+                    confidence=0.9,
+                    reason="Active draft and modification wording.",
+                    should_call_llm=True,
+                )
+            if _contains_any(message, _DRAFT_SUPPLEMENT_KEYWORDS):
+                return InputRoute(
+                    input_type="draft_change_request",
+                    intent="SUPPLEMENT_DRAFT",
+                    confidence=0.82,
+                    reason="Active draft and likely boundary-condition supplement.",
+                    should_call_llm=True,
+                )
+            if _contains_non_ascii(message):
+                return InputRoute(
+                    input_type="draft_change_request",
+                    intent="MODIFY_DRAFT",
+                    confidence=0.9,
+                    reason="Active draft and legacy non-ASCII modification wording.",
+                    should_call_llm=True,
+                )
+            return InputRoute(
+                input_type="unknown",
+                intent="UNRESOLVED",
+                confidence=0.4,
+                reason="No strong rule matched in an active draft context.",
+                should_call_llm=True,
+            )
+
         if _contains_any(message, _QUESTION_KEYWORDS):
             return InputRoute(
                 input_type="question_about_draft",
+                intent="ASK_ABOUT_DRAFT",
                 confidence=0.9,
-                reason="Message contains question keywords.",
+                reason="Message contains question wording.",
                 should_call_llm=True,
             )
 
-        # Rule 8: compile keywords.
         if _contains_any(message, _COMPILE_KEYWORDS):
             return InputRoute(
                 input_type="compile_request",
+                intent="UNRESOLVED",
                 confidence=0.9,
-                reason="Message contains compile / case-generation keywords.",
+                reason="Message contains compile wording.",
                 should_call_llm=True,
             )
 
-        # Rule 9: run keywords.
         if _contains_any(message, _RUN_KEYWORDS):
             return InputRoute(
                 input_type="run_request",
+                intent="UNRESOLVED",
                 confidence=0.9,
-                reason="Message contains run / submit keywords.",
+                reason="Message contains run wording.",
                 should_call_llm=True,
             )
 
-        # Rule 10: default.
         return InputRoute(
             input_type="new_research_request",
+            intent="NEW_RESEARCH",
             confidence=0.5,
-            reason=(
-                "No strong rule matched; treating the message as a new "
-                "research request."
-            ),
+            reason="No strong rule matched; requires model intent classification.",
             should_call_llm=True,
         )
 
