@@ -61,6 +61,7 @@ class LLMClient:
         output_schema: dict | None = None,
         session_id: str = "",
         input_refs: list[str] | None = None,
+        prompt_version: str = "",
     ) -> tuple[dict, LLMCallRecord]:
         """Call LLM (or fallback) and return (parsed_output, record).
 
@@ -72,6 +73,9 @@ class LLMClient:
             output_schema: Optional JSON schema describing expected output.
             session_id: Draft session this call belongs to (for audit).
             input_refs: Optional list of referenced input artifact IDs.
+            prompt_version: Version string for the prompt template.  When
+                empty (default) the client records ``"mock-1"`` for mock
+                runs and ``""`` for real-provider runs.
 
         Returns:
             A tuple of ``(parsed_output_dict, call_record)``.
@@ -121,6 +125,13 @@ class LLMClient:
             else ""
         )
 
+        # Resolve prompt_version: explicit caller value wins, else mock
+        # default ("mock-1"), else empty for real provider.
+        if prompt_version:
+            resolved_prompt_version = prompt_version
+        else:
+            resolved_prompt_version = "mock-1" if use_mock else ""
+
         record = LLMCallRecord(
             call_id=call_id,
             session_id=session_id,
@@ -128,7 +139,7 @@ class LLMClient:
             provider=self._provider,
             model_name=self._model_name,
             prompt_name=prompt_name,
-            prompt_version="mock-1" if use_mock else "",
+            prompt_version=resolved_prompt_version,
             input_refs=refs,
             input_summary=user_message[:200],
             output_schema=str(output_schema) if output_schema else "",

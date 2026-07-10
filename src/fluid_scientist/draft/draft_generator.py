@@ -1,19 +1,27 @@
-"""Deterministic draft generator.
+"""Deterministic draft generator with optional LLM-based semantic enhancement.
 
 The :class:`DraftGenerator` converts a
 :class:`~fluid_scientist.study_decomposition.models.StudyIntent` into a
-read-mostly :class:`~fluid_scientist.draft.models.ExperimentDraft` *without*
-calling any LLM.  It is a pure, deterministic mapping so that the same
-intent always yields the same draft shape (only the generated ``draft_id``
-is non-deterministic).
+read-mostly :class:`~fluid_scientist.draft.models.ExperimentDraft`.
 
-The generator preserves provenance: every parameter carried over from the
-intent keeps its source (user-supplied, derived, assumed or unknown) so the
-validator and the change-proposal workflow can reason about it.
+The *core* mapping is a pure, deterministic function so that the same
+intent always yields the same draft shape (only the generated ``draft_id``
+is non-deterministic).  This deterministic core preserves provenance:
+every parameter carried over from the intent keeps its source
+(user-supplied, derived, assumed or unknown) so the validator and the
+change-proposal workflow can reason about it.
+
+When an :class:`~fluid_scientist.llm.LLMClient` is provided, the
+generator performs a *best-effort* semantic enhancement step after the
+deterministic draft is built.  The LLM may enrich the draft's title or
+sections; if the call fails or returns no usable content, the
+deterministic draft is returned unchanged.  In other words, the LLM is
+strictly additive and never required.
 """
 
 from __future__ import annotations
 
+import contextlib
 import uuid
 from collections.abc import Iterable, Mapping
 
@@ -23,6 +31,7 @@ from fluid_scientist.draft.models import (
     ExperimentDraft,
     ParameterSource,
 )
+from fluid_scientist.llm import LLMClient
 from fluid_scientist.study_decomposition.models import (
     ExtractedParameter,
     StudyIntent,
@@ -41,9 +50,25 @@ _SOURCE_MAP: dict[str, ParameterSource] = {
 # Severity used by :class:`AmbiguityItem` for blocking ambiguities.
 _BLOCKING_SEVERITY = "blocking_for_case_generation"
 
+# Prefix produced by the default mock LLM response for ``draft_generation``
+# - such titles are not informative and should be ignored.
+_MOCK_TITLE_PREFIX = "Draft for:"
+
 
 class DraftGenerator:
-    """Generate a read-only :class:`ExperimentDraft` from a ``StudyIntent``."""
+    """Generate a read-only :class:`ExperimentDraft` from a ``StudyIntent``.
+
+    Args:
+        llm_client: Optional :class:`~fluid_scientist.llm.LLMClient` used
+            to perform a best-effort semantic enhancement of the draft
+            (e.g. producing a richer title or summary).  When ``None``
+            the generator behaves as a pure deterministic function.
+            Failures from the LLM are swallowed; the deterministic
+            draft is always returned.
+    """
+
+    def __init__(self, llm_client: LLMClient | None = None) -> None:
+        self._llm_client = llm_client
 
     def generate(
         self, study: StudyIntent, research_state: dict | None = None
@@ -58,7 +83,10 @@ class DraftGenerator:
 
         Returns:
             A fresh :class:`ExperimentDraft` in the ``draft`` state with
-            ``version=1``.
+            ``version=1``.  If an LLM client was provided and the LLM
+            produces usable semantic enrichment, the returned draft may
+            carry a richer title; otherwise it is identical to the
+            deterministic baseline.
         """
         session_id = ""
         if research_state:
@@ -73,7 +101,7 @@ class DraftGenerator:
             self._convert_parameters(study.unknown_required_parameters)
         )
 
-        return ExperimentDraft(
+        draft = ExperimentDraft(
             # 15-16. Identity & lifecycle.
             draft_id=str(uuid.uuid4()),
             session_id=session_id,
@@ -106,6 +134,59 @@ class DraftGenerator:
                 if item.severity == _BLOCKING_SEVERITY
             ],
         )
+
+        # Optional LLM enhancement: produce a richer title if the LLM
+        # returns one.  The whole step is best-effort: any failure is
+        # suppressed so deterministic generation is never broken.
+        if self._llm_client is not None:
+            self._apply_llm_enhancement(draft, study, session_id)
+
+        return draft
+
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
+
+    def _apply_llm_enhancement(
+        self,
+        draft: ExperimentDraft,
+        study: StudyIntent,
+        session_id: str,
+    ) -> None:
+        """Best-effort semantic enhancement of *draft* using the LLM.
+
+        Only side-effects allowed on *draft* are non-structural: setting
+        a ``title`` attribute (when the model permits) so that downstream
+        consumers can see the LLM's preferred wording.  All exceptions
+        are caught - the deterministic draft must always be returned.
+        """
+        try:
+            with contextlib.suppress(Exception):
+                output, _record = self._llm_client.call(
+                    purpose="draft_generation",
+                    prompt_name="draft_generation",
+                    system_prompt="",
+                    user_message=(
+                        f"Study: {study.title}\n"
+                        f"Objective: {study.research_objective}"
+                    ),
+                    session_id=session_id,
+                )
+            # If the LLM produced a draft with a non-empty title, prefer it.
+            if isinstance(output, dict):
+                draft_section = output.get("draft")
+                if isinstance(draft_section, dict):
+                    llm_title = draft_section.get("title", "")
+                    if (
+                        isinstance(llm_title, str)
+                        and llm_title
+                        and not llm_title.startswith(_MOCK_TITLE_PREFIX)
+                    ):
+                        with contextlib.suppress(Exception):
+                            draft.title = llm_title
+        except Exception:
+            # LLM is best-effort; never break generation if LLM fails.
+            pass
 
     def _convert_parameters(
         self, parameters: Iterable[ExtractedParameter]

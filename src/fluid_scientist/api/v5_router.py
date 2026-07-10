@@ -41,12 +41,14 @@ from fluid_scientist.draft.models import (
     ValidationResult,
 )
 from fluid_scientist.draft.validator import DraftValidator
+from fluid_scientist.draft_session.clarification import ClarificationPlanner
 from fluid_scientist.draft_session.input_router import InputRouter
 from fluid_scientist.draft_session.models import (
     DraftSession,
     DraftSessionStatus,
     SessionMessage,
 )
+from fluid_scientist.draft_session.persistence import JsonSessionPersistence
 from fluid_scientist.draft_session.session_store import DraftSessionStore
 from fluid_scientist.draft_session.state_machine import (
     DraftSessionStateMachine,
@@ -68,7 +70,9 @@ from fluid_scientist.study_decomposition.splitter import StudySplitter
 router = APIRouter(prefix="/api/v5", tags=["v5-workflow"])
 
 # Shared in-memory stores (production would use a database)
-_session_store = DraftSessionStore()
+# Shared JSON-file-backed session persistence (so sessions survive restarts)
+_session_persistence = JsonSessionPersistence()
+_session_store = DraftSessionStore(persistence=_session_persistence)
 _draft_store: dict[str, ExperimentDraft] = {}
 _proposal_store: dict[str, ChangeProposal] = {}
 _case_plan_store: dict[str, CasePlan] = {}
@@ -85,7 +89,7 @@ _extractor = PhysicsFrameExtractor()
 _detector = AmbiguityDetector()
 _checker = CapabilityPreChecker()
 _ranker = PriorityRanker()
-_draft_generator = DraftGenerator()
+_draft_generator = DraftGenerator(llm_client=_llm_client)
 _validator = DraftValidator()
 _change_agent = DraftChangeAgent()
 _apply_executor = ApplyProposalExecutor()
@@ -100,6 +104,11 @@ _capability_registry = CapabilityRegistry()
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
+
+
+def get_session_persistence() -> JsonSessionPersistence:
+    """Return the module-level session persistence instance (for testing)."""
+    return _session_persistence
 
 
 class CreateSessionRequest(BaseModel):
@@ -309,6 +318,12 @@ def get_session(session_id: str) -> SessionResponse:
     return SessionResponse(session=session, messages=messages)
 
 
+@router.get("/sessions-list")
+def list_sessions() -> dict:
+    """List all persisted session IDs."""
+    return {"session_ids": _session_persistence.list_sessions()}
+
+
 @router.get("/sessions/{session_id}/llm-records")
 def get_llm_records(session_id: str) -> dict[str, Any]:
     """Return LLM call records for a session (debug/auditing endpoint)."""
@@ -377,6 +392,23 @@ def send_message(
             "action": "batch_review",
             "batch": batch.model_dump(),
         })
+
+        # Build clarification questions for each study's ambiguities
+        clarification_planner = ClarificationPlanner()
+        all_questions: list[dict] = []
+        for study in batch.studies:
+            ambiguities = study.ambiguity_report or []
+            questions = clarification_planner.plan(ambiguities)
+            for q in questions:
+                all_questions.append({
+                    "study_id": study.study_id,
+                    **q.model_dump(),
+                })
+        if all_questions:
+            response_actions.append({
+                "action": "clarification_questions",
+                "questions": all_questions,
+            })
 
     elif route.input_type == "new_research_request":
         # Single study
@@ -516,10 +548,16 @@ def request_draft_change(
         _draft_store[cloned.draft_id] = cloned
         draft = cloned
 
-        session = _session_store.get(request.session_id)
+        session = _session_store.get_session(request.session_id)
         if session:
             session.current_draft_id = cloned.draft_id
             session.current_draft_version = cloned.version
+            # After cloning a confirmed/locked draft, transition session back
+            # to DRAFT_READY so the workbench knows the draft is editable.
+            with contextlib.suppress(TransitionError):
+                session = _state_machine.transition(
+                    session, DraftSessionStatus.DRAFT_READY
+                )
             _session_store.update_session(session)
 
     proposal = _change_agent.generate(
@@ -870,11 +908,12 @@ def list_capabilities() -> dict[str, Any]:
 def generate_code_extension(
     extension_id: str, request: CodeExtensionGenerateRequest | None = None
 ) -> CodeExtensionSpec:
-    """Trigger code generation for a code extension (mock).
+    """Trigger code generation for a code extension via the LLM client.
 
-    Transitions spec_reviewed -> generating -> generated and stores a
-    placeholder code string.  Actual LLM code generation will be
-    integrated later.
+    Transitions ``spec_reviewed`` -> ``generating`` -> ``generated`` and
+    stores the code returned by the LLM.  When the LLM is unavailable
+    the endpoint falls back to a deterministic placeholder string so
+    that the workflow can still complete.
     """
     spec = _extension_store.get(extension_id)
     if not spec:
@@ -886,8 +925,8 @@ def generate_code_extension(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    # Placeholder generated code (mock)
-    placeholder_code = (
+    # Default placeholder (used when LLM is unavailable / fails).
+    generated_code = (
         f"# Auto-generated code extension: {spec.extension_id}\n"
         f"# Type: {spec.extension_type}\n"
         f"# Requirement: {spec.requirement}\n"
@@ -897,12 +936,45 @@ def generate_code_extension(
         f"        'Code generation placeholder for {spec.extension_id}'\n"
         f"    )\n"
     )
+    review_notes = ""
+    session_id = (
+        request.session_id if request and request.session_id else spec.session_id
+    )
+
+    # Invoke LLM for code generation (best-effort).
+    try:
+        output, _record = _llm_client.call(
+            purpose="code_generation",
+            prompt_name="code_extension_generate",
+            system_prompt="You generate Python code for fluid_scientist code extensions.",
+            user_message=(
+                f"Extension type: {spec.extension_type}\n"
+                f"Requirement: {spec.requirement}\n"
+                f"Files to modify: {spec.files_to_create_or_modify}"
+            ),
+            session_id=session_id,
+        )
+        # If LLM produced a code block, use it.
+        if isinstance(output, dict):
+            llm_code = output.get("code") or output.get("generated_code")
+            if llm_code:
+                generated_code = str(llm_code)
+            llm_notes = output.get("notes") or output.get("review_notes")
+            if llm_notes:
+                review_notes = str(llm_notes)
+    except Exception:  # noqa: BLE001 - LLM failures must not break the endpoint
+        pass  # LLM is best-effort
 
     try:
         spec = spec.transition_to("generated")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
-    spec = spec.model_copy(update={"generated_code": placeholder_code})
+    spec = spec.model_copy(
+        update={
+            "generated_code": generated_code,
+            "review_notes": review_notes,
+        }
+    )
 
     _extension_store[extension_id] = spec
     return spec
@@ -933,23 +1005,71 @@ def test_code_extension(
 def review_code_extension(
     extension_id: str, request: CodeExtensionReviewRequest
 ) -> CodeExtensionSpec:
-    """Review generated code and approve or reject it (mock).
+    """Review generated code and approve or reject it via the LLM client.
 
-    If approved, transitions tested -> approved.
-    If rejected, transitions to rejected.
+    If approved, transitions ``tested`` -> ``approved``.
+    If rejected, transitions to ``rejected``.
+
+    Before the human-facing approve/reject happens, an LLM review is
+    requested in the background to enrich ``review_notes`` with
+    automated feedback.  LLM failures are silently ignored so the
+    workflow is never blocked.
     """
     spec = _extension_store.get(extension_id)
     if not spec:
         raise HTTPException(status_code=404, detail="Code extension not found")
 
+    # Invoke LLM for automated code review (best-effort).
+    llm_review: dict | None = None
+    try:
+        output, _record = _llm_client.call(
+            purpose="code_review",
+            prompt_name="code_extension_review",
+            system_prompt="You review code for safety, correctness, and adherence to spec.",
+            user_message=(
+                f"Extension: {spec.extension_id}\n"
+                f"Code: {spec.generated_code[:500] if spec.generated_code else ''}\n"
+                f"Spec: {spec.requirement}"
+            ),
+            session_id=spec.session_id,
+        )
+        if isinstance(output, dict):
+            llm_review = output
+    except Exception:  # noqa: BLE001 - LLM failures must not break the endpoint
+        pass
+
+    # Compose the final review notes: start with whatever the human
+    # supplied and append the LLM feedback (if any) for traceability.
+    final_notes = request.review_notes or ""
+    if llm_review:
+        llm_feedback = (
+            llm_review.get("feedback")
+            or llm_review.get("notes")
+            or llm_review.get("review_notes")
+            or ""
+        )
+        llm_verdict = llm_review.get("verdict") or llm_review.get("status")
+        llm_summary_lines: list[str] = []
+        if llm_verdict:
+            llm_summary_lines.append(f"LLM verdict: {llm_verdict}")
+        if llm_feedback:
+            llm_summary_lines.append(f"LLM feedback: {llm_feedback}")
+        if llm_summary_lines:
+            llm_section = " | ".join(llm_summary_lines)
+            final_notes = (
+                f"{final_notes}\n{llm_section}" if final_notes else llm_section
+            )
+
     if request.approved:
         try:
-            spec = _extension_workflow.approve(spec, request.review_notes)
+            spec = _extension_workflow.approve(spec, final_notes)
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
     else:
         try:
-            spec = _extension_workflow.reject(spec, request.review_notes or "Rejected by reviewer")
+            spec = _extension_workflow.reject(
+                spec, final_notes or "Rejected by reviewer"
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
 
