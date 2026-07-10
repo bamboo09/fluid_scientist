@@ -1514,6 +1514,130 @@ def register_code_extension(
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Compile-Ready Pipeline endpoint  (new V5 workflow)
+# ---------------------------------------------------------------------------
+
+
+class PipelineRunRequest(BaseModel):
+    session_id: str | None = None
+    user_description: str
+    pre_extracted: dict[str, Any] | None = None
+    work_root: str | None = None
+
+
+class PipelineRunResponse(BaseModel):
+    session_id: str
+    status: str
+    current_stage: str
+    stage_history: list[dict[str, Any]] = Field(default_factory=list)
+    compile_ready_view: dict[str, Any] | None = None
+    failure: dict[str, Any] | None = None
+    case_dir: str | None = None
+    generated_files: list[str] = Field(default_factory=list)
+
+
+@router.post("/pipeline/run", response_model=PipelineRunResponse)
+def run_compile_ready_pipeline(request: PipelineRunRequest) -> PipelineRunResponse:
+    """Run the full Compile-Ready pipeline end-to-end.
+
+    Accepts a natural-language research description and returns either a
+    fully validated COMPILE_READY draft view or a structured failure.
+    Progress stages are returned in ``stage_history``.
+    """
+    from fluid_scientist.workflow_pipeline import (
+        PipelineStatus,
+        V5WorkflowPipeline,
+    )
+    from fluid_scientist.capabilities import get_capability_registry
+
+    registry = get_capability_registry()
+    pipeline = V5WorkflowPipeline(
+        work_root=request.work_root,
+        registry=registry,
+        llm_client=_llm_client,
+    )
+    state = pipeline.run(
+        user_description=request.user_description,
+        session_id=request.session_id,
+        pre_extracted=request.pre_extracted,
+    )
+    # Store draft view keyed by session
+    if state.draft_view:
+        _draft_store[state.draft_view.get("draft_id", state.session_id)] = _legacy_draft_from_view(state.draft_view)
+    return PipelineRunResponse(
+        session_id=state.session_id,
+        status=state.current_stage,
+        current_stage=state.current_stage,
+        stage_history=[s.model_dump() for s in state.stage_history],
+        compile_ready_view=state.draft_view,
+        failure=state.failure,
+        case_dir=state.case_dir,
+        generated_files=state.case_manifest.get("generated_files", []),
+    )
+
+
+@router.get("/pipeline/sessions/{session_id}/progress")
+def get_pipeline_progress(session_id: str) -> dict[str, Any]:
+    """Return progress information for a pipeline session.
+
+    This is a lightweight endpoint the frontend polls during long-running
+    pipeline stages.
+    """
+    # For the initial implementation progress is embedded in the run response;
+    # this endpoint provides a stable URL for future websocket/SSE progress.
+    session = _session_store.get_session(session_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {
+        "session_id": session_id,
+        "status": session.status,
+        "current_draft_id": session.current_draft_id,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _legacy_draft_from_view(view: dict[str, Any]) -> ExperimentDraft:
+    """Best-effort conversion from CompileReadyDraftView to legacy ExperimentDraft."""
+    from fluid_scientist.draft.models import DraftParameter, ParameterSource
+    params: list[DraftParameter] = []
+    for name, value in view.get("design", {}).items():
+        params.append(DraftParameter(
+            parameter_id=name,
+            display_name=name,
+            value=value.get("value") if isinstance(value, dict) else value,
+            unit=value.get("unit") if isinstance(value, dict) else None,
+            source=ParameterSource.DERIVED,
+            source_reason=value.get("reason", "") if isinstance(value, dict) else "",
+        ))
+    return ExperimentDraft(
+        draft_id=view.get("draft_id", str(uuid.uuid4())),
+        session_id=view.get("session_id", ""),
+        version=view.get("draft_version", 1),
+        status=DraftStatus.READY if view.get("status") == "compile_ready" else DraftStatus.DRAFT,
+        objective=view.get("research_objective", ""),
+        geometry=view.get("geometry", {}),
+        materials=view.get("materials", {}),
+        physics_models=view.get("physical_models", {}),
+        boundary_conditions=view.get("boundary_conditions", {}),
+        initial_conditions=view.get("initial_conditions", {}),
+        solver=view.get("solver", {}),
+        numerics=view.get("numerics", {}),
+        mesh=view.get("mesh", {}),
+        measurement_plan={
+            "scientific_metrics": view.get("scientific_metrics", []),
+            "boundary_verification_metrics": view.get("boundary_verification_metrics", []),
+            "credibility_metrics": view.get("credibility_metrics", []),
+        },
+        control_parameters=params,
+        validation_result=view.get("validation_results", {}),
+    )
+
+
 def _route_to_message_type(route_type: str) -> str:
     mapping = {
         "new_research_request": "research_request",
