@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import copy
 from datetime import datetime
-from types import SimpleNamespace
 from typing import Any, ClassVar, Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from fluid_scientist.capabilities.models import CapabilityRegistry, MissingCapability
+from fluid_scientist.capabilities.models import CapabilityRegistry
+from fluid_scientist.case_plan.models import MissingCapability
 from fluid_scientist.compat import UTC
 
 # ---------------------------------------------------------------------------
@@ -39,6 +39,8 @@ ExtensionType = Literal[
     "analysis_plugin",
     "metric_operator",
     "parameter_definition",
+    "solver_extension",
+    "post_processor",
     # Legacy types kept for backward compatibility
     "boundary_condition",
     "geometry_generator",
@@ -48,6 +50,7 @@ ExtensionType = Literal[
 ]
 
 SpecStatus = Literal[
+    # v5 workflow states
     "spec_draft",
     "spec_reviewed",
     "generating",
@@ -57,6 +60,13 @@ SpecStatus = Literal[
     "approved",
     "rejected",
     "registered",
+    # Legacy workflow states (capabilities.models.CodeExtensionSpec)
+    "draft",
+    "sandbox_tested",
+    "auto_tested",
+    "conditionally_approved",
+    "revision_required",
+    "sandbox_only",
 ]
 
 # ---------------------------------------------------------------------------
@@ -137,6 +147,8 @@ _VALID_EXTENSION_TYPES: frozenset[str] = frozenset(
         "analysis_plugin",
         "metric_operator",
         "parameter_definition",
+        "solver_extension",
+        "post_processor",
         # Legacy types kept for backward compatibility
         "boundary_condition",
         "geometry_generator",
@@ -155,11 +167,24 @@ _VALID_EXTENSION_TYPES: frozenset[str] = frozenset(
 class CodeExtensionSpec(BaseModel):
     """Specification for a code extension generated to fill a capability gap.
 
-    Lifecycle::
+    Lifecycle (v5)::
 
         spec_draft -> spec_reviewed -> generating -> generated -> testing -> tested
             -> approved -> registered
             \\-> rejected (from any non-terminal state)
+
+    Lifecycle (legacy)::
+
+        draft -> sandbox_tested -> auto_tested -> approved -> registered
+                                              \\-> conditionally_approved -> registered
+                                              \\-> rejected
+        draft -> rejected
+
+    This model unifies the v5 spec (from ``code_extension/spec.py``) and the
+    legacy spec (from ``capabilities/models.py``).  All legacy fields are
+    present as optional with backward-compatible defaults.  ``status`` is
+    the canonical lifecycle field; ``state`` is provided as a property alias
+    for legacy code.
 
     Attributes:
         extension_id: Unique identifier for this extension.
@@ -186,10 +211,10 @@ class CodeExtensionSpec(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     extension_id: str
-    session_id: str
+    session_id: str = ""
     draft_id: str | None = None
-    extension_type: ExtensionType
-    missing_capability_id: str
+    extension_type: ExtensionType = "analysis_plugin"  # type: ignore[assignment]
+    missing_capability_id: str = ""
     requirement: str = ""
     risk_level: Literal["low", "medium", "high"] = "medium"
     files_to_create_or_modify: list[str] = Field(default_factory=list)
@@ -200,14 +225,31 @@ class CodeExtensionSpec(BaseModel):
     safety_constraints: list[dict[str, Any]] = Field(
         default_factory=_default_safety_constraints
     )
-    status: SpecStatus = "spec_draft"
+    status: SpecStatus = "spec_draft"  # type: ignore[assignment]
     generated_code: str | None = None
     test_results: dict[str, Any] | None = None
     review_notes: str = ""
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
-    # Backward-compatible alias for ``requirement``
+    # -- Legacy fields (from capabilities.models.CodeExtensionSpec) ---------
+    extension_name: str = ""
+    rationale: str = ""
+    required_inputs: list[str] = Field(default_factory=list)
+    expected_outputs: list[str] = Field(default_factory=list)
+    code_language: str = "python"
+    unit_tests: list[dict[str, Any]] = Field(default_factory=list)
+    benchmark_tests: list[dict[str, Any]] = Field(default_factory=list)
+    security_checks: list[dict[str, Any]] = Field(default_factory=list)
+    approval_comment: str | None = None
+    approved_by: str | None = None
+    approved_at: str | None = None
+    related_capability_id: str | None = None
+    research_session_id: str | None = None  # alias for session_id
+    experiment_spec_id: str | None = None
+
+    # -- Backward-compatible aliases ----------------------------------------
+
     @property
     def description(self) -> str:
         """Backward-compatible alias for :attr:`requirement`."""
@@ -217,20 +259,49 @@ class CodeExtensionSpec(BaseModel):
     def description(self, value: str) -> None:
         self.requirement = value
 
+    @property
+    def state(self) -> str:
+        """Backward-compatible alias for :attr:`status`."""
+        return self.status
+
+    @state.setter
+    def state(self, value: str) -> None:
+        self.status = value  # type: ignore[assignment]
+
     @model_validator(mode="before")
     @classmethod
-    def _alias_description_to_requirement(cls, data: Any) -> Any:
-        """Accept ``description`` as an input alias for ``requirement``."""
+    def _alias_legacy_fields(cls, data: Any) -> Any:
+        """Accept legacy field names as input aliases.
+
+        Handles:
+        - ``description`` -> ``requirement``
+        - ``state`` -> ``status``
+        - ``research_session_id`` can populate ``session_id`` if absent
+        - ``related_capability_id`` can populate ``missing_capability_id`` if absent
+        """
         if isinstance(data, dict):
             if "description" in data and "requirement" not in data:
                 data = {**data, "requirement": data.pop("description")}
             elif "description" in data:
                 data.pop("description")
+            if "state" in data and "status" not in data:
+                data = {**data, "status": data.pop("state")}
+            elif "state" in data:
+                data.pop("state")
+            # research_session_id aliases to session_id (legacy -> v5)
+            rsid = data.get("research_session_id")
+            if rsid and not data.get("session_id"):
+                data["session_id"] = rsid
+            # related_capability_id aliases to missing_capability_id (legacy -> v5)
+            rcid = data.get("related_capability_id")
+            if rcid and not data.get("missing_capability_id"):
+                data["missing_capability_id"] = rcid
         return data
 
     # -- State machine -------------------------------------------------------
 
     _VALID_TRANSITIONS: ClassVar[dict[str, frozenset[str]]] = {
+        # v5 workflow
         "spec_draft": frozenset({"spec_reviewed", "rejected"}),
         "spec_reviewed": frozenset({"generating", "rejected"}),
         "generating": frozenset({"generated", "rejected"}),
@@ -238,16 +309,36 @@ class CodeExtensionSpec(BaseModel):
         "testing": frozenset({"tested", "rejected"}),
         "tested": frozenset({"approved", "rejected"}),
         "approved": frozenset({"registered", "rejected"}),
-        "rejected": frozenset(),  # terminal
-        "registered": frozenset(),  # terminal
+        # Legacy workflow
+        "draft": frozenset({"sandbox_tested", "rejected"}),
+        "sandbox_tested": frozenset({"auto_tested", "rejected", "revision_required"}),
+        "auto_tested": frozenset(
+            {"approved", "conditionally_approved", "rejected", "revision_required"}
+        ),
+        "conditionally_approved": frozenset({"registered", "rejected"}),
+        "revision_required": frozenset({"draft"}),
+        "sandbox_only": frozenset({"approved", "rejected"}),
+        # Terminal states
+        "rejected": frozenset(),
+        "registered": frozenset(),
     }
+
+    _LEGACY_APPROVAL_STATES: ClassVar[frozenset[str]] = frozenset(
+        {"approved", "conditionally_approved"}
+    )
 
     def can_transition_to(self, new_status: str) -> bool:
         """Check whether *new_status* is reachable from the current status."""
         return new_status in self._VALID_TRANSITIONS.get(self.status, frozenset())
 
-    def transition_to(self, new_status: str) -> CodeExtensionSpec:
+    def transition_to(
+        self, new_status: str, comment: str | None = None
+    ) -> CodeExtensionSpec:
         """Return a copy transitioned to *new_status*.
+
+        Args:
+            new_status: Target status/state value (v5 or legacy name).
+            comment: Optional approval/transition comment (legacy compatibility).
 
         Raises:
             ValueError: If the transition is not valid for the current status.
@@ -256,12 +347,22 @@ class CodeExtensionSpec(BaseModel):
             raise ValueError(
                 f"Invalid transition: {self.status} -> {new_status}"
             )
-        return self.model_copy(
-            update={
-                "status": new_status,
-                "updated_at": datetime.now(UTC),
-            }
-        )
+        updates: dict[str, Any] = {
+            "status": new_status,
+            "updated_at": datetime.now(UTC),
+        }
+        if comment is not None:
+            updates["approval_comment"] = comment
+            # Also set review_notes for v5 compatibility
+            existing_notes = self.review_notes
+            if existing_notes:
+                updates["review_notes"] = f"{existing_notes}\n{comment}"
+            else:
+                updates["review_notes"] = comment
+        if new_status in self._LEGACY_APPROVAL_STATES:
+            updates["approved_by"] = "expert"
+            updates["approved_at"] = datetime.now(UTC).isoformat()
+        return self.model_copy(update=updates)
 
 
 # ---------------------------------------------------------------------------
@@ -617,37 +718,11 @@ class CodeExtensionWorkflow:
             ValueError: If the spec is not in ``approved`` status.
         """
         updated = spec.transition_to("registered")
-
-        # The CapabilityRegistry.register() method expects the legacy
-        # CodeExtensionSpec shape (with ``state``, ``extension_name``,
-        # ``required_inputs``, etc.). We build a duck-typed adapter so
-        # that the new spec can be registered without modifying the
-        # registry's public API.
-        entry = _make_registry_entry(updated)
-        adapter = SimpleNamespace(state="registered", **entry)
-        registry.register(adapter)
-
+        # The unified CapabilityRegistry.register() accepts the v5
+        # CodeExtensionSpec directly (it uses duck-typed attribute access
+        # to handle both v5 and legacy field names).
+        registry.register(updated)
         return updated
-
-
-def _make_registry_entry(spec: CodeExtensionSpec) -> dict[str, Any]:
-    """Build a registry entry dict from a :class:`CodeExtensionSpec`."""
-    return {
-        "extension_id": spec.extension_id,
-        "extension_name": spec.requirement[:200] if spec.requirement else spec.extension_id,
-        "extension_type": spec.extension_type,
-        "description": spec.requirement,
-        "required_inputs": [
-            i.get("name", str(i)) if isinstance(i, dict) else str(i)
-            for i in spec.inputs
-        ],
-        "expected_outputs": [
-            o.get("name", str(o)) if isinstance(o, dict) else str(o)
-            for o in spec.outputs
-        ],
-        "generated_code": spec.generated_code,
-        "related_capability_id": spec.missing_capability_id,
-    }
 
 
 __all__ = [

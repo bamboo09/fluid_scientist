@@ -113,8 +113,24 @@ class TestCallRecording:
         # The record should validate successfully
         assert record.purpose == "explanation"
         assert record.fallback_used is True
-        # The original purpose should be noted in fallback_reason
-        assert "original_purpose=completely_unknown_purpose" in (record.fallback_reason or "")
+        # The original purpose must be preserved in original_purpose (not in fallback_reason)
+        assert record.original_purpose == "completely_unknown_purpose"
+        # fallback_reason should be clean (no original_purpose hack)
+        assert record.fallback_reason is not None
+        assert "original_purpose" not in record.fallback_reason
+
+    def test_known_purpose_has_no_original_purpose(self) -> None:
+        """Known purposes should leave original_purpose as None."""
+        client = LLMClient()
+        _result, record = client.call(
+            purpose="study_decomposition",
+            prompt_name="test",
+            system_prompt="sys",
+            user_message="hello",
+            session_id="sess-1",
+        )
+        assert record.purpose == "study_decomposition"
+        assert record.original_purpose is None
 
 
 # ---------------------------------------------------------------------------

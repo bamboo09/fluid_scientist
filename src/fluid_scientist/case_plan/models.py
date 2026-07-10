@@ -33,6 +33,10 @@ class MissingCapability(BaseModel):
     (``"blocking"``) or merely produces a warning (``"warning"``).
     ``extension_spec_id`` links to a :class:`CodeExtensionSpec` that, once
     approved and registered, would satisfy this capability.
+
+    Legacy fields from the original ``capabilities.models.MissingCapability``
+    are included as optional with backward-compatible defaults so that older
+    code paths (metric planner, capability resolver, etc.) continue to work.
     """
 
     capability_id: str
@@ -47,6 +51,20 @@ class MissingCapability(BaseModel):
         "create_code_extension",
     ] = "create_code_extension"
     alternative_options: list[dict] = Field(default_factory=list)
+
+    # -- Legacy fields (from capabilities.models.MissingCapability) ---------
+    requested_behavior: str = ""
+    code_extension_allowed: bool = True
+    required_inputs: list[str] = Field(default_factory=list)
+    expected_outputs: list[str] = Field(default_factory=list)
+    suggested_extension_type: str | None = None
+    related_metric_ids: list[str] = Field(default_factory=list)
+    related_parameter_ids: list[str] = Field(default_factory=list)
+    source_module: str = ""
+
+    def is_blocking(self) -> bool:
+        """Return ``True`` if this missing capability blocks compilation."""
+        return self.severity == "blocking"
 
 
 # ---------------------------------------------------------------------------

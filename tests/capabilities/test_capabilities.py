@@ -125,15 +125,16 @@ class TestMissingCapability:
         )
         assert cap.is_blocking() is False
 
-    def test_default_severity_is_warning(self) -> None:
+    def test_default_severity_is_blocking(self) -> None:
         cap = MissingCapability(
             capability_id="cap_default",
             capability_type=CapabilityType.ANALYSIS_PLUGIN,
             requested_behavior="test",
             reason="test",
         )
-        assert cap.severity == "warning"
-        assert cap.is_blocking() is False
+        # Unified model defaults to "blocking" (v5 default, fail-closed).
+        assert cap.severity == "blocking"
+        assert cap.is_blocking() is True
 
     def test_source_module_field(self) -> None:
         """Test 15: MissingCapability has correct source_module field."""

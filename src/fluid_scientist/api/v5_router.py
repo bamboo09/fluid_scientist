@@ -247,6 +247,13 @@ def _decompose_message(message: str) -> BatchStudyPlan:
     check_results = {
         s.study_id: _checker.check(s) for s in study_intents
     }
+    # Propagate readiness_level from capability check to each study
+    for s in study_intents:
+        cr = check_results.get(s.study_id)
+        if cr is not None:
+            s.readiness_level = cr.readiness_level
+            s.capability_requirements = cr.supported_capabilities
+            s.likely_missing_capabilities = cr.missing_capabilities
     ranked = _ranker.rank(study_intents, check_results)
 
     batch = BatchStudyPlan(
@@ -364,10 +371,14 @@ def send_message(
     response_actions: list[dict] = []
 
     if route.input_type == "batch_research_request":
-        # Record an LLM call for study decomposition (deterministic extractor
-        # remains primary; the LLM result is captured for audit/debugging).
+        # Run deterministic decomposition first (primary path).
+        batch = _decompose_message(request.message)
+
+        # Optionally invoke LLM for study decomposition; merge any additional
+        # studies it suggests that the deterministic splitter did not find.
+        llm_studies_output: list[dict] | None = None
         with contextlib.suppress(Exception):
-            _llm_client.call(
+            llm_output, _record = _llm_client.call(
                 purpose="study_decomposition",
                 prompt_name="study_decomposer",
                 system_prompt="Decompose the user's research request into one or more CFD studies.",
@@ -375,8 +386,27 @@ def send_message(
                 session_id=session_id,
                 input_refs=[msg.message_id],
             )
+            if isinstance(llm_output, dict):
+                studies_val = llm_output.get("studies")
+                if isinstance(studies_val, list):
+                    llm_studies_output = studies_val
 
-        batch = _decompose_message(request.message)
+        if llm_studies_output:
+            existing_titles = {s.title.strip().lower() for s in batch.studies}
+            for llm_study in llm_studies_output:
+                title = (llm_study.get("title") or "").strip()
+                if title and title.lower() not in existing_titles:
+                    batch.studies.append(StudyIntent(
+                        study_id=f"llm_{uuid.uuid4().hex[:8]}",
+                        title=title[:100],
+                        raw_text=title,
+                        study_type=llm_study.get("study_type", "unknown"),
+                        research_objective=llm_study.get("research_objective", title),
+                        geometry=llm_study.get("geometry", {"type": "unknown"}),
+                        physical_models=llm_study.get("physical_models", {}),
+                        confidence=llm_study.get("confidence", 0.3),
+                    ))
+                    existing_titles.add(title.lower())
 
         # Transition session to batch_review
         try:
@@ -738,6 +768,28 @@ def select_study(batch_id: str, request: SelectStudyRequest) -> dict[str, Any]:
             break
     if study is None:
         raise HTTPException(status_code=404, detail="Study not found in batch")
+
+    # Guard against selecting studies that are not yet compilable.
+    if study.readiness_level == "not_compilable_yet":
+        # Collect blocking issues from ambiguity report and missing capabilities.
+        blocking_ambiguities = [
+            a.model_dump()
+            for a in (study.ambiguity_report or [])
+            if a.severity == "blocking_for_case_generation"
+        ]
+        blocking_caps = [
+            c for c in (study.likely_missing_capabilities or [])
+            if c.get("severity") == "blocking"
+        ]
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "message": "Study is not compilable yet",
+                "study_id": request.study_id,
+                "blocking_issues": blocking_ambiguities + blocking_caps,
+                "recommendation": "Resolve blocking issues or select a different study",
+            },
+        )
 
     session = _session_store.get_session(request.session_id)
     if session:

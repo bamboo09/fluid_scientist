@@ -1,59 +1,84 @@
-"""Unified MissingCapability and CodeExtension data structures."""
+"""Unified MissingCapability and CodeExtension data structures.
+
+This module re-exports the canonical model classes from their v5 homes:
+
+- :class:`MissingCapability` lives in :mod:`fluid_scientist.case_plan.models`
+- :class:`CodeExtensionSpec` lives in :mod:`fluid_scientist.code_extension.spec`
+
+Legacy constants and helper classes (``StrictModel``, ``CapabilityType``,
+``CompilerCapability``, ``CapabilityRegistry``) remain defined here for
+backward compatibility.
+
+Both ``MissingCapability`` and ``CodeExtensionSpec`` are imported lazily via
+module-level ``__getattr__`` (PEP 562) to avoid circular imports:
+
+* ``code_extension.spec`` imports ``CapabilityRegistry`` from this module.
+* ``case_plan.__init__`` (triggered by importing ``case_plan.models``)
+  eventually imports ``CapabilityRegistry`` from this module through
+  ``study_decomposition.capability_checker``.
+"""
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any, ClassVar, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from fluid_scientist.compat import UTC
+if TYPE_CHECKING:
+    from fluid_scientist.case_plan.models import MissingCapability as _MissingCapability
+    from fluid_scientist.code_extension.spec import CodeExtensionSpec as _CodeExtensionSpec
+
+    MissingCapability = _MissingCapability
+    CodeExtensionSpec = _CodeExtensionSpec
+
+# ---------------------------------------------------------------------------
+# StrictModel
+# ---------------------------------------------------------------------------
 
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", allow_inf_nan=False, strict=True)
 
 
+# ---------------------------------------------------------------------------
+# CapabilityType constants (aligned with v5 ExtensionType)
+# ---------------------------------------------------------------------------
+
+
 class CapabilityType:
-    """Capability type constants."""
+    """Capability type constants.
 
-    METRIC_OPERATOR = "metric_operator"
-    BOUNDARY_CONDITION = "boundary_condition"
-    SOLVER_EXTENSION = "solver_extension"
-    POST_PROCESSOR = "post_processor"
-    MESH_GENERATOR = "mesh_generator"
-    ANALYSIS_PLUGIN = "analysis_plugin"
-
-
-class MissingCapability(BaseModel):
-    """统一缺失能力数据结构。
-
-    Multiple sources can generate MissingCapability:
-    - Intent Engine (unsupported research objective)
-    - Dynamic Schema (unknown physics)
-    - Metric Planner (unknown metric)
-    - Measurement Compiler (unsupported functionObject)
-    - Solver Capability Resolver (missing solver feature)
-    - Experiment Compiler (unsupported experiment type)
-    - Result Ingestor (unsupported result format)
-    - Metric Executor (unsupported calculation)
+    Updated to align with the v5 ``ExtensionType`` literal in
+    :mod:`fluid_scientist.code_extension.spec`.  Legacy constant names are
+    preserved as aliases so older call sites continue to work.
     """
 
-    capability_id: str
-    capability_type: str  # CapabilityType constants
-    requested_behavior: str
-    reason: str
-    severity: Literal["warning", "blocking"] = "warning"
-    code_extension_allowed: bool = True
-    required_inputs: list[str] = Field(default_factory=list)
-    expected_outputs: list[str] = Field(default_factory=list)
-    suggested_extension_type: str | None = None
-    related_metric_ids: list[str] = Field(default_factory=list)
-    related_parameter_ids: list[str] = Field(default_factory=list)
-    source_module: str = ""  # which module detected this
+    # v5-aligned types
+    METRIC_OPERATOR = "metric_operator"
+    BOUNDARY_CONDITION = "boundary_condition"
+    BOUNDARY_CONDITION_WRITER = "boundary_condition_writer"
+    SOLVER_EXTENSION = "solver_extension"
+    POST_PROCESSOR = "post_processor"
+    POSTPROCESS_METRIC = "postprocess_metric"
+    MESH_GENERATOR = "mesh_generator"
+    MESH_GENERATOR_PLUGIN = "mesh_generator_plugin"
+    GEOMETRY_GENERATOR = "geometry_generator"
+    GEOMETRY_GENERATOR_PLUGIN = "geometry_generator_plugin"
+    ANALYSIS_PLUGIN = "analysis_plugin"
+    PYTHON_METRIC = "python_metric"
+    CASE_COMPILER_PLUGIN = "case_compiler_plugin"
+    INITIAL_CONDITION_GENERATOR = "initial_condition_generator"
+    INITIAL_CONDITION_WRITER = "initial_condition_writer"
+    PHYSICAL_MODEL_WRITER = "physical_model_writer"
+    FUNCTION_OBJECT_WRITER = "function_object_writer"
+    PARAMETER_DEFINITION = "parameter_definition"
+    OPENFOAM_FUNCTION_OBJECT_WRITER = "openfoam_function_object_writer"
+    SOLVER = "solver"
 
-    def is_blocking(self) -> bool:
-        return self.severity == "blocking"
+
+# ---------------------------------------------------------------------------
+# CompilerCapability (unchanged)
+# ---------------------------------------------------------------------------
 
 
 class CompilerCapability(StrictModel):
@@ -84,136 +109,103 @@ class CompilerCapability(StrictModel):
     limitations: list[str] = Field(default_factory=list)
 
 
-class CodeExtensionSpec(BaseModel):
-    """代码扩展规格 — 描述需要开发的代码扩展。
-
-    Lifecycle: DRAFT → SANDBOX_TESTED → AUTO_TESTED → APPROVED → REGISTERED
-                                                    ↘ REJECTED
-    """
-
-    extension_id: str
-    extension_name: str
-    extension_type: str  # metric_operator, boundary_condition, etc.
-
-    description: str
-    rationale: str  # why this extension is needed
-
-    required_inputs: list[str] = Field(default_factory=list)
-    expected_outputs: list[str] = Field(default_factory=list)
-
-    # Generated code
-    generated_code: str | None = None
-    code_language: str = "python"
-
-    # Test results
-    unit_tests: list[dict[str, Any]] = Field(default_factory=list)
-    benchmark_tests: list[dict[str, Any]] = Field(default_factory=list)
-    security_checks: list[dict[str, Any]] = Field(default_factory=list)
-
-    # Approval
-    state: Literal[
-        "draft",
-        "sandbox_tested",
-        "auto_tested",
-        "approved",
-        "conditionally_approved",
-        "rejected",
-        "revision_required",
-        "sandbox_only",
-        "registered",
-    ] = "draft"
-    approval_comment: str | None = None
-    approved_by: str | None = None
-    approved_at: str | None = None
-
-    # Linking
-    related_capability_id: str | None = None
-    research_session_id: str | None = None
-    experiment_spec_id: str | None = None
-
-    created_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
-    updated_at: str = Field(default_factory=lambda: datetime.now(UTC).isoformat())
-
-    # Transition validation
-    _VALID_TRANSITIONS: ClassVar[dict[str, set[str]]] = {
-        "draft": {"sandbox_tested", "rejected"},
-        "sandbox_tested": {"auto_tested", "rejected", "revision_required"},
-        "auto_tested": {
-            "approved",
-            "conditionally_approved",
-            "rejected",
-            "revision_required",
-        },
-        "approved": {"registered"},
-        "conditionally_approved": {"registered", "rejected"},
-        "revision_required": {"draft"},
-        "sandbox_only": {"approved", "rejected"},
-        "registered": set(),  # terminal state
-        "rejected": set(),  # terminal state
-    }
-
-    def can_transition_to(self, new_state: str) -> bool:
-        return new_state in self._VALID_TRANSITIONS.get(self.state, set())
-
-    def transition_to(
-        self, new_state: str, comment: str | None = None
-    ) -> CodeExtensionSpec:
-        if not self.can_transition_to(new_state):
-            raise ValueError(f"Invalid transition: {self.state} → {new_state}")
-        return self.model_copy(
-            update={
-                "state": new_state,
-                "approval_comment": comment,
-                "updated_at": datetime.now(UTC).isoformat(),
-                **(
-                    {
-                        "approved_by": "expert",
-                        "approved_at": datetime.now(UTC).isoformat(),
-                    }
-                    if new_state in ("approved", "conditionally_approved")
-                    else {}
-                ),
-            }
-        )
+# ---------------------------------------------------------------------------
+# CapabilityRegistry — updated to work with the unified v5 CodeExtensionSpec
+# ---------------------------------------------------------------------------
 
 
 class CapabilityRegistry:
     """Registry of registered capabilities (code extensions that have been approved)."""
 
+    # States considered "registered/approved" for both legacy and v5 lifecycles.
+    _APPROVED_STATES: ClassVar[frozenset[str]] = frozenset(
+        {"approved", "conditionally_approved", "registered"}
+    )
+
     def __init__(self) -> None:
         self._capabilities: dict[str, dict[str, Any]] = {}
 
-    def register(self, extension: CodeExtensionSpec) -> None:
+    def register(self, extension: Any) -> None:
         """Register an approved extension as an available capability.
+
+        Accepts either:
+        - The unified v5 :class:`~fluid_scientist.code_extension.spec.CodeExtensionSpec`
+        - The legacy ``CodeExtensionSpec`` (duck-typed with attribute access)
+        - Any duck-typed object with the expected attributes
 
         The extension is indexed both by its ``extension_id`` and by its
         ``related_capability_id`` (when present) so that
         :meth:`has_capability` can detect whether a missing capability has
         been satisfied by a registered extension.
         """
-        if extension.state not in (
-            "approved",
-            "conditionally_approved",
-            "registered",
-        ):
+        # Resolve status/state: prefer ``status`` (v5), fall back to ``state`` (legacy).
+        status = getattr(extension, "status", None) or getattr(
+            extension, "state", None
+        )
+        if status not in self._APPROVED_STATES:
             raise ValueError(
-                f"Cannot register extension in state '{extension.state}'"
+                f"Cannot register extension in state '{status}'"
             )
+
+        # Helper: read an attribute, falling back to alternative names and a default.
+        def _attr(obj: Any, *names: str, default: Any = None) -> Any:
+            for name in names:
+                val = getattr(obj, name, None)
+                if val is not None:
+                    return val
+            return default
+
+        # Map v5 fields to legacy dict keys for storage.
+        description = _attr(extension, "description", "requirement", default="")
+        extension_name = _attr(extension, "extension_name", default="")
+        if not extension_name:
+            # v5 fallback: derive from requirement
+            req = _attr(extension, "requirement", "description", default="")
+            extension_name = (req[:200] if req else "") or _attr(
+                extension, "extension_id", default=""
+            )
+
+        # For required_inputs / expected_outputs: the v5 model stores
+        # list[dict] in ``inputs``/``outputs`` and also has plain
+        # list[str] fields ``required_inputs``/``expected_outputs``
+        # (legacy).  Prefer the list[str] legacy fields if populated;
+        # otherwise derive from the dict lists.
+        required_inputs = _attr(extension, "required_inputs", default=None)
+        if not required_inputs:
+            raw_inputs = _attr(extension, "inputs", default=[]) or []
+            required_inputs = [
+                i.get("name", str(i)) if isinstance(i, dict) else str(i)
+                for i in raw_inputs
+            ]
+
+        expected_outputs = _attr(extension, "expected_outputs", default=None)
+        if not expected_outputs:
+            raw_outputs = _attr(extension, "outputs", default=[]) or []
+            expected_outputs = [
+                o.get("name", str(o)) if isinstance(o, dict) else str(o)
+                for o in raw_outputs
+            ]
+
+        related_cap_id = _attr(
+            extension, "related_capability_id", "missing_capability_id", default=None
+        )
+
         data = {
-            "extension_id": extension.extension_id,
-            "extension_name": extension.extension_name,
-            "extension_type": extension.extension_type,
-            "description": extension.description,
-            "required_inputs": extension.required_inputs,
-            "expected_outputs": extension.expected_outputs,
-            "generated_code": extension.generated_code,
-            "related_capability_id": extension.related_capability_id,
+            "extension_id": _attr(extension, "extension_id", default=""),
+            "extension_name": extension_name,
+            "extension_type": _attr(extension, "extension_type", default=""),
+            "description": description,
+            "required_inputs": required_inputs,
+            "expected_outputs": expected_outputs,
+            "generated_code": _attr(extension, "generated_code", default=None),
+            "related_capability_id": related_cap_id,
         }
-        self._capabilities[extension.extension_id] = data
+        ext_id = data["extension_id"]
+        self._capabilities[ext_id] = data
         # Also index by related_capability_id so that resolve() can filter
         # capabilities that have been satisfied by a registered extension.
-        if extension.related_capability_id:
-            self._capabilities[extension.related_capability_id] = data
+        if related_cap_id:
+            self._capabilities[related_cap_id] = data
 
     def has_capability(self, capability_id: str) -> bool:
         return capability_id in self._capabilities
@@ -223,6 +215,39 @@ class CapabilityRegistry:
 
     def list_capabilities(self) -> list[dict[str, Any]]:
         return list(self._capabilities.values())
+
+
+# ---------------------------------------------------------------------------
+# Lazy re-exports to break circular imports.
+#
+# code_extension/spec.py imports CapabilityRegistry from this module.
+# case_plan/__init__.py eventually imports CapabilityRegistry through
+# study_decomposition.capability_checker.  If we imported MissingCapability
+# or CodeExtensionSpec at module level we'd create cycles:
+#
+#   capabilities.models → case_plan.models → case_plan (package __init__)
+#     → case_plan.generator → study_decomposition.capability_checker
+#     → capabilities.models  (cycle)
+#
+#   capabilities.models → code_extension.spec → capabilities.models  (cycle)
+#
+# Instead we use module-level __getattr__ (PEP 562) so that
+# ``from fluid_scientist.capabilities.models import MissingCapability``
+# and ``from fluid_scientist.capabilities.models import CodeExtensionSpec``
+# work but the imports are deferred until the names are actually accessed.
+# ---------------------------------------------------------------------------
+
+
+def __getattr__(name: str) -> Any:
+    if name == "CodeExtensionSpec":
+        from fluid_scientist.code_extension.spec import CodeExtensionSpec as _CES
+
+        return _CES
+    if name == "MissingCapability":
+        from fluid_scientist.case_plan.models import MissingCapability as _MC
+
+        return _MC
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 __all__ = [

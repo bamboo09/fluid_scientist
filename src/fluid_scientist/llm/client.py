@@ -115,22 +115,14 @@ class LLMClient:
 
         # Coerce unknown purposes to a valid Literal value so the record
         # always validates; the original purpose is preserved in the
-        # fallback_reason / input_summary for debugging.
-        record_purpose = (
-            purpose if purpose in _ALLOWED_PURPOSES else _FALLBACK_PURPOSE
-        )
-        original_purpose_note = (
-            f" [original_purpose={purpose}]"
-            if purpose not in _ALLOWED_PURPOSES
-            else ""
-        )
+        # ``original_purpose`` field for debugging.
+        purpose_known = purpose in _ALLOWED_PURPOSES
+        record_purpose = purpose if purpose_known else _FALLBACK_PURPOSE
+        record_original_purpose = None if purpose_known else purpose
 
         # Resolve prompt_version: explicit caller value wins, else mock
         # default ("mock-1"), else empty for real provider.
-        if prompt_version:
-            resolved_prompt_version = prompt_version
-        else:
-            resolved_prompt_version = "mock-1" if use_mock else ""
+        resolved_prompt_version = prompt_version or ("mock-1" if use_mock else "")
 
         record = LLMCallRecord(
             call_id=call_id,
@@ -147,9 +139,8 @@ class LLMClient:
             parsed_output=parsed_output,
             success=success,
             fallback_used=use_mock or bool(fallback_reason),
-            fallback_reason=(fallback_reason or "") + original_purpose_note
-            if (fallback_reason or original_purpose_note)
-            else None,
+            fallback_reason=fallback_reason,
+            original_purpose=record_original_purpose,
             error=error,
         )
         self._records.append(record)
