@@ -150,6 +150,7 @@
           <div class="ws-actions">
             <button id="ws-reconnect" class="ws-btn" type="button">重连</button>
             <button id="ws-test-ssh" class="ws-btn" type="button">测试SSH</button>
+            <button id="ws-configure" class="ws-btn" type="button">配置工作站</button>
           </div>
         </section>
       </aside>
@@ -185,6 +186,26 @@
         <label class="file-field" for="custom-case-file"><span>算例归档</span><input id="custom-case-file" type="file" accept=".tar.gz,.tgz,application/gzip"><small>选择文件后先执行安全校验</small></label>
         <output id="custom-case-result" class="dialog-state">尚未校验</output>
         <div class="dialog-actions"><button id="validate-custom-case" class="button button-secondary" type="button">安全校验</button><button id="submit-custom-case" class="button button-primary" type="button" disabled>提交到执行平台</button></div>
+      </form>
+    </dialog>
+
+    <dialog id="workstation-settings" class="settings-dialog" aria-labelledby="workstation-settings-title">
+      <form method="dialog" class="dialog-shell">
+        <header><div><p class="card-kicker">工作站连接</p><h2 id="workstation-settings-title">配置工作站 SSH</h2></div><button class="icon-button" value="cancel" aria-label="关闭工作站配置">×</button></header>
+        <p>填写远程 OpenFOAM 工作站的 SSH 信息，保存后自动连接。密钥路径从 <code id="ws-ssh-dir-hint">~/.ssh</code> 自动探测。</p>
+        <label class="field-label" for="ws-input-host">工作站 IP 地址</label>
+        <input id="ws-input-host" type="text" placeholder="如 10.129.177.241" autocomplete="off" list="ws-host-suggestions">
+        <datalist id="ws-host-suggestions"></datalist>
+        <label class="field-label" for="ws-input-user">SSH 用户名</label>
+        <input id="ws-input-user" type="text" placeholder="如 ls" autocomplete="off">
+        <label class="field-label" for="ws-input-port">SSH 端口</label>
+        <input id="ws-input-port" type="number" value="22" min="1" max="65535">
+        <label class="field-label" for="ws-input-key">密钥文件路径 <span class="field-hint">(可选，已自动探测)</span></label>
+        <input id="ws-input-key" type="text" placeholder="如 C:/Users/you/.ssh/id_ed25519" autocomplete="off">
+        <label class="field-label" for="ws-input-knownhosts">known_hosts 文件路径 <span class="field-hint">(可选，已自动探测)</span></label>
+        <input id="ws-input-knownhosts" type="text" placeholder="如 C:/Users/you/.ssh/known_hosts" autocomplete="off">
+        <p id="ws-config-state" class="dialog-state" role="status"></p>
+        <div class="dialog-actions"><button value="cancel" class="button button-secondary">取消</button><button id="ws-save-config" class="button button-primary" type="button">保存并连接</button></div>
       </form>
     </dialog>
 

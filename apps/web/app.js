@@ -3539,7 +3539,13 @@ async function reconnectWorkstation() {
     if (data.connected) {
       if (text) text.textContent = "已连接";
     } else {
-      const reason = data.error || (data.host ? "连接被拒绝" : "未配置工作站");
+      // If not configured, auto-open the configuration dialog
+      if (!data.host || data.error === "No workstation target configured") {
+        if (text) text.textContent = "未配置工作站";
+        openWorkstationConfigDialog();
+        return;
+      }
+      const reason = data.error || "连接被拒绝";
       if (text) text.textContent = "重连失败: " + reason;
     }
     // Refresh details but don't overwrite the error text we just set
@@ -3568,6 +3574,85 @@ async function testWorkstationSsh() {
     await loadWorkstationStatus(true);
   } catch (e) {
     if (text) text.textContent = "测试失败: " + (e.message || "网络错误");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+// Auto-detect SSH keys and pre-fill the configuration dialog
+async function openWorkstationConfigDialog() {
+  const dialog = document.getElementById("workstation-settings");
+  if (!dialog) return;
+  const state = document.getElementById("ws-config-state");
+  if (state) state.textContent = "正在探测 SSH 密钥和已知主机...";
+
+  try {
+    const detected = await requestJson("/api/workstation/detect");
+    // Pre-fill fields
+    const keyInput = document.getElementById("ws-input-key");
+    const khInput = document.getElementById("ws-input-knownhosts");
+    const hostInput = document.getElementById("ws-input-host");
+    const hint = document.getElementById("ws-ssh-dir-hint");
+    if (hint && detected.ssh_dir) hint.textContent = detected.ssh_dir;
+    if (keyInput && detected.identity_file) keyInput.value = detected.identity_file;
+    if (khInput && detected.known_hosts_file) khInput.value = detected.known_hosts_file;
+    // Populate host suggestions from known_hosts
+    const datalist = document.getElementById("ws-host-suggestions");
+    if (datalist && detected.detected_hosts) {
+      datalist.innerHTML = "";
+      detected.detected_hosts.forEach((h) => {
+        const opt = document.createElement("option");
+        opt.value = h;
+        datalist.appendChild(opt);
+      });
+    }
+    if (state) {
+      if (detected.identity_file) {
+        state.textContent = "已探测到密钥: " + detected.identity_file;
+      } else {
+        state.textContent = "未探测到 SSH 密钥，请手动填写路径";
+      }
+    }
+  } catch (e) {
+    if (state) state.textContent = "探测失败: " + (e.message || "网络错误");
+  }
+
+  dialog.showModal();
+}
+
+async function saveWorkstationConfig() {
+  const btn = document.getElementById("ws-save-config");
+  const state = document.getElementById("ws-config-state");
+  const host = document.getElementById("ws-input-host")?.value.trim();
+  const username = document.getElementById("ws-input-user")?.value.trim();
+  const port = parseInt(document.getElementById("ws-input-port")?.value || "22", 10);
+  const identity_file = document.getElementById("ws-input-key")?.value.trim() || "";
+  const known_hosts_file = document.getElementById("ws-input-knownhosts")?.value.trim() || "";
+
+  if (!host || !username) {
+    if (state) state.textContent = "请填写工作站 IP 和用户名";
+    return;
+  }
+
+  if (btn) btn.disabled = true;
+  if (state) state.textContent = "保存配置并连接中...";
+
+  try {
+    const data = await requestJson("/api/workstation/configure", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ host, username, port, identity_file, known_hosts_file }),
+    });
+    if (data.connected) {
+      if (state) state.textContent = "连接成功! " + (data.foam_version || "");
+      const dialog = document.getElementById("workstation-settings");
+      setTimeout(() => dialog?.close(), 1500);
+      await loadWorkstationStatus();
+    } else {
+      if (state) state.textContent = "配置已保存，但连接失败: " + (data.error || "未知原因");
+    }
+  } catch (e) {
+    if (state) state.textContent = "配置失败: " + (e.message || "网络错误");
   } finally {
     if (btn) btn.disabled = false;
   }
@@ -3610,6 +3695,8 @@ function bindEvents() {
   byId("open-target-settings")?.addEventListener("click", () => openDialog("target-settings"));
   byId("ws-reconnect")?.addEventListener("click", reconnectWorkstation);
   byId("ws-test-ssh")?.addEventListener("click", testWorkstationSsh);
+  byId("ws-configure")?.addEventListener("click", openWorkstationConfigDialog);
+  byId("ws-save-config")?.addEventListener("click", saveWorkstationConfig);
   byId("open-custom-case")?.addEventListener("click", () => openDialog("custom-case-drawer"));
   byId("cancel-operation")?.addEventListener("click", cancelActiveOperation);
   byId("retry-operation")?.addEventListener("click", retryActiveOperation);
