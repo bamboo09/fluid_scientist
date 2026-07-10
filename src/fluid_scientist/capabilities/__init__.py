@@ -1,15 +1,37 @@
-"""MissingCapability and CodeExtension management."""
+"""Unified Capability system.
+
+Exports the new CapabilityRegistry (with native capabilities) alongside
+legacy re-exports for backward compatibility.
+"""
 
 from fluid_scientist.capabilities.models import (
-    CapabilityRegistry,
     CapabilityType,
     CodeExtensionSpec,
+    CompilerCapability,
     MissingCapability,
+    StrictModel,
+)
+from fluid_scientist.capabilities.registry import (
+    CAPABILITY_TYPES,
+    Capability,
+    CapabilityRegistry,
+    CapabilityRequirement,
+    CapabilityStatus,
+    get_capability_registry,
+    reset_registry,
 )
 
 __all__ = [
+    "CAPABILITY_TYPES",
+    "Capability",
     "CapabilityRegistry",
+    "CapabilityRequirement",
+    "CapabilityStatus",
     "CapabilityType",
     "CodeExtensionSpec",
+    "CompilerCapability",
     "MissingCapability",
+    "StrictModel",
+    "get_capability_registry",
+    "reset_registry",
 ]
