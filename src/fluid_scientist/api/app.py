@@ -649,7 +649,8 @@ def create_app(
             "native_compile_enabled": True,
             "measurement_plan_compile_enabled": True,
             "package_version": __version__,
-            "workflow_v2_enabled": runtime_settings.research_workflow_v2,
+            "workflow_v2_enabled": False,
+            "workflow_v5_enabled": True,
         }
 
     def _pipeline_work_root() -> Path:
