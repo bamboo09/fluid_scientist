@@ -1322,31 +1322,41 @@ def compile_case_plan(case_plan_id: str) -> dict[str, Any]:
 
     # Write to a temporary directory
     case_dir = tempfile.mkdtemp(prefix=f"fluid_case_{case_plan_id}_")
-    _write_case_to_disk(compiled, case_dir)
+    files_written = _write_case_to_disk(compiled, case_dir)
 
     _repo.save_compiled_case(case_plan_id, case_dir, compiled)
+
+    _repo.log_audit(
+        event_id=f"audit_{uuid.uuid4().hex[:12]}",
+        session_id=None,
+        event_type="case_compiled",
+        payload={"case_plan_id": case_plan_id, "case_dir": case_dir},
+    )
 
     return {
         "case_plan_id": case_plan_id,
         "case_dir": case_dir,
-        "compiled": compiled,
+        "files": list(files_written.keys()),
+        "file_count": len(files_written),
+        "compiled_structure": compiled,
     }
 
 
-def _write_case_to_disk(compiled: dict[str, Any], case_dir: str) -> None:
-    """Write the compiled case structure to disk as JSON files."""
+def _write_case_to_disk(compiled: dict[str, Any], case_dir: str) -> dict[str, str]:
+    """Write the compiled case structure to disk as valid OpenFOAM dictionary files.
+
+    Returns a dict mapping relative file paths to their content for inspection.
+    """
+    from fluid_scientist.case_plan.foam_writer import compile_to_files
+
+    files = compile_to_files(compiled)
     os.makedirs(case_dir, exist_ok=True)
-    for section_name, section_content in compiled.items():
-        section_dir = os.path.join(case_dir, section_name)
-        os.makedirs(section_dir, exist_ok=True)
-        if isinstance(section_content, dict):
-            for filename, content in section_content.items():
-                filepath = os.path.join(section_dir, filename)
-                with open(filepath, "w", encoding="utf-8") as f:
-                    if isinstance(content, (dict, list)):
-                        json.dump(content, f, indent=2, ensure_ascii=False, default=str)
-                    else:
-                        f.write(str(content))
+    for rel_path, content in files.items():
+        full_path = os.path.join(case_dir, rel_path)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(content)
+    return files
 
 
 # ---------------------------------------------------------------------------
