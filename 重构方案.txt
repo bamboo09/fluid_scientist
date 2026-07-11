@@ -1,0 +1,2828 @@
+# Fluid Scientist 新分支完整重构方案 v5
+
+## 复杂自然语言研究计划 → 只读实验草案 → 多轮确认 → CasePlan → OpenFOAM 能力检查与扩展闭环
+
+---
+
+# 0. 一句话目标
+
+本分支不是继续做“参数表工作台”，也不是做普通聊天机器人。
+
+本分支要把 Fluid Scientist 改造成：
+
+```text
+Session 级科研实验草案智能体
++ 复杂自然语言研究计划分解
++ 只读实验草案卡片
++ 多轮自然语言修改
++ 用户确认后才更新版本
++ confirmed 后生成 CasePlan
++ CasePlan 能力检查
++ 缺能力进入 CodeExtension 闭环
+```
+
+最终用户体验应该是：
+
+```text
+用户可以直接输入复杂 CFD 研究描述；
+系统先拆解研究任务，而不是乱套模板；
+系统明确识别几何、物理模型、边界条件、初始条件、观测指标、缺失信息；
+系统生成只读实验草案；
+用户通过自然语言修改草案；
+每次修改先生成 ChangeProposal；
+用户确认后才真正更新草案；
+草案 confirmed 后才允许生成 OpenFOAM Case；
+当前能力不足时，系统明确说明缺什么，而不是假装生成 Case。
+```
+
+---
+
+# 1. 当前必须解决的核心问题
+
+当前方案最大问题不是缺少某个类，而是主链路不够清楚。
+
+必须解决以下问题：
+
+```text
+1. 用户一次输入多个复杂研究计划时，系统不能把它们混成一个 case。
+2. 用户输入很长、很科研化时，系统不能只提取几个参数，然后生成空表。
+3. 用户描述中包含“观测机理目标”时，系统不能误当成 OpenFOAM 参数。
+4. 用户描述不完整时，系统不能直接失败，也不能瞎补高风险参数。
+5. 用户提出新参数、新边界条件、新指标时，系统不能说模板没有。
+6. LLM 不能直接修改真实 draft，只能生成 proposal。
+7. 用户确认前，任何修改都不能生效。
+8. confirmed 后的版本必须冻结，不能原地修改。
+9. 生成 Case 前必须先生成 CasePlan，再做能力检查。
+10. 缺能力时必须进入 MissingCapability / CodeExtension，而不是生成假 Case。
+```
+
+---
+
+# 2. 总体架构
+
+完整链路如下：
+
+```text
+用户自然语言输入
+→ InputRouter
+→ NaturalLanguageStudyDecomposer
+    → StudySplitter
+    → StudyTypeClassifier
+    → PhysicsFrameExtractor
+    → ParameterExtractor
+    → ConditionExtractor
+    → ObservableExtractor
+    → AmbiguityDetector
+    → CapabilityPreChecker
+→ BatchStudyPlan / StudyIntent
+→ 用户选择一个 study 或生成多个草案
+→ DraftSession
+→ ResearchState
+→ ClarificationPlanner
+→ ExperimentDraft 只读草案
+→ Validator
+→ 用户自然语言修改
+→ ChangeProposal
+→ 用户确认 / 取消
+→ ApplyProposalExecutor
+→ draft version + 1
+→ ready
+→ 用户确认实验版本
+→ confirmed / locked
+→ CasePlanner
+→ CapabilityRegistry
+    → 支持：NativeCompiler 生成 OpenFOAM Case
+    → 不支持：MissingCapability
+        → CodeExtensionSpec
+        → LLM code_generation
+        → sandbox test
+        → approve
+        → register capability
+        → 回到 CasePlanner
+→ Run
+→ Ingest
+→ Analyze
+→ ScientificReport
+```
+
+---
+
+# 3. 产品形态
+
+## 3.1 不做典型 chatbot
+
+页面不要做成纯聊天窗口。
+
+推荐结构：
+
+```text
+顶部：研究任务 / 实验草案标题
+中部：只读实验草案卡片
+右侧：状态、缺失信息、能力检查、LLM 调用记录
+底部：自然语言修改输入框 + 事件流
+```
+
+用户不直接编辑参数表，而是输入：
+
+```text
+把入口速度改成 0.2m/s。
+增加入口湍流强度 5%。
+输出出口速度均匀性。
+壁面热通量作为输出，不作为边界条件。
+这个 case 改成 LES。
+```
+
+系统返回 proposal，用户确认后才更新。
+
+---
+
+## 3.2 只读实验草案卡片
+
+草案卡片至少包含：
+
+```text
+1. 研究目标
+2. 研究类型
+3. 几何与计算域
+4. 流体 / 材料
+5. 控制参数
+6. 初始条件
+7. 边界条件
+8. 物理模型
+9. 湍流 / 热 / 浮力 / 运动模型
+10. 网格策略
+11. 求解器建议
+12. 数值设置
+13. 观测指标
+14. 后处理计划
+15. 已知条件
+16. 系统假设
+17. 高风险缺失
+18. 当前能力检查结果
+19. 是否可生成 Case
+```
+
+每个参数必须有来源：
+
+```text
+user_provided
+derived
+system_recommended
+assumption
+unknown_required
+capability_default
+```
+
+---
+
+# 4. 第一层：复杂自然语言研究计划分解
+
+## 4.1 为什么要有 StudyDecomposer
+
+用户可能输入：
+
+```text
+1. 近壁倾斜圆柱 Re=3900 三维湍流尾迹……
+2. 倾斜圆射流 45 度冲击平壁……
+3. 倾斜椭圆柱 Re=5000 非定常绕流……
+4. 密度分层流体中水平圆柱垂向振荡……
+5. 后台阶流动 Re=5000 分离再附……
+```
+
+系统第一步不能进入 draft，也不能直接 compile。
+
+必须先判断：
+
+```text
+这是一个 batch_research_request；
+其中包含 5 个独立研究任务；
+每个任务需要独立生成 StudyIntent；
+每个任务独立进入草案、澄清、能力检查、CasePlan。
+```
+
+---
+
+## 4.2 新增 NaturalLanguageStudyDecomposer
+
+新增模块：
+
+```python
+class NaturalLanguageStudyDecomposer:
+    def decompose(self, user_message: str) -> BatchStudyPlan:
+        ...
+```
+
+内部包含：
+
+```text
+1. StudySplitter：识别单任务还是多任务；
+2. StudyTypeClassifier：识别 CFD 研究类型；
+3. PhysicsFrameExtractor：提取物理框架；
+4. ParameterExtractor：提取 Re、Fr、角度、间距、长短轴比等；
+5. ConditionExtractor：提取初始条件和边界条件；
+6. ObservableExtractor：提取观测指标和机理目标；
+7. AmbiguityDetector：识别缺失、冲突和歧义；
+8. CapabilityPreChecker：初步判断当前系统能否落地；
+9. PriorityRanker：推荐优先落地任务。
+```
+
+---
+
+## 4.3 BatchStudyPlan
+
+```python
+class BatchStudyPlan(BaseModel):
+    batch_id: str
+    input_type: Literal["single_study", "batch_study"]
+    studies: list[StudyIntent]
+
+    batch_summary: str
+
+    suggested_next_action: Literal[
+        "select_one_to_continue",
+        "generate_all_draft_summaries",
+        "ask_batch_level_clarification"
+    ]
+
+    created_at: datetime
+```
+
+对于用户一次输入 5 个研究计划，系统应返回：
+
+```text
+我识别到 5 个独立 CFD 研究任务。
+建议先生成 5 个草案摘要，然后选择一个进入详细草案和 CasePlan。
+```
+
+---
+
+## 4.4 StudyIntent
+
+```python
+class StudyIntent(BaseModel):
+    study_id: str
+    batch_id: str | None = None
+
+    title: str
+    raw_text: str
+
+    study_type: str
+    research_objective: str
+
+    geometry: dict
+    physical_models: dict
+    initial_conditions: list[dict]
+    boundary_conditions: list[dict]
+
+    known_parameters: list[ExtractedParameter]
+    derived_parameters: list[ExtractedParameter]
+    unknown_required_parameters: list[ExtractedParameter]
+    assumed_parameters: list[ExtractedParameter]
+
+    observables: list[ObservableSpec]
+    analysis_goals: list[str]
+
+    ambiguity_report: list[AmbiguityItem]
+    capability_requirements: list[str]
+    likely_missing_capabilities: list[dict]
+
+    readiness_level: Literal[
+        "draftable",
+        "needs_clarification",
+        "not_compilable_yet"
+    ]
+
+    recommended_priority: int
+    priority_reason: str
+```
+
+---
+
+## 4.5 ExtractedParameter
+
+```python
+class ExtractedParameter(BaseModel):
+    canonical_id: str
+    display_name: str
+
+    value: Any | None
+    unit: str | None
+    dimensionless: bool = False
+
+    source_text: str
+
+    source: Literal[
+        "user_provided",
+        "derived",
+        "assumed",
+        "unknown_required"
+    ]
+
+    affects: list[str]
+    confidence: float
+```
+
+---
+
+## 4.6 ObservableSpec
+
+```python
+class ObservableSpec(BaseModel):
+    observable_id: str
+    display_name: str
+
+    category: Literal[
+        "force",
+        "pressure",
+        "heat_flux",
+        "vortex_structure",
+        "wake_deflection",
+        "reattachment",
+        "spectral",
+        "turbulence_statistics",
+        "internal_wave",
+        "mixing",
+        "custom"
+    ]
+
+    required_fields: list[str]
+    required_sampling: list[str]
+    postprocess_method: str | None
+    capability_check_required: bool
+```
+
+---
+
+## 4.7 AmbiguityItem
+
+```python
+class AmbiguityItem(BaseModel):
+    field: str
+    issue: str
+
+    severity: Literal[
+        "non_blocking_assumption",
+        "needs_confirmation",
+        "blocking_for_case_generation"
+    ]
+
+    reason: str
+    suggested_question: str | None
+    recommended_default: Any | None
+```
+
+---
+
+# 5. 复杂 CFD 研究描述的拆解规则
+
+每个 StudyIntent 必须拆成 8 类信息。
+
+## 5.1 研究对象
+
+提取：
+
+```text
+物理对象
+几何类型
+是否近壁
+是否倾斜
+是否运动
+是否三维
+是否涉及热
+是否涉及浮力
+是否涉及湍流
+```
+
+例如：
+
+```text
+near_wall_inclined_cylinder_wake
+inclined_round_impinging_jet
+inclined_elliptic_cylinder_near_wall_wake
+stratified_oscillating_cylinder_wake
+backward_facing_step_separation
+```
+
+---
+
+## 5.2 控制参数
+
+提取：
+
+```text
+Re
+Fr
+D
+H
+倾角
+间距
+间隙比
+长短轴比
+扩张比
+入口边界层厚度
+振荡幅值
+振荡频率
+```
+
+重要规则：
+
+```text
+Re 和 Fr 不是 OpenFOAM 可直接输入。
+必须继续推导或追问：
+- 特征长度是什么？
+- 参考速度是什么？
+- 运动粘度是多少？
+- 流体密度是多少？
+- Fr 的定义是什么？
+```
+
+---
+
+## 5.3 初始条件
+
+识别：
+
+```text
+初始全场静止
+初始线性密度分层
+初始充分发展湍流边界层
+随后施加均匀来流
+随后施加充分发展管流入口
+```
+
+标准化为：
+
+```text
+initial_velocity_field
+initial_pressure_field
+initial_density_field
+initial_temperature_field
+initial_turbulence_field
+startup_strategy
+```
+
+注意：
+
+```text
+“初始全场静止，随后施加来流”
+不是一句普通描述。
+它意味着 transient startup，需要定义 t=0 后入口如何施加。
+```
+
+---
+
+## 5.4 边界条件
+
+识别并标准化：
+
+```text
+入口给定速度剖面 → inlet.velocity_profile
+圆柱无滑移 → wall.no_slip
+壁面无滑移 → wall.no_slip
+出口对流边界 → outlet.advective_or_equivalent
+出口压力出口 → outlet.pressure
+展向周期性 → spanwise.periodic
+上下边界自由滑移 → top_bottom.free_slip
+```
+
+注意：
+
+```text
+“对流边界”不是一个直接可写入 OpenFOAM 的统一名称。
+必须映射到具体 boundary condition，例如 advective、inletOutlet、zeroGradient、waveTransmissive 等。
+映射前需要 Validator 检查。
+```
+
+---
+
+## 5.5 物理模型
+
+识别：
+
+```text
+3D
+transient
+turbulent
+thermal
+stratified density
+buoyancy
+moving body
+periodic spanwise
+wall-bounded flow
+```
+
+标准化为：
+
+```text
+dimension
+temporal_type
+turbulence_model_candidate
+thermal_model
+buoyancy_model
+density_model
+moving_body_model
+solver_family_candidate
+```
+
+重要规则：
+
+```text
+用户说“湍流”不等于系统知道用 LES、RANS、DES 还是 DNS。
+用户说“热通量”不等于一定要解能量方程。
+用户说“密度分层”不等于一定能直接用当前 compiler 支持。
+用户说“垂向振荡”必须进一步确认运动边界实现方式。
+```
+
+---
+
+## 5.6 观测指标
+
+识别：
+
+```text
+尾迹偏斜
+展向翻转
+壁面涡结构
+马蹄涡
+非对称分离
+阻力系数
+升力系数
+频谱特性
+壁面压力
+热通量
+再附点
+回流区长度
+雷诺应力
+斯特劳哈尔数
+混合层厚度
+内波辐射
+```
+
+这些进入：
+
+```text
+MeasurementPlan
+PostprocessPlan
+ScientificAnalysisGoal
+```
+
+不要当成基础 case 参数。
+
+---
+
+## 5.7 机理目标
+
+识别：
+
+```text
+揭示几何不对称与壁面约束耦合机制
+揭示倾斜角诱导的复杂分离与转捩机理
+揭示浮力-惯性耦合机制
+揭示大尺度结构对分离泡稳定性的控制机制
+```
+
+这些进入：
+
+```text
+analysis_goals
+```
+
+不能进入 OpenFOAM 字典。
+
+---
+
+## 5.8 缺失信息
+
+缺失信息分三级：
+
+```text
+Level 0：不影响理解，可默认推荐
+Level 1：影响质量，需要确认，但不阻塞草案
+Level 2：阻塞 Case 生成，必须澄清
+```
+
+例子：
+
+```text
+计算域尺寸未知 → needs_confirmation
+网格分辨率未知 → needs_confirmation
+湍流模型未知 → needs_confirmation 或 blocking，视 case 而定
+几何尺寸完全未知 → blocking_for_case_generation
+热通量是输入还是输出未知 → blocking_for_case_generation
+振荡幅值和频率未知 → blocking_for_case_generation
+密度分层公式未知 → blocking_for_case_generation
+```
+
+---
+
+# 6. 对 5 个复杂输入的预期拆解
+
+## 6.1 Case 1：近壁倾斜圆柱 Re=3900 三维湍流尾迹
+
+识别：
+
+```text
+study_type = near_wall_inclined_cylinder_wake
+dimension = 3D
+temporal = transient
+flow_regime = turbulent / transitional wake
+Re = 3900
+wall_effect = true
+spanwise_boundary = periodic
+```
+
+已知条件：
+
+```text
+初始全场静止
+随后施加均匀来流
+入口给定速度剖面
+圆柱与壁面无滑移
+出口对流边界
+展向周期
+观测尾迹偏斜、展向翻转、壁面涡、阻力、升力、频谱
+```
+
+缺失：
+
+```text
+圆柱直径 D
+倾斜角
+圆柱与壁面间隙
+计算域尺寸
+展向长度
+湍流模型
+流体物性
+时间步长和总时间
+对流出口 OpenFOAM 映射
+```
+
+前 3 个澄清问题：
+
+```text
+1. 请确认圆柱直径 D、倾斜角和圆柱到壁面的间隙。
+2. 湍流模拟采用 LES、RANS、DES，还是先使用系统推荐方案？
+3. 是否接受系统按 D 推荐计算域尺寸、展向长度和初始网格分辨率？
+```
+
+能力预判：
+
+```text
+可能缺 inclined cylinder near-wall mesh generator。
+需要三维周期边界支持。
+需要 forceCoeffs 参考量。
+需要频谱后处理。
+```
+
+---
+
+## 6.2 Case 2：45° 倾斜圆射流冲击平壁 Re=23000
+
+识别：
+
+```text
+study_type = inclined_round_impinging_jet
+dimension = 3D
+temporal = transient
+flow_regime = turbulent jet
+Re = 23000
+inclination_angle = 45deg
+nozzle_wall_distance = 2D
+```
+
+已知条件：
+
+```text
+初始全场静止
+充分发展管流入口
+壁面无滑移
+出口压力出口
+展向周期
+观测壁面压力、热通量不对称、马蹄涡、非对称分离
+```
+
+关键歧义：
+
+```text
+“壁面热通量”到底是：
+A. 输出结果；
+B. 给定热边界条件；
+C. 需要计算换热系数 / Nusselt 数；
+D. 需要解能量方程。
+```
+
+缺失：
+
+```text
+D 的具体值
+流体物性
+入口充分发展管流生成方式
+是否求解温度场
+喷嘴长度
+计算域尺寸
+湍流模型
+```
+
+前 3 个澄清问题：
+
+```text
+1. 壁面热通量是作为输出结果分析，还是作为给定边界条件？
+2. 入口充分发展管流希望用解析剖面、precursor，还是 mapped inlet？
+3. 是否接受系统按 D 推荐计算域、喷嘴长度和网格？
+```
+
+能力预判：
+
+```text
+可能缺 impinging jet geometry generator。
+可能缺 thermal solver 配置。
+可能缺 wall heat flux postprocess。
+```
+
+---
+
+## 6.3 Case 3：倾斜椭圆柱 Re=5000 非定常绕流
+
+识别：
+
+```text
+study_type = inclined_elliptic_cylinder_near_wall_wake
+dimension = 3D
+temporal = transient
+Re = 5000
+aspect_ratio = 2.0
+inclination_angle = 30deg
+gap = 0.3 * minor_axis
+```
+
+已知条件：
+
+```text
+初始全场静止
+随后施加均匀来流
+入口抛物型速度剖面
+椭圆柱表面无滑移
+底部壁面无滑移
+出口对流
+展向周期
+观测不对称涡脱落、壁面二次涡、展向翻转、升阻力和频谱
+```
+
+缺失：
+
+```text
+短轴长度 b 或长轴长度 a
+Re 的特征长度定义
+入口抛物型速度剖面对应通道高度
+上边界条件
+计算域尺寸
+展向长度
+湍流模型
+```
+
+前 3 个澄清问题：
+
+```text
+1. Re=5000 的特征长度采用短轴、长轴还是等效直径？
+2. 入口抛物型速度剖面对应的通道高度是多少？
+3. 上边界采用自由滑移、远场还是无滑移壁面？
+```
+
+能力预判：
+
+```text
+可能缺 elliptic cylinder near-wall mesh generator。
+需要 forceCoeffs 支持非圆柱参考面积。
+需要频谱后处理。
+```
+
+---
+
+## 6.4 Case 4：密度分层流体中垂向振荡水平圆柱
+
+识别：
+
+```text
+study_type = stratified_oscillating_cylinder_wake
+dimension = 3D likely
+temporal = transient
+Re = 500
+Fr = 0.2
+physics = density stratification + buoyancy + moving body
+```
+
+已知条件：
+
+```text
+初始全场静止
+线性密度分层
+随后施加均匀来流
+圆柱无滑移
+上下边界自由滑移
+展向周期
+观测内波辐射、剪切层失稳、分层尾迹、St 偏移、混合层厚度
+```
+
+缺失：
+
+```text
+圆柱直径 D
+振荡幅值
+振荡频率
+Fr 定义
+Brunt–Väisälä 频率 N
+密度分层函数 rho(z)
+是否采用 Boussinesq 近似
+重力方向
+运动边界实现方式
+```
+
+前 3 个澄清问题：
+
+```text
+1. 垂向振荡的幅值和频率是多少？
+2. Fr=0.2 是否定义为 U/(N·D)？
+3. 是否采用 Boussinesq 近似和线性密度分层 rho(z)=rho0+alpha*z？
+```
+
+能力预判：
+
+```text
+大概率 not_compilable_yet。
+可能缺 buoyancy model writer。
+可能缺 density stratification initializer。
+可能缺 oscillating cylinder dynamic mesh / overset 支持。
+可能缺 internal wave 和 mixing layer 后处理。
+```
+
+---
+
+## 6.5 Case 5：后台阶 Re=5000 分离与再附
+
+识别：
+
+```text
+study_type = backward_facing_step_separation_reattachment
+dimension = 3D
+temporal = transient
+Re = 5000
+expansion_ratio = 1.5
+inlet_boundary_layer_thickness = 0.3H
+```
+
+已知条件：
+
+```text
+台阶高度 H
+入口 1/7 幂律速度剖面
+上下壁面无滑移
+出口对流
+展向周期
+观测回流区长度、再附点、剪切层涡配对、壁面压力恢复、雷诺应力
+```
+
+缺失：
+
+```text
+H 的具体值
+Re 的定义：基于 H 还是入口水力直径
+上游入口段长度
+下游出口段长度
+展向宽度
+湍流模型
+初始充分发展湍流边界层与入口 1/7 幂律之间的关系
+```
+
+前 3 个澄清问题：
+
+```text
+1. Re=5000 是基于台阶高度 H、入口通道高度，还是水力直径？
+2. 入口 1/7 幂律是入口速度边界，还是已有充分发展初始场？
+3. 是否接受系统按 H 推荐上游、下游和展向尺寸？
+```
+
+能力预判：
+
+```text
+推荐优先级最高。
+原因：几何和边界条件最接近当前可落地 OpenFOAM case。
+```
+
+---
+
+# 7. 推荐优先级策略
+
+对于复杂 batch 输入，系统应自动给出落地优先级：
+
+```text
+优先级 1：后台阶流动
+原因：几何标准，边界条件清楚，OpenFOAM 可落地性最高。
+
+优先级 2：倾斜椭圆柱近壁绕流
+原因：物理较清楚，但需要椭圆柱近壁网格能力。
+
+优先级 3：近壁倾斜圆柱三维湍流尾迹
+原因：三维、近壁、倾斜、湍流、周期边界，网格和湍流设置复杂。
+
+优先级 4：倾斜圆射流冲击平壁
+原因：入口充分发展管流、热通量/换热、冲击射流更复杂。
+
+优先级 5：分层流体中振荡圆柱
+原因：密度分层、浮力、内波、运动边界，当前系统大概率需要能力扩展。
+```
+
+这不是拒绝复杂 case，而是让用户知道：
+
+```text
+哪个能先跑通；
+哪个需要澄清；
+哪个需要扩展编译能力；
+哪个暂时只能生成研究草案和 MissingCapability。
+```
+
+---
+
+# 8. DraftSession 与状态机
+
+## 8.1 DraftSession
+
+```python
+class DraftSession(BaseModel):
+    session_id: str
+    user_id: str | None = None
+
+    status: Literal[
+        "collecting_intent",
+        "batch_review",
+        "clarifying",
+        "draft_ready",
+        "proposal_pending",
+        "ready",
+        "confirmed",
+        "case_planning",
+        "awaiting_code_extension",
+        "compiled",
+        "running",
+        "completed",
+        "failed",
+    ]
+
+    batch_id: str | None = None
+    selected_study_id: str | None = None
+
+    research_state_id: str | None = None
+    current_draft_id: str | None = None
+    current_draft_version: int | None = None
+
+    pending_question_ids: list[str] = []
+    pending_proposal_id: str | None = None
+    pending_missing_capability_ids: list[str] = []
+
+    created_at: datetime
+    updated_at: datetime
+```
+
+要求：
+
+```text
+1. session 必须持久化。
+2. 前端刷新后能恢复。
+3. 后端重启后不能直接丢。
+4. 每轮用户输入必须带 session_id。
+5. 不能每次只拿最后一句话重新猜。
+6. batch 输入后，session.status = batch_review。
+7. 用户选择某个 study 后，进入该 study 的 DraftSession 主链路。
+```
+
+---
+
+## 8.2 SessionMessage
+
+```python
+class SessionMessage(BaseModel):
+    message_id: str
+    session_id: str
+
+    role: Literal["user", "assistant", "system", "tool"]
+
+    message_type: Literal[
+        "research_request",
+        "batch_summary",
+        "study_selection",
+        "clarification_question",
+        "clarification_answer",
+        "draft_summary",
+        "draft_change_request",
+        "change_proposal",
+        "proposal_confirmation",
+        "proposal_cancel",
+        "question_about_draft",
+        "compile_request",
+        "case_plan_summary",
+        "missing_capability_summary",
+        "error",
+    ]
+
+    content: str
+
+    linked_study_id: str | None = None
+    linked_question_id: str | None = None
+    linked_proposal_id: str | None = None
+    linked_draft_id: str | None = None
+    linked_draft_version: int | None = None
+
+    created_at: datetime
+```
+
+---
+
+## 8.3 状态按钮
+
+| 状态                      | 主按钮         | 辅助按钮       | 禁止行为       |
+| ----------------------- | ----------- | ---------- | ---------- |
+| collecting_intent       | 继续描述需求      | 取消         | 生成 Case    |
+| batch_review            | 选择任务进入草案    | 生成全部摘要     | 直接编译       |
+| clarifying              | 提交回答        | 使用推荐假设     | 生成 Case    |
+| draft_ready             | 校验草案        | 提出修改       | 提交运行       |
+| proposal_pending        | 确认应用修改      | 取消修改       | 生成 Case    |
+| ready                   | 确认实验版本      | 继续修改       | 提交运行       |
+| confirmed               | 生成 CasePlan | 克隆并修改      | 原地修改       |
+| case_planning           | 查看 CasePlan | 返回草案       | 提交运行       |
+| awaiting_code_extension | 查看缺失能力      | 创建扩展任务     | 直接生成假 Case |
+| compiled                | 提交运行        | 查看 Case 文件 | 应用修改       |
+| running                 | 查看运行状态      | 停止任务       | 修改当前版本     |
+| completed               | 查看分析报告      | 克隆新实验      | 修改当前版本     |
+
+---
+
+# 9. InputRouter 规则
+
+## 9.1 InputRoute
+
+```python
+class InputRoute(BaseModel):
+    input_type: Literal[
+        "new_research_request",
+        "batch_research_request",
+        "study_selection",
+        "clarification_answer",
+        "draft_change_request",
+        "proposal_confirmation",
+        "proposal_cancel",
+        "question_about_draft",
+        "compile_request",
+        "run_request",
+        "unknown",
+    ]
+
+    confidence: float
+    reason: str
+    should_call_llm: bool
+```
+
+---
+
+## 9.2 强规则优先，LLM 兜底
+
+必须先走确定性规则：
+
+```text
+Rule 1：
+用户输入含编号列表 1./2./3.，且每段都是研究任务
+→ batch_research_request
+
+Rule 2：
+session.status = batch_review，用户说“先做第5个 / 选择后台阶 / 展开第3个”
+→ study_selection
+
+Rule 3：
+pending_proposal_id != None，用户说“确认 / 可以 / 应用 / 就这样”
+→ proposal_confirmation
+
+Rule 4：
+pending_proposal_id != None，用户说“取消 / 不要 / 放弃”
+→ proposal_cancel
+
+Rule 5：
+session.status = clarifying 且 pending_question_ids 非空
+→ clarification_answer
+
+Rule 6：
+draft 已生成，用户说“改成 / 增加 / 删除 / 换成 / 输出 / 加入”
+→ draft_change_request
+
+Rule 7：
+用户问“为什么 / 是什么 / 什么意思 / 有什么影响”
+→ question_about_draft
+
+Rule 8：
+用户说“生成 case / 编译 / OpenFOAM case”
+→ compile_request
+```
+
+规则无法判断时才调用 LLM input_routing。
+
+---
+
+# 10. LLM 调用边界
+
+## 10.1 必须调用 LLM 的场景
+
+```text
+1. 用户首次提出自然语言研究问题。
+2. 用户一次输入多个研究计划，需要 StudyDecomposer。
+3. 用户用自由文本回答澄清问题。
+4. 用户自然语言修改草案。
+5. 用户提出未知参数、未知指标、未知边界条件。
+6. 用户提出新 case 类型。
+7. 需要生成 PhysicsIntent / StudyIntent。
+8. 需要生成 ExperimentDraft 初稿。
+9. 需要生成 ChangeProposal。
+10. 需要生成 CasePlan 草案。
+11. 需要分析 MissingCapability。
+12. 需要生成 CodeExtensionSpec。
+13. 需要生成代码草案。
+14. 需要代码 review。
+15. 用户要求解释参数、假设、风险或缺失能力。
+```
+
+---
+
+## 10.2 不应该调用 LLM 的场景
+
+```text
+1. 用户点击确认应用 proposal。
+2. 用户点击取消 proposal。
+3. 用户点击校验草案。
+4. 用户点击确认实验版本。
+5. 单位换算。
+6. Re、Fr 等派生参数计算。
+7. 状态按钮显示。
+8. confirmed 后版本冻结。
+9. proposal version 检查。
+10. 已有 capability 支持的 NativeCompiler 文件生成。
+11. run / ingest / analyze 的确定性流程。
+```
+
+---
+
+## 10.3 LLMCallRecord
+
+```python
+class LLMCallRecord(BaseModel):
+    call_id: str
+    session_id: str
+
+    purpose: Literal[
+        "input_routing",
+        "study_decomposition",
+        "physics_intent",
+        "clarification_extract",
+        "clarification_planning",
+        "draft_generation",
+        "draft_change_proposal",
+        "unknown_parameter_mapping",
+        "unknown_metric_mapping",
+        "case_plan_generation",
+        "missing_capability_analysis",
+        "code_extension_spec",
+        "code_generation",
+        "code_review",
+        "explanation",
+    ]
+
+    provider: str
+    model_name: str
+    prompt_name: str
+    prompt_version: str
+
+    input_refs: list[str]
+    input_summary: str
+
+    output_schema: str
+    raw_output: str | None
+    parsed_output: dict | None
+
+    success: bool
+    fallback_used: bool
+    fallback_reason: str | None
+    error: str | None
+
+    created_at: datetime
+```
+
+前端调试区必须显示：
+
+```text
+当前是真模型还是 fake fallback
+最近一次 LLM purpose
+model_name
+prompt_version
+fallback_reason
+last_llm_call_id
+```
+
+---
+
+# 11. ResearchState 与 ExperimentDraft
+
+## 11.1 ResearchState
+
+```python
+class ResearchState(BaseModel):
+    research_state_id: str
+    session_id: str
+    selected_study_id: str | None = None
+
+    original_user_request: str
+
+    confirmed_facts: dict
+    accepted_assumptions: dict
+    rejected_assumptions: dict
+
+    unknowns: list[dict]
+    blocking_issues: list[dict]
+
+    physical_intent: dict | None = None
+    study_intent: dict | None = None
+
+    last_updated_by_message_id: str | None = None
+    version: int
+
+    created_at: datetime
+    updated_at: datetime
+```
+
+规则：
+
+```text
+1. 用户明确说过的内容进入 confirmed_facts。
+2. 系统推荐但用户未确认的内容进入 assumptions。
+3. 用户拒绝过的假设进入 rejected_assumptions。
+4. rejected_assumptions 不能下一轮被模型偷偷加回来。
+5. blocking_issues 只包含无法继续生成 Case 的关键缺失。
+```
+
+---
+
+## 11.2 ExperimentDraft
+
+```python
+class ExperimentDraft(BaseModel):
+    draft_id: str
+    session_id: str
+    study_id: str | None = None
+    version: int
+
+    status: Literal[
+        "draft",
+        "ready",
+        "confirmed",
+        "compiled",
+        "running",
+        "completed",
+        "failed",
+    ]
+
+    locked: bool = False
+
+    objective: str
+    study_type: str
+
+    physical_system: dict
+    geometry: dict
+    materials: dict
+    control_parameters: dict
+
+    physics_models: dict
+    initial_conditions: dict
+    boundary_conditions: dict
+
+    mesh: dict
+    numerics: dict
+    solver: dict
+
+    requested_outputs: list[dict]
+    measurement_plan: dict
+    postprocess_plan: dict
+    analysis_goals: list[str]
+
+    assumptions: list[dict]
+    risks_and_limits: list[dict]
+    blocking_issues: list[dict]
+
+    capability_preview: dict | None = None
+    validation_result: dict | None = None
+
+    created_at: datetime
+    updated_at: datetime
+```
+
+规则：
+
+```text
+1. draft 是只读展示对象。
+2. draft 不能被 LLM 直接修改。
+3. draft 修改必须通过 ChangeProposal。
+4. version 每次应用 proposal 后 +1。
+5. confirmed 后 locked = true。
+6. locked draft 修改必须 clone 新版本。
+```
+
+---
+
+# 12. 多轮澄清策略
+
+## 12.1 只问 blocking 和关键 needs_confirmation
+
+每轮最多问 3 个问题。
+
+优先级：
+
+```text
+1. 几何无法定义的问题；
+2. solver / physics model 无法选择的问题；
+3. 边界条件无法映射的问题；
+4. 观测指标需要后处理能力的问题；
+5. 其他低风险数值设置。
+```
+
+---
+
+## 12.2 ClarificationQuestion
+
+```python
+class ClarificationQuestion(BaseModel):
+    question_id: str
+    field: str
+    question: str
+
+    reason: str
+    severity: Literal[
+        "needs_confirmation",
+        "blocking_for_case_generation"
+    ]
+
+    options: list[dict] | None = None
+    recommended_answer: dict | None = None
+    allow_free_text: bool = True
+```
+
+---
+
+## 12.3 不清晰输入的处理原则
+
+```text
+描述不清晰 ≠ 失败。
+
+系统应该分三类处理：
+
+A. 已明确：直接进入 draft。
+B. 可推荐：作为 assumption 或 recommended value。
+C. 阻塞缺失：生成 clarification question。
+```
+
+---
+
+# 13. ChangeProposal 机制
+
+## 13.1 修改只能生成 proposal
+
+用户说：
+
+```text
+增加入口湍流强度 5%，并输出出口速度均匀性。
+```
+
+系统返回：
+
+```text
+建议修改：
+1. 新增入口湍流强度 boundary.inlet.turbulence_intensity = 5%
+2. 新增输出指标 metric.outlet_velocity_uniformity
+
+影响：
+- 可能需要启用湍流模型；
+- 可能需要生成 0/k、0/epsilon 或 0/omega；
+- 出口速度均匀性需要后处理能力检查。
+
+是否应用？
+```
+
+此时 draft 不变。
+
+---
+
+## 13.2 ChangeProposal
+
+```python
+class ChangeProposal(BaseModel):
+    proposal_id: str
+    session_id: str
+    draft_id: str
+    base_draft_version: int
+
+    status: Literal["pending", "applied", "cancelled", "expired"]
+
+    summary: str
+    changes: list[DraftChange]
+    impact_summary: list[str]
+    invalidates: list[str]
+
+    requires_confirmation: bool = True
+
+    missing_capabilities: list[dict] = []
+    clarification_required: list[dict] = []
+
+    created_at: datetime
+```
+
+---
+
+## 13.3 DraftChange
+
+```python
+class DraftChange(BaseModel):
+    change_type: Literal[
+        "set_parameter",
+        "add_parameter",
+        "remove_parameter",
+        "add_output",
+        "remove_output",
+        "change_boundary_condition",
+        "change_initial_condition",
+        "change_physics_model",
+        "change_geometry",
+        "change_mesh",
+        "change_numerics",
+        "change_solver",
+        "add_assumption",
+        "remove_assumption",
+    ]
+
+    target_path: str
+    old_value: Any | None
+    new_value: Any | None
+
+    unit: str | None = None
+    reason: str
+    confidence: float
+```
+
+---
+
+## 13.4 ApplyProposalExecutor
+
+用户确认后：
+
+```text
+加载 pending proposal
+→ 检查 base_draft_version 是否匹配
+→ 不匹配则 proposal expired
+→ 匹配则应用 changes
+→ DerivationEngine 重新计算派生参数
+→ Validator 重新校验
+→ draft version + 1
+→ 写入 change history
+→ 清空 pending_proposal_id
+→ session.status 回到 draft_ready 或 ready
+```
+
+ApplyProposalExecutor 禁止调用 LLM。
+
+---
+
+# 14. 未知参数、未知指标和未知边界条件
+
+## 14.1 UnknownParameterMapper
+
+用户说：
+
+```text
+增加入口湍流强度。
+增加初始压力。
+增加壁面热通量。
+加入距离参考面的高度。
+```
+
+系统必须先映射成 canonical parameter。
+
+```python
+class UnknownParameterMapping(BaseModel):
+    canonical_id: str
+    display_name: str
+
+    category: Literal[
+        "geometry",
+        "material_property",
+        "initial_condition",
+        "boundary_condition",
+        "physics_model",
+        "mesh",
+        "numerics",
+        "metric",
+        "measurement",
+        "postprocess",
+        "compute",
+        "custom",
+    ]
+
+    unit: str | None
+    expected_type: str
+    description: str
+
+    affects: list[str]
+    requires_user_value: bool
+    can_recommend_default: bool
+
+    capability_check_required: bool
+    confidence: float
+    reason: str
+```
+
+---
+
+## 14.2 UnknownMetricMapper
+
+用户说：
+
+```text
+输出出口速度均匀性。
+输出阻力系数频谱。
+输出混合层厚度。
+输出再附点摆动。
+```
+
+系统生成 MetricDefinition。
+
+```python
+class MetricDefinition(BaseModel):
+    metric_id: str
+    display_name: str
+
+    category: Literal[
+        "force",
+        "pressure",
+        "velocity",
+        "thermal",
+        "vorticity",
+        "uniformity",
+        "frequency",
+        "reattachment",
+        "mixing",
+        "custom",
+    ]
+
+    formula: str | None
+    required_fields: list[str]
+    required_sampling: list[dict]
+
+    postprocess_method: Literal[
+        "openfoam_function_object",
+        "python_postprocess",
+        "field_export",
+        "custom_extension",
+    ]
+
+    unit: str | None
+    capability_check_required: bool
+```
+
+---
+
+## 14.3 进入系统流程
+
+```text
+用户提出未知参数 / 指标 / 边界条件
+→ DraftChangeAgent 识别变更类型
+→ UnknownParameterMapper / UnknownMetricMapper
+→ CapabilityRegistry 检查
+→ 支持：生成 ChangeProposal
+→ 不支持：ChangeProposal 附带 MissingCapability
+→ 用户确认后写入 draft
+→ Validator 再判断是否 blocking
+```
+
+---
+
+# 15. Confirmed 版本冻结
+
+## 15.1 ready → confirmed
+
+当 blocking issues 为 0，Validator 通过，状态进入 ready。
+
+用户点击：
+
+```text
+确认实验版本
+```
+
+系统执行：
+
+```text
+draft.status = confirmed
+draft.locked = true
+session.status = confirmed
+confirmed_version = current_version
+```
+
+---
+
+## 15.2 confirmed 后不能原地修改
+
+用户在 confirmed 后说：
+
+```text
+把入口速度改成 0.3m/s。
+```
+
+系统不能直接改当前版本。
+
+正确流程：
+
+```text
+clone confirmed draft v1 → draft v2
+v2.status = draft
+v2.locked = false
+在 v2 上生成 ChangeProposal
+用户确认后更新 v2
+v1 保持不变
+```
+
+---
+
+# 16. CasePlan 与 CapabilityRegistry
+
+## 16.1 生成 Case 前必须先生成 CasePlan
+
+禁止：
+
+```text
+confirmed draft → 直接套模板 → 生成 OpenFOAM case
+```
+
+必须：
+
+```text
+confirmed draft
+→ CasePlanner
+→ CasePlan
+→ CapabilityRegistry
+→ NativeCompiler 或 MissingCapability
+```
+
+---
+
+## 16.2 CasePlan
+
+```python
+class CasePlan(BaseModel):
+    case_plan_id: str
+    draft_id: str
+    draft_version: int
+
+    case_type: str
+    solver: str
+    dimensions: str
+
+    geometry_plan: dict
+    mesh_plan: dict
+    boundary_condition_plan: dict
+    initial_condition_plan: dict
+    physical_model_plan: dict
+    numerics_plan: dict
+    measurement_plan: dict
+    postprocess_plan: dict
+
+    required_capabilities: list[str]
+    missing_capabilities: list[dict]
+
+    can_compile: bool
+    blocking_reasons: list[str]
+```
+
+---
+
+## 16.3 CapabilityRegistry
+
+```python
+class CompilerCapability(BaseModel):
+    capability_id: str
+
+    capability_type: Literal[
+        "solver",
+        "geometry_generator",
+        "mesh_generator",
+        "boundary_condition_writer",
+        "initial_condition_writer",
+        "physical_model_writer",
+        "function_object_writer",
+        "postprocess_metric",
+    ]
+
+    supported_values: list[str]
+    required_inputs: list[str]
+    output_files: list[str]
+    limitations: list[str]
+```
+
+---
+
+## 16.4 MissingCapability
+
+```python
+class MissingCapability(BaseModel):
+    capability_id: str
+
+    capability_type: Literal[
+        "solver",
+        "geometry_generator",
+        "mesh_generator",
+        "boundary_condition_writer",
+        "initial_condition_writer",
+        "physical_model_writer",
+        "measurement",
+        "postprocess_metric",
+        "compiler",
+    ]
+
+    severity: Literal["warning", "blocking"]
+
+    reason: str
+    required_by: list[str]
+
+    suggested_resolution: Literal[
+        "ask_user_to_simplify",
+        "use_supported_alternative",
+        "create_code_extension",
+    ]
+
+    alternative_options: list[dict] = []
+```
+
+---
+
+# 17. CodeExtension 闭环
+
+## 17.1 进入条件
+
+以下情况进入 CodeExtension：
+
+```text
+1. 新后处理指标没有实现；
+2. 新 functionObject writer 没有实现；
+3. 新边界条件 writer 没有实现；
+4. 新几何生成器没有实现；
+5. 新 mesh strategy 没有实现；
+6. 新 solver 配置 writer 没有实现；
+7. 新初始场生成器没有实现。
+```
+
+---
+
+## 17.2 CodeExtensionSpec
+
+```python
+class CodeExtensionSpec(BaseModel):
+    extension_id: str
+    missing_capability_id: str
+
+    extension_type: Literal[
+        "python_metric",
+        "openfoam_function_object_writer",
+        "case_compiler_plugin",
+        "boundary_condition_writer",
+        "mesh_generator_plugin",
+        "geometry_generator_plugin",
+        "initial_condition_generator",
+    ]
+
+    requirement: str
+
+    inputs: list[dict]
+    outputs: list[dict]
+
+    target_interfaces: list[str]
+    files_to_create_or_modify: list[str]
+
+    acceptance_tests: list[str]
+    safety_constraints: list[str]
+
+    risk_level: Literal["low", "medium", "high"]
+```
+
+---
+
+## 17.3 代码生成流程
+
+```text
+MissingCapability
+→ CodeExtensionSpec
+→ LLM code_generation
+→ 生成代码草案
+→ 静态检查
+→ 单元测试
+→ sandbox run
+→ LLM code_review
+→ 人工确认
+→ register capability
+→ 回到 CasePlanner
+→ 重新尝试 compile
+```
+
+硬规则：
+
+```text
+1. LLM 生成代码不能直接进入生产路径。
+2. 必须先进入 sandbox。
+3. 必须有 acceptance tests。
+4. 必须有测试输出。
+5. 默认需要人工 approve。
+6. 只有 low-risk extension 可以配置 auto-approve。
+7. register 后 CapabilityRegistry 才能使用它。
+```
+
+---
+
+# 18. API 设计
+
+## 18.1 Study / Batch API
+
+```http
+POST /api/studies/decompose
+GET  /api/batches/{batch_id}
+POST /api/batches/{batch_id}/select-study
+```
+
+---
+
+## 18.2 Session API
+
+```http
+POST /api/draft-sessions
+GET  /api/draft-sessions/{session_id}
+POST /api/draft-sessions/{session_id}/turns
+```
+
+---
+
+## 18.3 Draft API
+
+```http
+GET  /api/drafts/{draft_id}
+POST /api/drafts/{draft_id}/validate
+POST /api/drafts/{draft_id}/confirm
+POST /api/drafts/{draft_id}/clone
+```
+
+---
+
+## 18.4 Proposal API
+
+```http
+POST /api/drafts/{draft_id}/propose-change
+POST /api/proposals/{proposal_id}/apply
+POST /api/proposals/{proposal_id}/cancel
+GET  /api/proposals/{proposal_id}
+```
+
+---
+
+## 18.5 Case API
+
+```http
+POST /api/drafts/{draft_id}/case-plan
+GET  /api/case-plans/{case_plan_id}
+POST /api/case-plans/{case_plan_id}/compile
+GET  /api/cases/{case_id}
+POST /api/cases/{case_id}/run
+```
+
+---
+
+## 18.6 Capability API
+
+```http
+GET /api/capabilities
+GET /api/case-plans/{case_plan_id}/missing-capabilities
+```
+
+---
+
+## 18.7 CodeExtension API
+
+```http
+POST /api/code-extensions
+POST /api/code-extensions/{extension_id}/generate
+POST /api/code-extensions/{extension_id}/test
+POST /api/code-extensions/{extension_id}/review
+POST /api/code-extensions/{extension_id}/approve
+POST /api/code-extensions/{extension_id}/register
+```
+
+---
+
+# 19. Prompt 文件
+
+## 19.1 study_decomposer_prompt.txt
+
+```text
+你是 Fluid Scientist 的复杂研究计划分解器。
+
+用户可能一次输入一个或多个 CFD 研究任务。
+你的任务不是生成 OpenFOAM case，也不是直接生成参数表。
+你的任务是把自然语言拆解成一个或多个 StudyIntent。
+
+你必须输出：
+- 是否为 batch_study
+- 每个 study 的标题
+- 研究对象
+- 几何类型
+- 关键控制参数
+- 初始条件
+- 边界条件
+- 物理模型
+- 观测指标
+- 机理目标
+- 已知参数
+- 缺失但关键的参数
+- 可能需要的系统能力
+- 可能缺失的能力
+- 建议优先级
+
+规则：
+1. 不要把多个编号任务合并成一个 case。
+2. 不要因为缺少模板就判定不支持。
+3. 用户明确给出的量必须保留。
+4. 不要编造高风险参数。
+5. 研究机理目标不要误当成可编译参数。
+6. 输出 JSON。
+```
+
+---
+
+## 19.2 ambiguity_detector_prompt.txt
+
+```text
+你是 Fluid Scientist 的模糊信息检测器。
+
+输入是一个 StudyIntent。
+你需要识别哪些信息缺失、冲突或含义不明确。
+
+你必须把问题分成：
+- non_blocking_assumption
+- needs_confirmation
+- blocking_for_case_generation
+
+重点识别：
+- 几何尺寸是否完整
+- Re/Fr 的特征尺度是否明确
+- 入口条件是否可实现
+- 出口边界是否能映射到 OpenFOAM
+- 湍流模型是否明确
+- 热模型是否明确
+- 运动边界是否明确
+- 观测指标是否需要后处理扩展
+
+每个问题都要给出：
+- field
+- reason
+- severity
+- suggested_question
+- recommended_default_if_any
+
+只输出 JSON。
+```
+
+---
+
+## 19.3 input_router_prompt.txt
+
+```text
+你是 Fluid Scientist 的输入路由器。
+
+你必须根据当前 session 状态、pending_questions、pending_proposal、当前 draft 状态和用户输入，判断用户这句话属于哪类输入。
+
+分类：
+- new_research_request
+- batch_research_request
+- study_selection
+- clarification_answer
+- draft_change_request
+- proposal_confirmation
+- proposal_cancel
+- question_about_draft
+- compile_request
+- run_request
+- unknown
+
+强规则：
+1. 如果用户输入多个编号研究任务，优先输出 batch_research_request。
+2. 如果 session.status 是 batch_review，用户选择第几个任务，输出 study_selection。
+3. 如果存在 pending_proposal，且用户说“确认/可以/应用/就这样/ok”，优先输出 proposal_confirmation。
+4. 如果存在 pending_proposal，且用户说“取消/不要/放弃”，优先输出 proposal_cancel。
+5. 如果 session.status 是 clarifying，且存在 pending_questions，用户回答通常是 clarification_answer。
+6. 如果 draft 已生成，用户说“改成/增加/删除/换成/输出/加入”，通常是 draft_change_request。
+7. 如果用户问“为什么/是什么/什么意思/有什么影响”，通常是 question_about_draft。
+8. 不要只根据关键词判断，要结合状态。
+
+只输出 JSON。
+```
+
+---
+
+## 19.4 draft_generation_prompt.txt
+
+```text
+你是 Fluid Scientist 的实验草案生成器。
+
+输入包括：
+- StudyIntent
+- ResearchState
+- CapabilityRegistry summary
+- confirmed_facts
+- accepted_assumptions
+- rejected_assumptions
+
+你需要生成 ExperimentDraft。
+
+要求：
+1. 生成只读草案，不生成可编辑表单。
+2. 每个参数必须有 source。
+3. source 只能是 user_provided / derived / system_recommended / assumption / unknown_required / capability_default。
+4. 用户明确给过的参数必须自动填入。
+5. 可推导参数必须推导。
+6. 低风险默认值可以推荐，但要说明 reason。
+7. 高风险未知不能乱填。
+8. rejected_assumptions 不能重新加入。
+9. 研究机理目标放入 analysis_goals，不要当成 OpenFOAM 参数。
+10. 输出 JSON。
+```
+
+---
+
+## 19.5 draft_change_prompt.txt
+
+```text
+你是 Fluid Scientist 的草案修改 proposal 生成器。
+
+用户已有一个只读 ExperimentDraft。
+用户会通过自然语言要求修改实验草案。
+
+你的任务是生成 ChangeProposal，不是直接修改 draft。
+
+你必须识别：
+- set_parameter
+- add_parameter
+- remove_parameter
+- add_output
+- remove_output
+- change_boundary_condition
+- change_initial_condition
+- change_physics_model
+- change_geometry
+- change_mesh
+- change_numerics
+- change_solver
+- question
+- clarification_required
+- missing_capability
+
+规则：
+1. 修改已有参数，生成 set_parameter。
+2. 新增未出现过的参数，生成 add_parameter，并标记需要 UnknownParameterMapper。
+3. 新增边界条件，归入 change_boundary_condition。
+4. 新增初始条件，归入 change_initial_condition。
+5. 新增输出，归入 add_output。
+6. 用户只说“增加一个参数”但没说是什么，必须 clarification_required。
+7. 如果修改影响 solver、mesh、case 文件或后处理，必须写入 invalidates。
+8. 不允许直接应用修改。
+9. 输出 JSON。
+```
+
+---
+
+## 19.6 case_plan_prompt.txt
+
+```text
+你是 Fluid Scientist 的 CasePlan 生成器。
+
+输入是已经 confirmed 的 ExperimentDraft。
+你需要生成 OpenFOAM CasePlan，而不是直接生成 case 文件。
+
+必须输出：
+- case_type
+- solver
+- dimensions
+- geometry_plan
+- mesh_plan
+- boundary_condition_plan
+- initial_condition_plan
+- physical_model_plan
+- numerics_plan
+- measurement_plan
+- postprocess_plan
+- required_capabilities
+
+规则：
+1. 不要直接套旧模板。
+2. 不要直接输出 OpenFOAM 文件。
+3. 如果无法确定某项能力是否支持，只写 required_capabilities，由系统检查。
+4. 研究机理目标不进入 OpenFOAM 字典。
+5. 输出 JSON。
+```
+
+---
+
+## 19.7 code_extension_spec_prompt.txt
+
+```text
+你是 Fluid Scientist 的缺失能力分析器。
+
+输入是 MissingCapability。
+你需要生成 CodeExtensionSpec。
+
+要求：
+1. 明确扩展类型。
+2. 明确要满足的接口。
+3. 明确输入输出。
+4. 明确 acceptance tests。
+5. 明确安全约束。
+6. 不要生成代码。
+7. 输出 JSON。
+```
+
+---
+
+# 20. 前端交互
+
+## 20.1 Batch 输入后的页面
+
+当用户输入多个任务后，页面显示：
+
+```text
+我识别到 5 个研究任务
+```
+
+每个任务一张小卡片：
+
+```text
+任务标题
+研究类型
+已识别参数
+关键缺失
+当前可落地程度
+建议优先级
+按钮：展开草案 / 继续澄清 / 查看缺失能力
+```
+
+---
+
+## 20.2 单任务草案页面
+
+用户选择一个任务后：
+
+```text
+StudyIntent
+→ ExperimentDraft
+→ Clarification
+→ Proposal
+→ Confirmed
+→ CasePlan
+```
+
+---
+
+## 20.3 Proposal 展示
+
+Proposal 必须展示：
+
+```text
+修改前
+修改后
+影响范围
+需要重新校验的内容
+是否影响 Case 生成
+是否引入缺失能力
+确认 / 取消
+```
+
+---
+
+## 20.4 不污染聊天流
+
+错误方式：
+
+```text
+用户修改一个参数
+→ 聊天流追加一条“参数已修改”
+→ 页面滚到底部
+```
+
+正确方式：
+
+```text
+用户提出自然语言修改
+→ 系统生成 proposal 卡片
+→ 用户确认
+→ 草案顶部显示“已更新到 v3”
+→ 事件流只记录摘要
+→ 页面不自动滚走
+```
+
+---
+
+# 21. 测试策略
+
+## 21.1 固定 E2E 测试集
+
+必须使用用户提供的 5 个复杂研究任务作为固定测试集。
+
+禁止让 Trae 自己编无上下文的汽油/柴油 case。
+
+---
+
+## 21.2 Batch 识别测试
+
+输入 5 个编号任务。
+
+期望：
+
+```text
+input_type = batch_research_request
+studies.length = 5
+每个 study 有独立 study_id
+不合并成一个 case
+```
+
+---
+
+## 21.3 每个 case 的识别测试
+
+Case 1 必须识别：
+
+```text
+near_wall_inclined_cylinder_wake
+Re=3900
+3D
+transient
+no_slip cylinder and wall
+spanwise periodic
+force coefficients
+spectral analysis
+```
+
+Case 2 必须识别：
+
+```text
+inclined_round_impinging_jet
+angle=45deg
+Re=23000
+nozzle_wall_distance=2D
+heat_flux ambiguity
+thermal_model needs confirmation
+```
+
+Case 3 必须识别：
+
+```text
+inclined_elliptic_cylinder_near_wall_wake
+aspect_ratio=2.0
+angle=30deg
+gap=0.3 * minor_axis
+```
+
+Case 4 必须识别：
+
+```text
+stratified_density
+vertical_oscillation
+Fr=0.2
+moving_body
+internal_wave
+likely_missing_capabilities
+```
+
+Case 5 必须识别：
+
+```text
+backward_facing_step
+Re=5000
+expansion_ratio=1.5
+boundary_layer_thickness=0.3H
+1/7 power-law inlet
+reattachment length
+recommended_priority = 1
+```
+
+---
+
+## 21.4 路由测试
+
+必须覆盖：
+
+```text
+首次输入多个任务 → batch_research_request
+用户选择第 5 个 → study_selection
+澄清回答 → clarification_answer
+草案修改 → draft_change_request
+proposal 确认 → proposal_confirmation
+proposal 取消 → proposal_cancel
+解释问题 → question_about_draft
+未 confirmed 生成 case → 阻止
+confirmed 后生成 case → case_plan
+```
+
+---
+
+## 21.5 LLM 调用测试
+
+必须验证：
+
+```text
+复杂自然语言输入调用 study_decomposition。
+自由文本澄清调用 clarification_extract。
+自然语言修改调用 draft_change_proposal。
+未知参数调用 unknown_parameter_mapping。
+未知指标调用 unknown_metric_mapping。
+确认 proposal 不调用 LLM。
+校验 draft 不调用 LLM。
+确认实验版本不调用 LLM。
+已有能力 compile 不调用 LLM。
+缺失能力生成 CodeExtensionSpec 才调用 LLM。
+```
+
+---
+
+## 21.6 Proposal 测试
+
+必须验证：
+
+```text
+用户确认前 draft 不变。
+用户确认后 draft version + 1。
+proposal 的 base_draft_version 不匹配时不能应用。
+取消 proposal 后 draft 不变。
+proposal 必须有 impact_summary。
+proposal 必须有 invalidates。
+```
+
+---
+
+## 21.7 CasePlan 测试
+
+必须验证：
+
+```text
+confirmed draft 才能生成 CasePlan。
+CasePlan 不直接生成 OpenFOAM 文件。
+CasePlan 必须包含 required_capabilities。
+CapabilityRegistry 必须检查。
+缺能力时生成 MissingCapability。
+不能生成假 Case。
+```
+
+---
+
+## 21.8 CodeExtension 测试
+
+必须验证：
+
+```text
+CodeExtensionSpec 可以生成。
+代码生成后不直接注册。
+测试失败时显示失败原因。
+测试通过后才能 approve。
+approve 后才能 register。
+register 后 CapabilityRegistry 能查到新能力。
+重新 CasePlan 后 missing_capability 消失。
+```
+
+---
+
+# 22. 提交顺序
+
+## Commit 1：StudySplitter + BatchStudyPlan
+
+实现：
+
+```text
+识别单任务 / 多任务；
+编号输入拆分；
+生成 BatchStudyPlan；
+batch_review 状态。
+```
+
+验收：
+
+```text
+用户 5 个复杂任务输入后，系统拆成 5 个 StudyIntent，不合并。
+```
+
+---
+
+## Commit 2：StudyIntent Schema
+
+实现：
+
+```text
+StudyIntent
+ExtractedParameter
+ObservableSpec
+AmbiguityItem
+BatchStudyPlan
+```
+
+验收：
+
+```text
+每个研究任务都能结构化保存。
+```
+
+---
+
+## Commit 3：PhysicsFrameExtractor
+
+实现：
+
+```text
+提取几何；
+提取 Re / Fr / 角度 / 间距；
+提取初始条件；
+提取边界条件；
+提取物理模型；
+提取观测指标；
+提取机理目标。
+```
+
+验收：
+
+```text
+5 个固定 case 的关键参数全部可识别。
+```
+
+---
+
+## Commit 4：AmbiguityDetector
+
+实现：
+
+```text
+non_blocking_assumption
+needs_confirmation
+blocking_for_case_generation
+```
+
+验收：
+
+```text
+热通量歧义、Fr 定义、振荡幅值频率、Re 特征长度等能被识别。
+```
+
+---
+
+## Commit 5：CapabilityPreChecker
+
+实现：
+
+```text
+根据 CapabilityRegistry 预判支持 / 不确定 / 缺失。
+输出 recommended_priority。
+```
+
+验收：
+
+```text
+后台阶被评为最适合优先落地；
+分层振荡圆柱被评为 not_compilable_yet。
+```
+
+---
+
+## Commit 6：Session 持久化和状态机
+
+实现：
+
+```text
+DraftSession
+SessionMessage
+ResearchState
+session restore
+status transition
+```
+
+验收：
+
+```text
+刷新页面恢复 session；
+后端重启后不直接丢；
+每轮输入绑定 session_id。
+```
+
+---
+
+## Commit 7：InputRouter
+
+实现：
+
+```text
+强规则路由；
+LLM 兜底路由；
+study_selection；
+proposal_confirmation；
+clarification_answer。
+```
+
+验收：
+
+```text
+澄清回答不被当成新任务；
+proposal 确认不被当成普通消息；
+batch 下能选择某个 study。
+```
+
+---
+
+## Commit 8：ExperimentDraft 只读草案
+
+实现：
+
+```text
+ExperimentDraft
+DraftGenerator
+参数 source 标记
+只读卡片 UI
+Validator
+```
+
+验收：
+
+```text
+用户给过的值自动填入；
+可推导值自动推导；
+低风险值有推荐；
+高风险未知明确提示。
+```
+
+---
+
+## Commit 9：ChangeProposal
+
+实现：
+
+```text
+DraftChangeAgent
+ChangeProposal
+Proposal UI
+pending_proposal_id
+```
+
+验收：
+
+```text
+自然语言修改只生成 proposal；
+用户确认前 draft 不变；
+proposal 显示影响范围。
+```
+
+---
+
+## Commit 10：ApplyProposalExecutor
+
+实现：
+
+```text
+proposal apply
+version check
+draft version + 1
+DerivationEngine
+Validator rerun
+```
+
+验收：
+
+```text
+确认后更新草案；
+取消后不更新；
+版本过期不能应用。
+```
+
+---
+
+## Commit 11：UnknownParameterMapper / UnknownMetricMapper
+
+实现：
+
+```text
+新增参数归类；
+新增指标归类；
+canonical_id；
+capability_check_required。
+```
+
+验收：
+
+```text
+入口湍流强度、初始压力、壁面热通量、出口速度均匀性、再附点、混合层厚度能正确分类。
+```
+
+---
+
+## Commit 12：Confirmed 版本冻结
+
+实现：
+
+```text
+ready → confirmed
+locked = true
+confirmed 后 clone 修改
+```
+
+验收：
+
+```text
+confirmed 后不能原地修改；
+修改必须 clone 新版本；
+生成 Case 只能基于 confirmed 版本。
+```
+
+---
+
+## Commit 13：CasePlan + CapabilityRegistry
+
+实现：
+
+```text
+CasePlan
+CapabilityRegistry
+missing_capability
+can_compile 判断
+```
+
+验收：
+
+```text
+不直接套模板；
+先生成 CasePlan；
+能力不足时不能生成假 Case；
+前端显示缺失能力原因。
+```
+
+---
+
+## Commit 14：NativeCompiler 接入
+
+实现：
+
+```text
+CasePlan → OpenFOAM case
+compiler result
+case_id
+case files preview
+```
+
+验收：
+
+```text
+标准后台阶或已有支持 case 可以生成；
+生成文件路径明确；
+失败原因明确。
+```
+
+---
+
+## Commit 15：CodeExtension 基础闭环
+
+实现：
+
+```text
+MissingCapability → CodeExtensionSpec
+code generation
+sandbox test
+review
+approve
+register
+```
+
+验收：
+
+```text
+代码不直接注册；
+测试失败有错误；
+审批后 capability 可用。
+```
+
+---
+
+## Commit 16：浏览器 E2E
+
+完整链路：
+
+```text
+用户输入 5 个复杂研究任务
+→ 系统拆成 5 个 StudyIntent
+→ 用户选择后台阶流动
+→ 系统生成只读草案
+→ 系统提出 3 个关键澄清问题
+→ 用户回答
+→ 草案 ready
+→ 用户自然语言修改输出指标
+→ 系统生成 proposal
+→ 用户确认
+→ draft version + 1
+→ 用户 confirmed
+→ 生成 CasePlan
+→ CapabilityRegistry 检查
+→ NativeCompiler 成功或 MissingCapability 清晰展示
+```
+
+---
+
+# 23. 最终验收标准
+
+完成后必须满足：
+
+```text
+1. 复杂编号输入能拆成多个 StudyIntent。
+2. 5 个固定 CFD 研究任务不会被合并。
+3. 每个任务的研究对象、几何、Re/Fr、初始条件、边界条件、物理模型、观测指标能正确识别。
+4. 研究机理目标不会被误当成 OpenFOAM 参数。
+5. 缺失信息能分为 assumption、needs_confirmation、blocking。
+6. 每轮最多问 3 个关键问题。
+7. 系统能推荐最适合优先落地的 case。
+8. 用户能选择一个 study 进入 DraftSession。
+9. Draft 是只读卡片，不是用户直接编辑的参数表。
+10. 参数有来源标记。
+11. 用户自然语言修改只生成 ChangeProposal。
+12. 用户确认前 draft 不变。
+13. 用户确认后 draft version + 1。
+14. proposal version 不匹配时不能应用。
+15. confirmed 后 draft 冻结。
+16. confirmed 后修改必须 clone 新版本。
+17. 生成 Case 前必须先生成 CasePlan。
+18. CasePlan 必须经过 CapabilityRegistry。
+19. 能力不足时进入 MissingCapability。
+20. 系统不能生成假 Case。
+21. 缺能力可以生成 CodeExtensionSpec。
+22. LLM 生成代码必须 sandbox test 和 approve 后才能 register。
+23. 每次 LLM 调用都有 LLMCallRecord。
+24. 前端能显示 real/fake model 和 fallback reason。
+25. 每个状态只有一个主按钮。
+26. 至少一个浏览器 E2E 证明完整链路可用。
+```
+
+---
+
+# 24. 给 Codex / Trae 的直接指令
+
+这个分支的优先级不是继续扩展更多复杂物理场景。
+
+第一优先级是：
+
+```text
+把复杂自然语言研究计划拆对。
+```
+
+第二优先级是：
+
+```text
+把只读草案、多轮修改、proposal 确认、版本冻结、CasePlan 能力检查跑通。
+```
+
+第三优先级才是：
+
+```text
+扩展更多 OpenFOAM 编译能力。
+```
+
+禁止继续出现：
+
+```text
+1. 把多个研究任务合并成一个 case。
+2. 参数全空。
+3. 无关参数混入。
+4. 用户回答澄清问题被当成新任务。
+5. 用户修改参数后直接写入 draft。
+6. proposal 未确认就生效。
+7. confirmed 后还能原地修改。
+8. 没有 confirmed 就生成 Case。
+9. compiler 不支持还假装生成 Case。
+10. LLM fake fallback 不提示。
+11. 代码生成后不测试直接注册。
+12. 把机理目标当成可编译参数。
+13. 把热通量、Fr、对流边界这类歧义条件直接瞎填。
+```
+
+最终要让用户感觉：
+
+```text
+系统真的理解了我的复杂研究计划；
+系统能先拆解，而不是乱套模板；
+系统知道哪些条件已明确，哪些需要澄清；
+系统知道哪些 case 当前能落地，哪些需要能力扩展；
+系统给我的是科研实验草案，不是空参数表；
+我可以通过自然语言修改；
+每次修改前系统会说明影响；
+我确认后系统才更新；
+生成不了 Case 时，系统能明确告诉我缺什么。
+```
