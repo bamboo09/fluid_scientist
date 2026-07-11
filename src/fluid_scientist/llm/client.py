@@ -1,15 +1,17 @@
 """Simple LLM client wrapper with call recording.
 
-The :class:`LLMClient` is a thin abstraction over an LLM provider.  In
-production it would call OpenAI / Anthropic / a local model; for now it
-ships with a deterministic mock backend that returns structured
-responses tailored to each ``purpose`` while recording every invocation
-as an :class:`~fluid_scientist.draft_session.models.LLMCallRecord`.
+The :class:`LLMClient` is a thin abstraction over an LLM provider.  It
+supports real OpenAI-compatible providers (OpenAI, GLM/智谱, DeepSeek)
+via the ``openai`` SDK, and falls back to a deterministic mock backend
+when no provider is configured.
+
+Every invocation is recorded as an :class:`~fluid_scientist.draft_session.models.LLMCallRecord`.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from typing import Any
@@ -36,13 +38,31 @@ _ALLOWED_PURPOSES: frozenset[str] = frozenset({
 })
 _FALLBACK_PURPOSE = "explanation"
 
+# Provider base URLs for OpenAI-compatible APIs.
+_PROVIDER_BASE_URLS: dict[str, str] = {
+    "glm": "https://open.bigmodel.cn/api/paas/v4/",
+    "deepseek": "https://api.deepseek.com",
+    "openai": "https://api.openai.com/v1",
+}
+
+# Suggested model IDs for each provider.
+_PROVIDER_MODELS: dict[str, list[str]] = {
+    "openai": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4"],
+    "glm": ["glm-4-plus", "glm-4", "glm-4-flash", "glm-4-long"],
+    "deepseek": ["deepseek-chat", "deepseek-reasoner"],
+}
+
 
 class LLMClient:
-    """Simple LLM client wrapper with call recording.
+    """LLM client wrapper with call recording.
 
-    In production this would connect to OpenAI/Anthropic/etc.
-    For now it provides a deterministic fallback that returns structured
-    responses based on prompt type, while recording all calls via LLMCallRecord.
+    When ``provider`` is ``"mock"`` (default), uses a deterministic fallback.
+    When a real provider and API key are configured, calls the provider's
+    chat.completions endpoint via the ``openai`` SDK.
+
+    An optional pre-built ``client`` may be injected for testing or advanced
+    configuration; when omitted, an :class:`openai.OpenAI` client is created
+    eagerly via :meth:`_init_real_client` (or lazily on the first real call).
     """
 
     def __init__(
@@ -62,6 +82,74 @@ class LLMClient:
         self._base_url = base_url
         self._timeout_seconds = timeout_seconds
         self._client = client
+
+        # Eagerly initialize the real client when a provider and key are
+        # available and no pre-built client was injected.  This mirrors the
+        # validated Trae behaviour while preserving the Codex ability to
+        # accept an injected client.
+        if provider != "mock" and client is None and api_key:
+            self._init_real_client()
+
+    # ------------------------------------------------------------------
+    # Configuration / introspection
+    # ------------------------------------------------------------------
+
+    def _init_real_client(self) -> None:
+        """Initialize the OpenAI SDK client for the configured provider.
+
+        Uses :data:`_PROVIDER_BASE_URLS` to resolve a sensible default
+        ``base_url`` when none was supplied explicitly.  Raises
+        ``ImportError`` if the ``openai`` package is not installed — this
+        is intentional so that misconfigured real providers fail loudly
+        instead of silently degrading to the mock backend.
+        """
+        from openai import OpenAI
+
+        base_url = self._base_url or _PROVIDER_BASE_URLS.get(self._provider)
+        kwargs: dict[str, Any] = {
+            "api_key": self._api_key,
+            "timeout": self._timeout_seconds,
+            "max_retries": 0,
+        }
+        if base_url:
+            kwargs["base_url"] = base_url
+        self._client = OpenAI(**kwargs)
+
+    def reconfigure(
+        self,
+        provider: str,
+        model_name: str,
+        api_key: str,
+        base_url: str | None = None,
+        timeout_seconds: float = 120.0,
+    ) -> None:
+        """Reconfigure the client to use a real provider at runtime.
+
+        Discards any previously injected or constructed client and builds
+        a fresh one via :meth:`_init_real_client`.
+        """
+        self._provider = provider
+        self._model_name = model_name
+        self._api_key = api_key
+        self._base_url = base_url
+        self._timeout_seconds = timeout_seconds
+        self._client = None
+        self._init_real_client()
+
+    @property
+    def is_mock(self) -> bool:
+        """``True`` when no real provider/client is available."""
+        return self._provider == "mock" or self._client is None
+
+    @property
+    def provider(self) -> str:
+        """The currently configured provider identifier."""
+        return self._provider
+
+    @property
+    def model_name(self) -> str:
+        """The currently configured model name."""
+        return self._model_name
 
     # ------------------------------------------------------------------
     # Public API
@@ -94,12 +182,22 @@ class LLMClient:
 
         Returns:
             A tuple of ``(parsed_output_dict, call_record)``.
+
+        Raises:
+            RuntimeError: When a real (non-mock) provider is configured
+                but the call fails.  The error is raised *after* the
+                failure is recorded so callers still have an audit trail.
         """
         call_id = f"llm_{uuid.uuid4().hex[:12]}"
         refs = list(input_refs) if input_refs else []
         started = time.perf_counter()
 
         # Decide whether to use the real provider or fall back to mock.
+        # NB: we intentionally check ``self._provider`` (not
+        # ``self.is_mock``) so that a misconfigured real provider — one
+        # whose ``_client`` is ``None`` due to a missing api_key — fails
+        # loudly inside ``_real_response`` rather than silently using the
+        # mock backend.
         use_mock = self._provider == "mock"
         fallback_reason: str | None = None
         raw_output: str | None = None
@@ -188,7 +286,7 @@ class LLMClient:
         return records[-1] if records else None
 
     # ------------------------------------------------------------------
-    # Mock response generators
+    # Real provider call
     # ------------------------------------------------------------------
 
     def _real_response(
@@ -198,22 +296,29 @@ class LLMClient:
         user_message: str,
         output_schema: dict | None,
     ) -> tuple[dict[str, Any], str]:
-        """Call the configured OpenAI-compatible provider and parse JSON."""
-        if not self._api_key and self._client is None:
-            raise RuntimeError("LLM provider is configured without an api_key")
-        client = self._client
-        if client is None:
-            from openai import OpenAI
+        """Call the configured OpenAI-compatible provider and parse JSON.
 
-            kwargs: dict[str, Any] = {
-                "api_key": self._api_key,
-                "timeout": self._timeout_seconds,
-                "max_retries": 0,
-            }
-            if self._base_url:
-                kwargs["base_url"] = self._base_url
-            client = OpenAI(**kwargs)
-            self._client = client
+        If the provider returns content wrapped in markdown code blocks
+        (```` ```json ```` / ```` ``` ````) or embedded in prose, the
+        :meth:`_extract_json` helper is used to recover the JSON object
+        before falling back to a hard ``RuntimeError``.
+
+        Raises:
+            RuntimeError: If no client/api_key is available, the provider
+                returns an empty response, or the content cannot be
+                parsed as JSON.
+        """
+        if self._client is None:
+            # Lazily initialize when the constructor could not (e.g. the
+            # caller set ``provider != "mock"`` but supplied no key at
+            # construction time and later called ``reconfigure`` without
+            # an api_key, or the api_key was set via attribute mutation).
+            if not self._api_key:
+                raise RuntimeError("LLM provider is configured without an api_key")
+            self._init_real_client()
+        client = self._client
+        if client is None:  # pragma: no cover - defensive
+            raise RuntimeError("LLM provider client could not be initialized")
 
         schema_note = ""
         if output_schema:
@@ -234,11 +339,64 @@ class LLMClient:
             raise RuntimeError("provider returned empty response")
         try:
             parsed = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError("provider returned non-JSON response") from exc
+        except json.JSONDecodeError:
+            # The provider may have wrapped the JSON in markdown fences or
+            # surrounding prose; attempt extraction before failing.
+            parsed = self._extract_json(content)
+            if parsed is None:
+                raise RuntimeError("provider returned non-JSON response")
         if not isinstance(parsed, dict):
             raise RuntimeError("provider JSON root must be an object")
         return parsed, content
+
+    @staticmethod
+    def _extract_json(text: str) -> dict | None:
+        """Try to extract a JSON object from a text response.
+
+        Handles three common provider output patterns:
+
+        1. ```` ```json ... ``` ```` fenced blocks
+        2. ```` ``` ... ``` ```` generic fenced blocks
+        3. Bare ``{ ... }`` objects embedded in prose
+
+        Returns the parsed ``dict`` on success, or ``None`` if no valid
+        JSON object could be recovered.
+        """
+        # 1. ```json ... ``` block
+        match = re.search(r'```json\s*(.*?)\s*```', text, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group(1))
+                if isinstance(result, dict):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        # 2. ``` ... ``` block
+        match = re.search(r'```\s*(.*?)\s*```', text, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group(1))
+                if isinstance(result, dict):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        # 3. Bare { ... } object
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        if match:
+            try:
+                result = json.loads(match.group(0))
+                if isinstance(result, dict):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+        return None
+
+    # ------------------------------------------------------------------
+    # Mock response generators
+    # ------------------------------------------------------------------
 
     def _mock_response(
         self,
