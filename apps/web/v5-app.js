@@ -1,0 +1,1058 @@
+// ==========================================================================
+// Fluid Scientist V5 Conversational Workbench
+// Three-panel layout: Left (Session/Study list) | Center (Conversation) | Right (Read-only Draft)
+// ==========================================================================
+
+// ---- DOM helpers ----
+const $ = (s) => document.querySelector(s);
+const byId = (id) => document.getElementById(id);
+function el(tag, attrs = {}, children = []) {
+  const e = document.createElement(tag);
+  if (attrs && typeof attrs === "object" && !Array.isArray(attrs)) {
+    for (const [k, v] of Object.entries(attrs)) {
+      if (v === false || v == null) continue;
+      if (k === "class") e.className = v;
+      else if (k === "text") e.textContent = v;
+      else if (k === "html") e.innerHTML = v;
+      else if (k.startsWith("on") && typeof v === "function") e.addEventListener(k.slice(2), v);
+      else if (/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(k)) e.setAttribute(k, v);
+    }
+  }
+  for (const c of [].concat(children)) {
+    if (c == null) continue;
+    e.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  }
+  return e;
+}
+
+// ---- API layer ----
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+    ...opts,
+  });
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { const j = await res.json(); detail = j.detail || JSON.stringify(j); } catch {}
+    const err = new Error(`API ${res.status}: ${typeof detail === "string" ? detail.slice(0, 200) : JSON.stringify(detail).slice(0, 200)}`);
+    err.status = res.status;
+    err.detail = detail;
+    throw err;
+  }
+  if (res.status === 204) return null;
+  return res.json();
+}
+
+const API = {
+  createSession: () => api("/api/v5/sessions", { method: "POST", body: JSON.stringify({}) }),
+  getSession: (id) => api(`/api/v5/sessions/${id}`),
+  listSessions: () => api("/api/v5/sessions-list"),
+  sendMessage: (id, msg) => api(`/api/v5/sessions/${id}/messages`, { method: "POST", body: JSON.stringify({ session_id: id, message: msg }) }),
+  selectStudy: (batchId, sessionId, studyId) => api(`/api/v5/batches/${batchId}/select-study`, { method: "POST", body: JSON.stringify({ session_id: sessionId, study_id: studyId }) }),
+  getDraft: (id) => api(`/api/v5/drafts/${id}`),
+  validateDraft: (id) => api(`/api/v5/drafts/${id}/validate`, { method: "POST" }),
+  confirmDraft: (id, sessionId) => api(`/api/v5/drafts/${id}/confirm`, { method: "POST", body: JSON.stringify({ session_id: sessionId, draft_id: id }) }),
+  requestChange: (draftId, sessionId, msg) => api(`/api/v5/drafts/${draftId}/changes`, { method: "POST", body: JSON.stringify({ session_id: sessionId, draft_id: draftId, user_message: msg }) }),
+  applyProposal: (proposalId, sessionId) => api(`/api/v5/proposals/${proposalId}/apply`, { method: "POST", body: JSON.stringify({ session_id: sessionId, proposal_id: proposalId }) }),
+  cancelProposal: (proposalId) => api(`/api/v5/proposals/${proposalId}/cancel`, { method: "POST", body: JSON.stringify({}) }),
+  getProposal: (id) => api(`/api/v5/proposals/${id}`),
+  generateCasePlan: (sessionId, draftId) => api("/api/v5/case-plans/generate", { method: "POST", body: JSON.stringify({ session_id: sessionId, draft_id: draftId }) }),
+  getCasePlan: (id) => api(`/api/v5/case-plans/${id}`),
+  compileCasePlan: (id) => api(`/api/v5/case-plans/${id}/compile`, { method: "POST" }),
+  submitCase: (casePlanId) => api(`/api/v5/cases/${casePlanId}/submit`, { method: "POST" }),
+  getJobStatus: (jobId) => api(`/api/v5/jobs/${jobId}`),
+  cancelJob: (jobId) => api(`/api/v5/jobs/${jobId}/cancel`, { method: "POST" }),
+  getJobResults: (jobId) => api(`/api/v5/jobs/${jobId}/results`),
+  // Codex V5 Pipeline fast-path endpoints (Codex-specific, retained from v5-pipeline.js).
+  // The backend PipelineRunRequest expects `user_description` (see v5_router.py).
+  runPipeline: (userDescription) => api("/api/v5/pipeline/run", { method: "POST", body: JSON.stringify({ user_description: userDescription }) }),
+  modifyPipeline: (pipelineSessionId, modificationText) => api("/api/v5/pipeline/modify", { method: "POST", body: JSON.stringify({ session_id: pipelineSessionId, modification_text: modificationText }) }),
+  systemVersion: () => api("/api/system/version"),
+  listTargets: () => api("/api/execution-targets"),
+  workstationStatus: () => api("/api/workstation/status"),
+  detectWorkstation: () => api("/api/workstation/detect"),
+  configureWorkstation: (cfg) => api("/api/workstation/configure", { method: "POST", body: JSON.stringify(cfg) }),
+  getModelConfig: () => api("/api/v5/model-config"),
+  configureModel: (cfg) => api("/api/v5/model-config", { method: "POST", body: JSON.stringify(cfg) }),
+};
+
+// ---- State (frontend only caches display state; backend is source of truth) ----
+const state = {
+  sessionId: localStorage.getItem("v5_sid") || null,
+  session: null,
+  batch: null,
+  studies: [],
+  selectedStudy: null,
+  draft: null,
+  proposal: null,
+  casePlan: null,
+  compiledCase: null,
+  job: null,
+  conversations: [],  // {role, text, timestamp, actions?}
+  modelConfigured: false,
+  allowedActions: [],
+};
+
+// ---- Label helpers ----
+const LABELS = {
+  readiness: { draftable: "可起草", needs_clarification: "需澄清", not_compilable_yet: "暂不可编译" },
+  studyType: {
+    cylinder: "圆柱绕流", backward_facing_step: "后台阶流", cavity: "方腔流",
+    pipe: "管流", channel: "槽道流", airfoil: "翼型", flat_plate: "平板",
+    unknown: "未分类", external: "外流", internal: "内流", cfd_simulation: "CFD仿真",
+  },
+  draftStatus: { draft: "草稿", ready: "就绪", confirmed: "已确认", compiled: "已编译", running: "运行中", completed: "已完成", failed: "失败" },
+  sessionStatus: {
+    collecting_intent: "收集意图", batch_review: "任务审阅", clarifying: "澄清中",
+    draft_ready: "草案就绪", proposal_pending: "提案待确认", ready: "就绪",
+    confirmed: "已确认", case_planning: "算例规划", compiled: "已编译",
+    running: "运行中", completed: "已完成", failed: "失败",
+  },
+};
+
+function label(map, key) { return map[key] || key || "—"; }
+
+// Codex V5 Compile-Ready Pipeline stage labels (mirrors v5-pipeline.js STAGE_LABELS).
+// The pipeline fast-path is Codex-specific; these labels keep the inline result
+// card readable when /api/v5/pipeline/run is invoked from the action bar.
+const PIPELINE_STAGE_LABELS = {
+  understanding: "理解意图",
+  designing: "设计参数",
+  closing: "闭合参数依赖",
+  resolving_capabilities: "检查能力",
+  generating_case: "生成算例文件",
+  validating_case: "验证算例",
+  compile_ready: "编译就绪",
+  failed: "失败",
+};
+
+// ---- Conversation Timeline ----
+function addMessage(role, text, extra = {}) {
+  const msg = { role, text, timestamp: new Date().toISOString(), ...extra };
+  state.conversations.push(msg);
+  renderMessage(msg);
+  scrollConversationToBottom();
+}
+
+function renderMessage(msg) {
+  const tl = byId("conversation-timeline");
+  const avatarText = msg.role === "user" ? "你" : msg.role === "system" ? "系" : "FS";
+  const div = el("div", { class: `conv-msg ${msg.role}` }, [
+    el("div", { class: "conv-msg-avatar", text: avatarText }),
+    el("div", { class: "conv-msg-body" }, [
+      el("div", { class: "conv-msg-meta", text: msg.role === "user" ? "用户" : msg.role === "system" ? "系统" : "研究助手" }),
+      el("div", { text: msg.text }),
+      ...renderMessageExtra(msg),
+    ]),
+  ]);
+  tl.appendChild(div);
+}
+
+function renderMessageExtra(msg) {
+  const extras = [];
+  // Study cards in conversation
+  if (msg.studies?.length) {
+    const grid = el("div", { class: "conv-study-cards" });
+    for (const s of msg.studies) {
+      const known = (s.known_parameters || []).slice(0, 3).map(p => p.display_name || p.canonical_id || "?").join(", ");
+      const missing = (s.unknown_required_parameters || []).slice(0, 2).map(p => p.display_name || p.canonical_id || "?").join(", ");
+      grid.appendChild(el("div", {
+        class: "conv-study-card" + (state.selectedStudy?.study_id === s.study_id ? " selected" : ""),
+        "data-study-id": s.study_id,
+        onclick: () => selectStudy(s),
+      }, [
+        el("h4", { text: s.title?.slice(0, 40) || s.research_objective?.slice(0, 40) || "研究任务" }),
+        el("span", { class: "type-chip", text: label(LABELS.studyType, s.study_type) }),
+        known ? el("div", { class: "mini-params", text: `已知: ${known}` }) : null,
+        missing ? el("div", { class: "mini-missing", text: `缺失: ${missing}` }) : null,
+        el("div", { style: "margin-top:4px;" }, [
+          el("span", { class: `readiness-badge ${s.readiness_level || "draftable"}`, text: label(LABELS.readiness, s.readiness_level) }),
+        ]),
+      ]));
+    }
+    extras.push(grid);
+  }
+  // Proposal in conversation
+  if (msg.proposal) {
+    const p = msg.proposal;
+    const diffDiv = el("div", { class: "conv-proposal" }, [
+      el("div", { class: "proposal-header" }, [
+        el("h4", { text: "修改提案" }),
+        el("span", { class: "proposal-version", text: `基于 Draft v${p.base_draft_version || "?"}` }),
+      ]),
+    ]);
+    if (p.summary) {
+      diffDiv.appendChild(el("div", { class: "proposal-summary", text: p.summary }));
+    }
+    // Change diff table
+    if (p.changes?.length) {
+      const tbl = el("table", { class: "proposal-diff-table" }, [
+        el("thead", {}, [el("tr", {}, [
+          el("th", { text: "字段" }),
+          el("th", { text: "修改前" }),
+          el("th", { text: "修改后" }),
+          el("th", { text: "类型" }),
+        ])]),
+        el("tbody", {}, p.changes.map(c => {
+          const path = c.target_path || c.target || c.path || "?";
+          const oldVal = c.old_value != null ? String(c.old_value) : "—";
+          const newVal = c.new_value != null ? String(c.new_value) : "—";
+          const unit = c.unit ? ` ${c.unit}` : "";
+          const ct = c.change_type || c.op || "修改";
+          const changeLabels = {
+            set_parameter: "修改参数", add_parameter: "新增参数", remove_parameter: "删除参数",
+            change_boundary_condition: "修改边界", change_initial_condition: "修改初场",
+            change_physics_model: "修改物理模型", change_mesh: "修改网格", change_solver: "修改求解器",
+            change_geometry: "修改几何", change_numerics: "修改数值格式",
+            add_output: "新增观测量", remove_output: "删除观测量",
+            add_assumption: "新增假设", question: "提问", clarification_required: "需澄清",
+          };
+          return el("tr", {}, [
+            el("td", { text: path }),
+            el("td", { class: "diff-old", text: oldVal + unit }),
+            el("td", { class: "diff-new", text: newVal + unit }),
+            el("td", { text: changeLabels[ct] || ct }),
+          ]);
+        })),
+      ]);
+      diffDiv.appendChild(tbl);
+    }
+    // Impact summary
+    if (p.impact_summary?.length) {
+      diffDiv.appendChild(el("div", { class: "proposal-impact" }, [
+        el("div", { class: "proposal-impact-title", text: "影响分析" }),
+        ...p.impact_summary.map(imp => el("div", { class: "proposal-impact-item", text: `• ${imp}` })),
+      ]));
+    }
+    // Invalidated downstream
+    if (p.invalidates?.length) {
+      diffDiv.appendChild(el("div", { class: "proposal-invalidates", text: `失效项: ${p.invalidates.join(", ")}` }));
+    }
+    // Action buttons
+    if (p.status === "pending") {
+      diffDiv.appendChild(el("div", { class: "proposal-actions" }, [
+        el("button", { class: "button button-primary button-small", text: "确认修改", onclick: () => applyProposal(p) }),
+        el("button", { class: "button button-secondary button-small", text: "取消修改", onclick: () => cancelProposal(p) }),
+      ]));
+    } else if (p.status === "applied") {
+      diffDiv.appendChild(el("div", { class: "proposal-status applied", text: "✓ 已应用" }));
+    } else if (p.status === "cancelled") {
+      diffDiv.appendChild(el("div", { class: "proposal-status cancelled", text: "✗ 已取消" }));
+    }
+    extras.push(diffDiv);
+  }
+  // CasePlan in conversation
+  if (msg.casePlan) {
+    const cp = msg.casePlan;
+    extras.push(el("div", { style: "margin-top:8px;padding:10px;border:1px solid var(--teal);border-radius:6px;background:var(--teal-pale);" }, [
+      el("strong", { text: `算例规划已生成: ${cp.solver || "?"} · ${cp.dimensions || "?"}` }),
+      el("br"),
+      cp.can_compile ? el("span", { style: "color:#155724;font-size:11px;", text: "✓ 可编译" }) : el("span", { style: "color:#721c24;font-size:11px;", text: "⚠ 有阻塞: " + (cp.blocking_reasons || []).join(", ") }),
+    ]));
+  }
+  // Codex V5 Pipeline result card (one-click compile-ready generation)
+  if (msg.pipeline) {
+    extras.push(renderPipelineCard(msg.pipeline));
+  }
+  // Error
+  if (msg.error) {
+    extras.push(el("div", { style: "margin-top:6px;padding:6px 10px;background:#f8d7da;border-radius:4px;font-size:12px;color:#721c24;", text: msg.error }));
+  }
+  return extras;
+}
+
+function scrollConversationToBottom() {
+  const tl = byId("conversation-timeline");
+  tl.scrollTop = tl.scrollHeight;
+}
+
+// ---- Left Panel: Session & Study List ----
+function renderSessionList() {
+  const container = byId("session-list");
+  container.innerHTML = "";
+  if (state.session) {
+    const item = el("div", { class: "session-item active" }, [
+      el("div", { text: state.session.session_id?.slice(0, 20) + "..." }),
+      el("div", { class: "session-time", text: `状态: ${label(LABELS.sessionStatus, state.session.status)}` }),
+    ]);
+    container.appendChild(item);
+  } else {
+    container.appendChild(el("div", { class: "session-item", text: "点击 + 新建开始" }));
+  }
+}
+
+function renderStudyList() {
+  const container = byId("study-items");
+  const section = byId("study-list");
+  if (!state.studies.length) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+  container.innerHTML = "";
+  for (const s of state.studies) {
+    const isSelected = state.selectedStudy?.study_id === s.study_id;
+    const draftInfo = state.draft && state.selectedStudy?.study_id === s.study_id ? ` · Draft v${state.draft.version}` : "";
+    container.appendChild(el("div", {
+      class: "study-item" + (isSelected ? " selected" : ""),
+      onclick: () => { if (!isSelected) selectStudy(s); },
+    }, [
+      el("div", { class: "study-item-title", text: s.title?.slice(0, 30) || s.research_objective?.slice(0, 30) || "研究任务" }),
+      el("div", { class: `study-item-status ${s.readiness_level || "draftable"}`, text: label(LABELS.readiness, s.readiness_level) + draftInfo }),
+    ]));
+  }
+}
+
+// ---- Right Panel: Read-only Draft Viewer ----
+function renderDraftViewer() {
+  const viewer = byId("draft-viewer");
+  const badge = byId("draft-version-badge");
+  viewer.innerHTML = "";
+
+  if (!state.draft) {
+    badge.hidden = true;
+    viewer.appendChild(el("div", { class: "empty-state" }, [
+      el("p", { text: "尚未生成研究方案" }),
+      el("p", { class: "empty-hint", text: "在中间对话区输入研究目标，系统将自动分解为研究任务并生成结构化草案。" }),
+    ]));
+    return;
+  }
+
+  const d = state.draft;
+  badge.hidden = false;
+  badge.textContent = `v${d.version} · ${label(LABELS.draftStatus, d.status)}`;
+
+  // Objective
+  viewer.appendChild(section("研究目标", [
+    fieldRow("目标", d.objective?.slice(0, 100) || "—", "inferred"),
+  ]));
+
+  // Study type
+  viewer.appendChild(section("研究类型", [
+    fieldRow("类型", label(LABELS.studyType, d.study_type), "inferred"),
+    fieldRow("维度", d.physics_models?.dimension || "—", "pending"),
+    fieldRow("时间", d.physics_models?.temporal || "—", "pending"),
+    fieldRow("湍流", d.physics_models?.turbulent ? "是" : "否", "pending"),
+  ]));
+
+  // Geometry
+  const geo = d.geometry || {};
+  viewer.appendChild(section("几何配置", Object.keys(geo).length
+    ? Object.entries(geo).map(([k, v]) => fieldRow(k, String(v), "inferred"))
+    : [fieldRow("几何", "待填充", "missing")]
+  ));
+
+  // Control parameters
+  const params = d.control_parameters || [];
+  if (params.length) {
+    const tbl = el("table", { class: "draft-param-table-mini" }, [
+      el("thead", {}, [el("tr", {}, [el("th", { text: "参数" }), el("th", { text: "值" }), el("th", { text: "单位" }), el("th", { text: "来源" })])]),
+      el("tbody", {}, params.map(p => el("tr", {}, [
+        el("td", { text: p.display_name || p.parameter_id || "?" }),
+        el("td", { text: p.value != null ? String(p.value) : "—" }),
+        el("td", { text: p.unit || "—" }),
+        el("td", { text: p.source || "—" }),
+      ]))),
+    ]);
+    viewer.appendChild(el("div", { class: "draft-readonly-section" }, [
+      el("h3", { text: `控制参数 (${params.length})` }),
+      tbl,
+    ]));
+  } else {
+    viewer.appendChild(section("控制参数", [fieldRow("参数", "未提取到参数", "missing")]));
+  }
+
+  // Boundary conditions
+  const bcs = d.boundary_conditions || {};
+  const bcKeys = Object.keys(bcs);
+  viewer.appendChild(section("边界条件", bcKeys.length
+    ? bcKeys.map(k => fieldRow(k, typeof bcs[k] === "object" ? JSON.stringify(bcs[k]).slice(0, 50) : String(bcs[k]), "pending"))
+    : [fieldRow("边界条件", "待填充（入口/出口/壁面）", "missing")]
+  ));
+
+  // Initial conditions
+  const ics = d.initial_conditions || {};
+  viewer.appendChild(section("初始条件", Object.keys(ics).length
+    ? Object.entries(ics).map(([k, v]) => fieldRow(k, String(v), "pending"))
+    : [fieldRow("初始条件", "待填充", "missing")]
+  ));
+
+  // Mesh
+  const mesh = d.mesh || {};
+  viewer.appendChild(section("网格要求", Object.keys(mesh).length
+    ? Object.entries(mesh).map(([k, v]) => fieldRow(k, String(v), "pending"))
+    : [fieldRow("网格", "待配置", "missing")]
+  ));
+
+  // Solver
+  const solver = d.solver || {};
+  viewer.appendChild(section("求解器", Object.keys(solver).length
+    ? Object.entries(solver).map(([k, v]) => fieldRow(k, String(v), "pending"))
+    : [fieldRow("求解器", "待选择", "missing")]
+  ));
+
+  // Observables / requested outputs
+  const outputs = d.requested_outputs || [];
+  viewer.appendChild(section("观测量", outputs.length
+    ? outputs.map(o => fieldRow(typeof o === "string" ? o : o.name || "?", "", "pending"))
+    : [fieldRow("观测量", "待指定", "missing")]
+  ));
+
+  // Analysis goals
+  const goals = d.analysis_goals || [];
+  viewer.appendChild(section("分析目标", goals.length
+    ? goals.map(g => fieldRow("•", g, "pending"))
+    : [fieldRow("分析目标", "待指定", "missing")]
+  ));
+
+  // Blocking issues
+  if (d.blocking_issues?.length) {
+    viewer.appendChild(el("div", { class: "draft-readonly-section" }, [
+      el("h3", { style: "color: var(--red);", text: "阻塞问题" }),
+      ...d.blocking_issues.map(bi => el("div", { style: "font-size:11px;color:#721c24;padding:2px 0;", text: `⚠ ${bi.message || bi.check || JSON.stringify(bi)}` })),
+    ]));
+  }
+
+  // Assumptions
+  const assumptions = d.assumptions || [];
+  if (assumptions.length) {
+    viewer.appendChild(section("假设", assumptions.map(a => fieldRow("•", typeof a === "string" ? a : a.display_name || a.description || "—", "inferred"))));
+  }
+
+  // Draft status indicator
+  if (d.status === "confirmed") {
+    viewer.appendChild(el("div", { style: "padding:8px;background:#d4edda;border-radius:6px;font-size:12px;color:#155724;margin-top:8px;", text: "✓ 草案已确认，可生成 CasePlan" }));
+  }
+}
+
+function section(title, children) {
+  return el("div", { class: "draft-readonly-section" }, [
+    el("h3", { text: title }),
+    ...children,
+  ]);
+}
+
+function fieldRow(label, value, status) {
+  const statusLabels = { confirmed: "已确认", pending: "待确认", inferred: "模型推断", "user-provided": "用户提供", missing: "能力缺失", conflict: "存在冲突" };
+  return el("div", { class: "field-row" }, [
+    el("span", { class: "field-label-inline", text: label }),
+    el("span", { class: "field-value-inline", text: value }),
+    status ? el("span", { class: `field-status ${status}`, text: statusLabels[status] || status }) : null,
+  ]);
+}
+
+// ---- Action Bar ----
+function updateActionBar() {
+  const bar = byId("action-bar");
+  bar.innerHTML = "";
+  const actions = [];
+
+  // Codex V5 Pipeline fast-path: one-click compile-ready case generation.
+  // Shown whenever an active draft exists, alongside the state-based actions,
+  // so the Codex pipeline quick path remains reachable from the Trae UI.
+  if (state.draft) {
+    actions.push({ text: "一键生成可编译算例 ⚡", class: "button-secondary", fn: () => runCodexPipeline() });
+  }
+
+  if (state.proposal?.status === "pending") {
+    actions.push({ text: "确认修改", class: "button-primary", fn: () => applyProposal(state.proposal) });
+    actions.push({ text: "取消修改", class: "button-secondary", fn: () => cancelProposal(state.proposal) });
+  } else if (state.draft && state.draft.status !== "confirmed") {
+    actions.push({ text: "确认草案", class: "button-primary", fn: () => confirmDraft() });
+    actions.push({ text: "重新校验", class: "button-secondary", fn: () => validateDraft() });
+  } else if (state.draft?.status === "confirmed" && !state.casePlan) {
+    actions.push({ text: "生成 CasePlan", class: "button-primary", fn: () => generateCasePlan() });
+  } else if (state.casePlan) {
+    if (state.casePlan.can_compile && !state.compiledCase) {
+      actions.push({ text: "编译算例", class: "button-primary", fn: () => compileCase() });
+    } else if (state.compiledCase) {
+      if (!state.job) {
+        actions.push({ text: "提交工作站", class: "button-primary", fn: () => submitToWorkstation() });
+      } else if (state.job.state === "running" || state.job.state === "queued") {
+        actions.push({ text: "刷新状态", class: "button-secondary", fn: () => pollJobStatus() });
+        actions.push({ text: "取消任务", class: "button-secondary", fn: () => cancelJob() });
+      } else if (state.job.state === "succeeded") {
+        actions.push({ text: "查看结果", class: "button-primary", fn: () => fetchJobResults() });
+      }
+    }
+  }
+
+  if (actions.length === 0) {
+    bar.hidden = true;
+    return;
+  }
+  bar.hidden = false;
+  for (const a of actions) {
+    bar.appendChild(el("button", { class: `button ${a.class}`, text: a.text, onclick: a.fn }));
+  }
+}
+
+// ---- Composer ----
+function updateComposer() {
+  const input = byId("research-input");
+  const sendBtn = byId("send-button");
+  const hint = byId("composer-hint");
+
+  if (state.proposal?.status === "pending") {
+    input.placeholder = "输入\"确认\"应用提案，或\"取消\"放弃";
+    hint.textContent = "当前有待确认的修改提案";
+  } else if (state.draft) {
+    input.placeholder = "对草案提出修改（自然语言），如：将雷诺数改为5000";
+    hint.textContent = "修改将通过提案确认后才生效";
+  } else if (state.batch) {
+    input.placeholder = "补充信息，或点击上方卡片选择研究";
+    hint.textContent = "请选择一个研究任务以生成草案";
+  } else {
+    input.placeholder = "描述研究目标，或对当前草案提出修改...";
+    hint.textContent = "输入研究目标开始 · 多个任务请编号（1. 2. 3. ...）";
+  }
+  sendBtn.disabled = input.value.trim().length < 2;
+}
+
+// ---- Actions ----
+async function initSession() {
+  if (state.sessionId) {
+    try {
+      const data = await API.getSession(state.sessionId);
+      state.session = data.session;
+      if (state.session.current_draft_id) {
+        try { state.draft = await API.getDraft(state.session.current_draft_id); } catch {}
+      }
+      addMessage("assistant", `已恢复会话 ${state.sessionId.slice(0, 16)}…\n状态: ${label(LABELS.sessionStatus, state.session.status)}\n\n请继续描述研究目标，或对当前草案提出修改。`);
+      renderAll();
+      return;
+    } catch {
+      state.sessionId = null;
+      localStorage.removeItem("v5_sid");
+    }
+  }
+  await createNewSession();
+}
+
+async function createNewSession() {
+  const data = await API.createSession();
+  state.sessionId = data.session.session_id;
+  state.session = data.session;
+  localStorage.setItem("v5_sid", state.sessionId);
+  state.conversations = [];
+  state.batch = null;
+  state.studies = [];
+  state.selectedStudy = null;
+  state.draft = null;
+  state.proposal = null;
+  state.casePlan = null;
+  byId("conversation-timeline").innerHTML = "";
+  addMessage("assistant", "你好！我是 Fluid Scientist 研究助手。请描述你想研究的流体力学问题，我会帮你分解为具体的实验任务并生成结构化草案。\n\n你可以输入多个编号的研究任务（如\"1. 圆柱绕流 2. 后台阶流\"），也可以输入单个研究问题。");
+  renderAll();
+}
+
+async function sendUserMessage(text) {
+  const msg = text.trim();
+  if (!msg) return;
+  addMessage("user", msg);
+  byId("research-input").value = "";
+
+  // Proposal pending: handle confirm/cancel
+  if (state.proposal?.status === "pending") {
+    if (/^(确认|confirm|yes|y|应用|apply|好的|可以)/i.test(msg)) {
+      await applyProposal(state.proposal);
+      return;
+    }
+    if (/^(取消|cancel|no|n|放弃)/i.test(msg)) {
+      await cancelProposal(state.proposal);
+      return;
+    }
+  }
+
+  // Draft change request
+  if (state.draft && state.draft.status !== "confirmed") {
+    try {
+      byId("send-button").disabled = true;
+      const proposal = await API.requestChange(state.draft.draft_id, state.sessionId, msg);
+      state.proposal = proposal;
+      addMessage("assistant", `已生成修改提案：${proposal.summary || ""}`, { proposal });
+      renderAll();
+    } catch (e) {
+      addMessage("system", `修改请求失败: ${e.message}`, { error: e.message });
+    } finally {
+      updateComposer();
+    }
+    return;
+  }
+
+  // Regular session message
+  try {
+    byId("send-button").disabled = true;
+    const result = await API.sendMessage(state.sessionId, msg);
+    for (const action of result.actions || []) {
+      await processAction(action);
+    }
+    // Refresh session
+    const sdata = await API.getSession(state.sessionId);
+    state.session = sdata.session;
+    renderAll();
+  } catch (e) {
+    addMessage("system", `请求失败: ${e.message}`, { error: e.message });
+  } finally {
+    updateComposer();
+  }
+}
+
+async function processAction(action) {
+  switch (action.action) {
+    case "batch_review": {
+      state.batch = action.batch;
+      state.studies = action.batch.studies || [];
+      const count = state.studies.length;
+      addMessage("assistant", `已识别到 ${count} 个研究任务。请在左侧或下方卡片中选择一个研究任务来生成实验草案。`, { studies: state.studies });
+      break;
+    }
+    case "study_decomposed": {
+      if (!state.batch) {
+        state.batch = { batch_id: action.study.batch_id, studies: [action.study] };
+        state.studies = [action.study];
+        addMessage("assistant", `已识别到 1 个研究任务。请选择该任务来生成实验草案。`, { studies: state.studies });
+      }
+      break;
+    }
+    case "clarification_questions": {
+      const qs = action.questions || [];
+      addMessage("assistant", `需要澄清以下问题：\n${qs.map((q, i) => `${i + 1}. ${q.question || q.text || JSON.stringify(q)}`).join("\n")}`);
+      break;
+    }
+    case "apply_proposal": {
+      if (action.proposal_id) {
+        state.proposal = await API.getProposal(action.proposal_id);
+        addMessage("assistant", `修改提案已生成：${state.proposal.summary || ""}`, { proposal: state.proposal });
+      }
+      break;
+    }
+    default:
+      console.log("Unknown action:", action);
+  }
+}
+
+async function selectStudy(study) {
+  state.selectedStudy = study;
+  const batchId = state.batch?.batch_id;
+  if (!batchId) {
+    addMessage("system", "无法确定批次 ID，请刷新页面重试");
+    return;
+  }
+  try {
+    addMessage("user", `选择研究任务: ${study.title?.slice(0, 50) || study.study_id}`);
+    addMessage("assistant", "正在生成实验草案...");
+    const result = await API.selectStudy(batchId, state.sessionId, study.study_id);
+    state.draft = result.draft;
+    addMessage("assistant", `实验草案已生成（版本 v${result.draft.version}）。请在右侧查看结构化方案。\n\n你可以通过对话提出修改（如"将雷诺数改为5000"），修改将通过提案确认后才生效。`);
+    renderAll();
+  } catch (e) {
+    addMessage("system", `生成草案失败: ${e.message}`, { error: e.message });
+    if (e.status === 422 && e.detail?.blocking_issues) {
+      addMessage("assistant", `该研究暂不可生成草案：${e.detail.blocking_issues.map(i => i.message || JSON.stringify(i)).join("；")}`);
+    }
+  }
+}
+
+async function confirmDraft() {
+  if (!state.draft) return;
+  try {
+    const confirmed = await API.confirmDraft(state.draft.draft_id, state.sessionId);
+    state.draft = confirmed;
+    addMessage("assistant", "草案已确认。可以生成 CasePlan 进行算例规划。");
+    renderAll();
+  } catch (e) {
+    addMessage("system", `确认失败: ${e.message}`, { error: e.message });
+  }
+}
+
+async function validateDraft() {
+  if (!state.draft) return;
+  try {
+    await API.validateDraft(state.draft.draft_id);
+    state.draft = await API.getDraft(state.draft.draft_id);
+    addMessage("assistant", "校验完成。");
+    renderAll();
+  } catch (e) {
+    addMessage("system", `校验失败: ${e.message}`, { error: e.message });
+  }
+}
+
+function updateProposalInConversation(proposalId, status) {
+  for (const msg of state.conversations) {
+    if (msg.proposal && msg.proposal.proposal_id === proposalId) {
+      msg.proposal.status = status;
+    }
+  }
+  // Re-render conversation timeline
+  const tl = byId("conversation-timeline");
+  tl.innerHTML = "";
+  for (const msg of state.conversations) {
+    renderMessage(msg);
+  }
+  scrollConversationToBottom();
+}
+
+async function applyProposal(proposal) {
+  if (proposal.status && proposal.status !== "pending") {
+    addMessage("system", `该提案状态为 ${proposal.status}，无法重复操作。`);
+    return;
+  }
+  let newDraft;
+  try {
+    newDraft = await API.applyProposal(proposal.proposal_id, state.sessionId);
+  } catch (e) {
+    addMessage("system", `应用提案失败: ${e.message}`, { error: e.message });
+    return;
+  }
+  state.proposal = null;
+  state.draft = newDraft;
+  updateProposalInConversation(proposal.proposal_id, "applied");
+  addMessage("assistant", `修改已应用，草案更新为版本 v${newDraft.version}。`);
+  try { renderAll(); } catch (e) { console.error("Render error:", e); }
+}
+
+async function cancelProposal(proposal) {
+  if (proposal.status && proposal.status !== "pending") {
+    addMessage("system", `该提案状态为 ${proposal.status}，无法重复操作。`);
+    return;
+  }
+  try {
+    await API.cancelProposal(proposal.proposal_id);
+    state.proposal = null;
+    updateProposalInConversation(proposal.proposal_id, "cancelled");
+    addMessage("assistant", "修改提案已取消，草案未变化。");
+    renderAll();
+  } catch (e) {
+    addMessage("system", `取消失败: ${e.message}`, { error: e.message });
+  }
+}
+
+async function generateCasePlan() {
+  if (!state.draft) return;
+  try {
+    addMessage("assistant", "正在生成 CasePlan...");
+    const cp = await API.generateCasePlan(state.sessionId, state.draft.draft_id);
+    state.casePlan = cp;
+    addMessage("assistant", `CasePlan 已生成: ${cp.solver} · ${cp.dimensions} · ${cp.case_type}`, { casePlan: cp });
+    renderAll();
+  } catch (e) {
+    addMessage("system", `生成 CasePlan 失败: ${e.message}`, { error: e.message });
+  }
+}
+
+async function compileCase() {
+  if (!state.casePlan) return;
+  try {
+    addMessage("assistant", "正在编译算例...");
+    const result = await API.compileCasePlan(state.casePlan.case_plan_id);
+    state.compiledCase = result;
+    const fileList = result.files?.length ? `\n生成文件: ${result.files.join(", ")}` : "";
+    addMessage("assistant", `算例编译完成。共 ${result.file_count || 0} 个文件。${fileList}`);
+    renderAll();
+  } catch (e) {
+    addMessage("system", `编译失败: ${e.message}`, { error: e.message });
+  }
+}
+
+async function submitToWorkstation() {
+  if (!state.casePlan) return;
+  if (!state.compiledCase) {
+    addMessage("system", "请先编译算例再提交。");
+    return;
+  }
+  try {
+    addMessage("assistant", "正在提交到工作站...");
+    const result = await API.submitCase(state.casePlan.case_plan_id);
+    state.job = result.job || { job_id: result.job_id, state: "queued" };
+    addMessage("assistant", `任务已提交。Job ID: ${state.job.job_id}\n状态: ${state.job.state || "queued"}`, { job: state.job });
+    renderAll();
+    // Auto-poll after 5 seconds
+    setTimeout(() => pollJobStatus(), 5000);
+  } catch (e) {
+    addMessage("system", `提交失败: ${e.message}`, { error: e.message });
+  }
+}
+
+async function pollJobStatus() {
+  if (!state.job?.job_id) return;
+  try {
+    const status = await API.getJobStatus(state.job.job_id);
+    state.job = status;
+    const stateLabel = { queued: "排队中", running: "运行中", succeeded: "已完成", failed: "失败", cancelled: "已取消" }[status.state] || status.state;
+    addMessage("assistant", `任务状态: ${stateLabel}${status.error ? `\n错误: ${status.error}` : ""}`);
+    renderAll();
+    // Continue polling if running
+    if (status.state === "running" || status.state === "queued") {
+      setTimeout(() => pollJobStatus(), 10000);
+    }
+  } catch (e) {
+    addMessage("system", `查询状态失败: ${e.message}`, { error: e.message });
+  }
+}
+
+async function cancelJob() {
+  if (!state.job?.job_id) return;
+  try {
+    const result = await API.cancelJob(state.job.job_id);
+    state.job = result;
+    addMessage("assistant", "任务已取消。");
+    renderAll();
+  } catch (e) {
+    addMessage("system", `取消失败: ${e.message}`, { error: e.message });
+  }
+}
+
+async function fetchJobResults() {
+  if (!state.job?.job_id) return;
+  try {
+    const results = await API.getJobResults(state.job.job_id);
+    addMessage("assistant", `结果已获取。${JSON.stringify(results).slice(0, 200)}...`, { results });
+    renderAll();
+  } catch (e) {
+    addMessage("system", `获取结果失败: ${e.message}`, { error: e.message });
+  }
+}
+
+// ---- Codex V5 Pipeline fast-path (compile-ready case generation) ----
+// Preserves the Codex one-click pipeline by invoking /api/v5/pipeline/run
+// directly and rendering the CompileReadyDraftView as an inline card in the
+// conversation timeline. This keeps the Codex fast path reachable without
+// loading v5-pipeline.js / app.js.
+async function runCodexPipeline() {
+  // Derive the research question from the last user message; fall back to the
+  // draft objective so the button always has something to send.
+  const lastUserMsg = [...state.conversations].reverse().find((m) => m.role === "user");
+  const researchQuestion = (lastUserMsg?.text || state.draft?.objective || "").trim();
+  if (researchQuestion.length < 10) {
+    addMessage("system", "请先输入至少10个字符的研究问题描述，再使用一键生成。", { error: "研究问题过短，无法启动流水线" });
+    return;
+  }
+  addMessage("assistant", `正在通过 Codex V5 流水线一键生成可编译算例...\n研究问题: ${researchQuestion.slice(0, 80)}`);
+  try {
+    const resp = await API.runPipeline(researchQuestion);
+    addMessage("assistant", pipelineResultSummary(resp), { pipeline: resp });
+  } catch (e) {
+    addMessage("system", `一键生成失败: ${e.message}`, { error: e.message });
+  }
+}
+
+function pipelineResultSummary(resp) {
+  if (resp.status === "compile_ready" && resp.compile_ready_view) {
+    const view = resp.compile_ready_view;
+    const files = view.case_manifest?.generated_files || [];
+    const checks = view.validation_results?.checks || [];
+    const passed = checks.filter((c) => c.passed).length;
+    const solver = view.solver?.name || view.solver?.solver_name || "—";
+    return `编译就绪 ✓ · 求解器 ${solver} · 已生成 ${files.length} 个文件 · 验证 ${passed}/${checks.length} 通过`;
+  }
+  if (resp.failure) {
+    return `流水线在 "${resp.current_stage || "?"}" 阶段失败：${resp.failure.message || resp.failure.failure_category || "未知错误"}`;
+  }
+  return `流水线返回状态：${resp.status || "—"}`;
+}
+
+function renderPipelineCard(resp) {
+  const card = el("div", { class: "conv-pipeline-card" });
+  const isReady = resp.status === "compile_ready" && resp.compile_ready_view;
+  card.appendChild(el("div", { class: "pipeline-card-header" }, [
+    el("h4", { text: "编译就绪流水线 (Codex V5)" }),
+    el("span", { class: `type-chip ${isReady ? "type-chip-teal" : ""}`, text: resp.status || "—" }),
+  ]));
+
+  // Stage history
+  if (resp.stage_history?.length) {
+    const stages = el("ul", { class: "pipeline-stages" });
+    for (const stage of resp.stage_history) {
+      const name = PIPELINE_STAGE_LABELS[stage.stage] || stage.stage;
+      stages.appendChild(el("li", { class: stage.stage === "compile_ready" ? "stage-done" : "", text: `${name}${stage.detail ? " — " + stage.detail : ""}` }));
+    }
+    card.appendChild(stages);
+  }
+
+  if (isReady) {
+    const view = resp.compile_ready_view;
+    if (view.research_objective) {
+      card.appendChild(el("p", { class: "pipeline-objective", text: `研究目标: ${view.research_objective}` }));
+    }
+    const solver = view.solver || {};
+    card.appendChild(el("div", { class: "pipeline-kv" }, [
+      el("span", { class: "kv-key", text: "求解器" }),
+      el("span", { class: "kv-val", text: solver.name || solver.solver_name || "—" }),
+    ]));
+
+    // Validation status
+    const checks = view.validation_results?.checks || [];
+    if (checks.length) {
+      const list = el("ul", { class: "pipeline-checks" });
+      for (const c of checks) {
+        list.appendChild(el("li", { class: `check check-${c.passed ? "pass" : "fail"}` }, [
+          el("span", { class: "check-icon", text: c.passed ? "✓" : "✗" }),
+          el("span", { class: "check-name", text: c.check_name || "?" }),
+          c.message ? el("span", { class: "check-msg", text: c.message }) : null,
+        ]));
+      }
+      card.appendChild(el("div", { class: "pipeline-section" }, [el("h5", { text: "算例验证" }), list]));
+    }
+
+    // Generated case files
+    const files = view.case_manifest?.generated_files || [];
+    if (files.length) {
+      const fl = el("ul", { class: "pipeline-files" });
+      for (const f of files) fl.appendChild(el("li", { text: f }));
+      card.appendChild(el("div", { class: "pipeline-section" }, [el("h5", { text: `已生成文件 (${files.length})` }), fl]));
+    }
+  } else if (resp.failure) {
+    card.appendChild(el("p", { class: "pipeline-error", text: `失败：${resp.failure.message || resp.failure.failure_category || "未知错误"}` }));
+  }
+  return card;
+}
+
+// ---- System loading ----
+// Version display mirrors Codex app.js loadSystemVersion so the header badge
+// and workflow footer stay consistent across both UIs: the badge uses
+// git_commit (7 chars) and wf-mode carries the " Beta" suffix, with wf-git
+// showing the 12-char commit in the footer.
+async function loadSystemVersion() {
+  try {
+    const info = await API.systemVersion();
+    const badge = byId("system-version");
+    if (badge) {
+      const sha = info.git_commit || "unknown";
+      const wf = info.workflow || "v5";
+      badge.textContent = `Workflow ${wf} · ${sha.substring(0, 7)}`;
+    }
+    const wfMode = byId("wf-mode");
+    if (wfMode) wfMode.textContent = (info.workflow || "v5").toUpperCase() + " Beta";
+    const wfGit = byId("wf-git");
+    if (wfGit) wfGit.textContent = info.git_commit ? info.git_commit.substring(0, 12) : "—";
+    const wfSchema = byId("wf-schema");
+    if (wfSchema) wfSchema.textContent = info.schema_version || "—";
+    const wfApi = byId("wf-api");
+    if (wfApi) wfApi.textContent = info.api_version || "—";
+  } catch {
+    // Version display is non-critical
+  }
+}
+
+async function loadModelConfig() {
+  try {
+    const c = await API.getModelConfig();
+    if (c.configured) {
+      state.modelConfigured = true;
+      byId("header-model-status").textContent = `${c.provider}/${c.model}`;
+    }
+    if (c.suggested_models) window._suggestedModels = c.suggested_models;
+  } catch {}
+}
+
+async function loadTargets() {
+  try {
+    const caps = await API.listTargets();
+    const sel = byId("execution-target");
+    sel.innerHTML = "";
+    if (!caps?.length) {
+      sel.innerHTML = '<option value="">无可用平台</option>';
+      byId("header-target-status").textContent = "未配置";
+      return;
+    }
+    for (const c of caps) {
+      sel.appendChild(el("option", { value: c.target_id, text: `${c.target_id} (${c.available ? "可用" : "不可用"})` }));
+    }
+    const avail = caps.find(c => c.available);
+    if (avail) byId("header-target-status").textContent = avail.target_id;
+  } catch {
+    byId("header-target-status").textContent = "检查失败";
+  }
+}
+
+async function loadWorkstationStatus() {
+  const mini = byId("workstation-panel-mini");
+  if (!mini) return;
+  const ind = mini.querySelector(".ws-indicator");
+  const txt = mini.querySelector(".ws-text-mini");
+  try {
+    const s = await API.workstationStatus();
+    if (s.connected) {
+      ind.dataset.state = "ok";
+      txt.textContent = `已连接 ${s.host}`;
+    } else {
+      ind.dataset.state = "error";
+      txt.textContent = s.error || "未连接";
+    }
+  } catch {
+    ind.dataset.state = "unknown";
+    txt.textContent = "检查失败";
+  }
+}
+
+// ---- Render all ----
+function renderAll() {
+  renderSessionList();
+  renderStudyList();
+  renderDraftViewer();
+  updateActionBar();
+  updateComposer();
+}
+
+// ---- Event bindings ----
+function bindEvents() {
+  byId("composer-form").addEventListener("submit", (e) => {
+    e.preventDefault();
+    sendUserMessage(byId("research-input").value);
+  });
+  byId("research-input").addEventListener("input", updateComposer);
+  byId("new-session-btn").addEventListener("click", createNewSession);
+
+  // Dialogs
+  byId("open-model-settings").addEventListener("click", () => byId("model-settings").showModal());
+  byId("open-target-settings").addEventListener("click", () => byId("target-settings").showModal());
+
+  byId("configure-model").addEventListener("click", async () => {
+    const provider = byId("model-provider").value;
+    const key = byId("model-api-key").value;
+    const model = byId("model-id").value;
+    if (!key || key.length < 5) { byId("model-config-state").textContent = "API Key 太短"; return; }
+    try {
+      byId("model-config-state").textContent = "正在连接...";
+      const resp = await API.configureModel({ provider, model, api_key: key });
+      if (resp.configured && !resp.is_mock) {
+        byId("model-config-state").textContent = `配置成功: ${resp.provider}/${resp.model}`;
+        byId("header-model-status").textContent = `${resp.provider}/${resp.model}`;
+        state.modelConfigured = true;
+        setTimeout(() => byId("model-settings").close(), 1000);
+      } else {
+        byId("model-config-state").textContent = "已保存但仍在 Mock 模式（可能 openai 库未安装）";
+      }
+    } catch (e) { byId("model-config-state").textContent = "配置失败: " + e.message; }
+  });
+
+  byId("model-provider").addEventListener("change", () => {
+    const provider = byId("model-provider").value;
+    const models = (window._suggestedModels || {})[provider] || [];
+    const input = byId("model-id");
+    if (models.length) { input.value = models[0]; input.placeholder = `如 ${models.join(", ")}`; }
+  });
+
+  // Workstation config
+  byId("ws-save-config").addEventListener("click", async () => {
+    try {
+      await API.configureWorkstation({
+        host: byId("ws-input-host").value, username: byId("ws-input-user").value,
+        port: parseInt(byId("ws-input-port").value) || 22,
+        identity_file: byId("ws-input-key").value, known_hosts_file: byId("ws-input-knownhosts").value,
+      });
+      byId("ws-config-state").textContent = "配置成功";
+      setTimeout(() => { byId("workstation-settings").close(); loadWorkstationStatus(); }, 800);
+    } catch (e) { byId("ws-config-state").textContent = "配置失败: " + e.message; }
+  });
+}
+
+// ---- Init ----
+async function init() {
+  bindEvents();
+  await Promise.all([initSession(), loadSystemVersion(), loadModelConfig(), loadTargets(), loadWorkstationStatus()]);
+  updateComposer();
+}
+
+document.addEventListener("DOMContentLoaded", init);
