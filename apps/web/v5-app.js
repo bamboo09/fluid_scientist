@@ -64,6 +64,7 @@ const API = {
   cancelJob: (jobId) => api(`/api/v5/jobs/${jobId}/cancel`, { method: "POST" }),
   getJobResults: (jobId) => api(`/api/v5/jobs/${jobId}/results`),
   systemVersion: () => api("/api/system/version"),
+  buildInfo: () => api("/api/system/build-info"),
   listTargets: () => api("/api/execution-targets"),
   workstationStatus: () => api("/api/workstation/status"),
   detectWorkstation: () => api("/api/workstation/detect"),
@@ -788,11 +789,13 @@ async function fetchJobResults() {
 // ---- System loading ----
 async function loadSystemVersion() {
   try {
-    const v = await API.systemVersion();
+    const [v, b] = await Promise.all([API.systemVersion(), API.buildInfo()]);
     byId("wf-api").textContent = v.api_version || "—";
     byId("wf-schema").textContent = v.schema_version || "—";
     byId("wf-mode").textContent = v.workflow || "v5";
-    byId("system-version").textContent = `${v.workflow} · ${v.package_version || ""}`;
+    const branch = b.git_branch || v.git_branch || "unknown";
+    const sha = b.git_sha || v.git_commit || "unknown";
+    byId("system-version").textContent = `${branch} · ${sha}`;
   } catch {}
 }
 

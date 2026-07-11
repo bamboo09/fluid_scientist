@@ -1,8 +1,10 @@
 """FastAPI application for Fake demos and persistent research projects."""
 
 import contextlib
+import hashlib
 import logging
 import re
+import sys
 from collections.abc import Callable
 from concurrent.futures import Executor
 from contextlib import asynccontextmanager
@@ -12,7 +14,7 @@ from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException, Request, status
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import (
     BaseModel,
@@ -157,6 +159,44 @@ logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[3]
 WEB_ROOT = ROOT / "apps" / "web"
+STARTED_AT = datetime.now(UTC).isoformat()
+
+
+def _git_value(args: list[str], default: str = "unknown") -> str:
+    import subprocess
+
+    try:
+        return subprocess.check_output(
+            ["git", *args],
+            stderr=subprocess.DEVNULL,
+            cwd=ROOT,
+        ).decode().strip()
+    except Exception:
+        return default
+
+
+def _frontend_index_hash() -> str:
+    index_path = WEB_ROOT / "index.html"
+    try:
+        return hashlib.sha256(index_path.read_bytes()).hexdigest()
+    except OSError:
+        return "unknown"
+
+
+def _build_info() -> dict[str, str]:
+    return {
+        "git_branch": _git_value(["branch", "--show-current"], "detached"),
+        "git_sha": _git_value(["rev-parse", "--short", "HEAD"]),
+        "source_root": str(ROOT),
+        "python_executable": sys.executable,
+        "package_path": str(Path(__file__).resolve().parents[1]),
+        "api_app_path": str(Path(__file__).resolve()),
+        "frontend_root": str(WEB_ROOT),
+        "frontend_index_hash": _frontend_index_hash(),
+        "app_version": __version__,
+        "started_at": STARTED_AT,
+        "runtime_mode": "docker" if (Path("/.dockerenv").exists()) else "local",
+    }
 
 
 class StrictRequest(BaseModel):
@@ -621,8 +661,11 @@ def create_app(
     demo_projects: dict[str, DemoResearchResult] = {}
 
     @application.get("/", include_in_schema=False)
-    def workbench() -> FileResponse:
-        return FileResponse(WEB_ROOT / "index.html")
+    def workbench() -> HTMLResponse:
+        build = _build_info()
+        html = (WEB_ROOT / "index.html").read_text(encoding="utf-8")
+        html = html.replace("__BUILD_SHA__", build["git_sha"])
+        return HTMLResponse(html)
 
     @application.get("/health")
     def health() -> dict[str, str]:
@@ -631,19 +674,12 @@ def create_app(
     @application.get("/api/system/version")
     def get_system_version() -> dict:
         """Return system version information for deployment verification."""
-        import subprocess
-        try:
-            git_sha = subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
-                stderr=subprocess.DEVNULL,
-                cwd=Path(__file__).resolve().parent,
-            ).decode().strip()
-        except Exception:
-            git_sha = "unknown"
+        build = _build_info()
 
         return {
             "workflow": "v5",
-            "git_commit": git_sha,
+            "git_commit": build["git_sha"],
+            "git_branch": build["git_branch"],
             "api_version": "5.0",
             "schema_version": "5.0",
             "native_compile_enabled": True,
@@ -652,6 +688,11 @@ def create_app(
             "workflow_v2_enabled": False,
             "workflow_v5_enabled": True,
         }
+
+    @application.get("/api/system/build-info")
+    def get_system_build_info() -> dict[str, str]:
+        """Return runtime identity for source/package/frontend verification."""
+        return _build_info()
 
     def _pipeline_work_root() -> Path:
         database_url = runtime_settings.database.url

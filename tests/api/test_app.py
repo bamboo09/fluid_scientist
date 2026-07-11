@@ -63,8 +63,29 @@ def test_demo_endpoint_rejects_short_question() -> None:
 def test_static_workbench_does_not_expose_skill_navigation() -> None:
     html = client().get("/").text
 
-    assert "实验结果与可信度检查" in html
+    assert "V5 对话式科研工作台" in html
+    assert "研究任务" in html
+    assert "研究方案" in html
+    assert "/assets/v5-app.js?v=" in html
+    assert "__BUILD_SHA__" not in html
     assert "Skill 候选" not in html
+
+
+def test_system_build_info_exposes_runtime_identity() -> None:
+    response = client().get("/api/system/build-info")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["git_sha"]
+    assert body["source_root"].endswith("AI FOR SCIENCE")
+    assert body["package_path"].endswith("src\\fluid_scientist") or body[
+        "package_path"
+    ].endswith("src/fluid_scientist")
+    assert body["frontend_root"].endswith("apps\\web") or body[
+        "frontend_root"
+    ].endswith("apps/web")
+    assert len(body["frontend_index_hash"]) == 64
+    assert body["runtime_mode"] in {"local", "docker"}
 
 
 class FakeExperimentDesigner:

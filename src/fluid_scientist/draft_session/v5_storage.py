@@ -43,8 +43,20 @@ from fluid_scientist.study_decomposition.models import BatchStudyPlan
 
 _SCHEMA_VERSION = 1
 
-_DEFAULT_DB_DIR = os.path.join(os.path.expanduser("~"), ".fluid_scientist")
 _DEFAULT_DB_NAME = "v5_workflow.db"
+
+
+def _default_db_dir() -> str:
+    """Return the runtime-local V5 state directory.
+
+    Prefer an explicit environment variable.  Otherwise keep runtime state
+    under the current working directory so startup scripts and tests can
+    control where SQLite files are created.
+    """
+    return os.environ.get(
+        "FLUID_SCIENTIST_STATE_DIR",
+        os.path.join(os.getcwd(), ".fluid_scientist"),
+    )
 
 
 def _utcnow_iso() -> str:
@@ -188,8 +200,9 @@ class V5Repository:
 
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
-            os.makedirs(_DEFAULT_DB_DIR, exist_ok=True)
-            db_path = os.path.join(_DEFAULT_DB_DIR, _DEFAULT_DB_NAME)
+            db_dir = _default_db_dir()
+            os.makedirs(db_dir, exist_ok=True)
+            db_path = os.path.join(db_dir, _DEFAULT_DB_NAME)
         self._db_path = db_path
         self._lock = threading.Lock()
         self._migrate()
