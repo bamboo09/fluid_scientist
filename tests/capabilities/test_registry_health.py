@@ -55,3 +55,29 @@ def test_health_check_can_degrade_invalid_verified_capability() -> None:
     assert record.status_before == CapabilityStatus.VERIFIED
     assert record.status_after == CapabilityStatus.UNVERIFIED
     assert report.degraded >= 1
+
+
+def test_health_check_degrades_verified_without_evidence() -> None:
+    registry = CapabilityRegistry()
+    registry.register(
+        Capability(
+            capability_id="test.no_evidence",
+            capability_type="postprocessor",
+            implementation_entrypoint="math:sqrt",
+            status=CapabilityStatus.VERIFIED,
+        )
+    )
+
+    report = registry.health_check(mutate=True)
+    capability = registry.get_capability("test.no_evidence")
+    record = next(
+        item for item in report.records
+        if item.capability_id == "test.no_evidence"
+    )
+
+    assert capability is not None
+    assert capability.status == CapabilityStatus.UNVERIFIED
+    assert record.status_after == CapabilityStatus.UNVERIFIED
+    assert {
+        issue.issue_code for issue in record.issues
+    } >= {"missing_test_manifest", "missing_verification_artifact"}

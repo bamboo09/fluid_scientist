@@ -461,11 +461,9 @@ class CapabilityRegistry:
         """Validate registry entries against their implementation contracts.
 
         The check is intentionally concrete: a VERIFIED capability must expose
-        an importable ``module:function`` entrypoint.  Test manifests and
-        verification artifacts are reported as warnings for built-ins because
-        older native entries do not yet carry per-capability artifacts; dynamic
-        extensions can promote those warnings to blocking policy in later
-        phases.
+        an importable ``module:function`` entrypoint, carry a stable
+        implementation hash, and keep verification evidence in the registry.
+        Any error degrades the capability to UNVERIFIED when ``mutate`` is true.
         """
         records: list[CapabilityHealthRecord] = []
         degraded = 0
@@ -490,16 +488,20 @@ class CapabilityRegistry:
                 if not cap.tests and not cap.test_manifest:
                     issues.append(CapabilityHealthIssue(
                         capability_id=cap.capability_id,
-                        severity="warning",
                         issue_code="missing_test_manifest",
-                        message="Capability has no unit/minimal-case test manifest recorded.",
+                        message=(
+                            "VERIFIED capability has no unit/minimal-case "
+                            "test manifest recorded."
+                        ),
                     ))
                 if not cap.verification_artifact:
                     issues.append(CapabilityHealthIssue(
                         capability_id=cap.capability_id,
-                        severity="warning",
                         issue_code="missing_verification_artifact",
-                        message="Capability has no verification artifact hash recorded.",
+                        message=(
+                            "VERIFIED capability has no verification artifact "
+                            "hash recorded."
+                        ),
                     ))
 
             status_after = cap.status

@@ -16,8 +16,9 @@ from fluid_scientist.capabilities.registry import (
 ResolutionStatus = Literal[
     "RESOLVED",
     "COMPOSED",
-    "CONFIG_EXTENSION",
-    "EXTENSION_REQUIRED",
+    "CONFIG_EXTENSION_PENDING",
+    "CONFIG_EXTENSION_RESOLVED",
+    "CODE_EXTENSION_REQUIRED",
     "UNSUPPORTED",
 ]
 
@@ -53,7 +54,11 @@ class CapabilityRequirementGraph(BaseModel):
         return [
             item
             for item in self.resolutions
-            if item.status in {"EXTENSION_REQUIRED", "UNSUPPORTED"}
+            if item.status in {
+                "CONFIG_EXTENSION_PENDING",
+                "CODE_EXTENSION_REQUIRED",
+                "UNSUPPORTED",
+            }
         ]
 
     @property
@@ -76,7 +81,7 @@ class RequirementGraphResolver:
         registry: CapabilityRegistry,
         *,
         require_verified: bool = True,
-        require_healthy: bool = False,
+        require_healthy: bool = True,
     ) -> None:
         self._registry = registry
         self._require_verified = require_verified
@@ -147,18 +152,21 @@ class RequirementGraphResolver:
                 requirement=requirement.model_copy(
                     update={"extension_needed": True}
                 ),
-                status="CONFIG_EXTENSION",
+                status="CONFIG_EXTENSION_PENDING",
                 strategy="OPENFOAM_CONFIG_EXTENSION",
                 extension_required=True,
-                reason="No verified capability matched; OpenFOAM config extension is allowed.",
+                reason=(
+                    "No healthy verified capability matched; OpenFOAM config "
+                    "extension must be generated and validated before use."
+                ),
             )
 
         return CapabilityResolution(
             requirement=requirement.model_copy(update={"extension_needed": True}),
-            status="EXTENSION_REQUIRED",
+            status="CODE_EXTENSION_REQUIRED",
             strategy="NEW_EXTENSION_SPEC",
             extension_required=True,
-            reason="No reusable or composable verified capability matched.",
+            reason="No reusable or composable healthy verified capability matched.",
         )
 
     def _resolve_exact(self, requirement: CapabilityRequirement) -> Capability | None:

@@ -19,6 +19,8 @@ def test_resolver_uses_exact_verified_capability() -> None:
             capability_type="postprocessor",
             name="Force Spectrum",
             implementation_entrypoint="math:sqrt",
+            test_manifest=["tests/capabilities/test_requirement_graph_resolver.py"],
+            verification_artifact="sha256:test-artifact",
             status=CapabilityStatus.VERIFIED,
         )
     )
@@ -46,6 +48,8 @@ def test_resolver_composes_verified_capabilities_by_keywords() -> None:
             capability_type="boundary_writer",
             name="Velocity Inlet",
             implementation_entrypoint="math:sqrt",
+            test_manifest=["tests/capabilities/test_requirement_graph_resolver.py"],
+            verification_artifact="sha256:test-artifact",
             status=CapabilityStatus.VERIFIED,
         )
     )
@@ -55,6 +59,8 @@ def test_resolver_composes_verified_capabilities_by_keywords() -> None:
             capability_type="boundary_writer",
             name="Pressure Outlet",
             implementation_entrypoint="math:sqrt",
+            test_manifest=["tests/capabilities/test_requirement_graph_resolver.py"],
+            verification_artifact="sha256:test-artifact",
             status=CapabilityStatus.VERIFIED,
         )
     )
@@ -88,6 +94,25 @@ def test_resolver_returns_extension_required_for_unknown_mandatory_capability() 
 
     assert len(graph.unresolved) == 1
     resolution = graph.unresolved[0]
-    assert resolution.status == "EXTENSION_REQUIRED"
+    assert resolution.status == "CODE_EXTENSION_REQUIRED"
     assert resolution.strategy == "NEW_EXTENSION_SPEC"
+    assert resolution.extension_required is True
+
+
+def test_config_extension_pending_is_unresolved_not_extended() -> None:
+    registry = CapabilityRegistry()
+    requirement = CapabilityRequirement(
+        requirement_id="req_custom_function_object",
+        capability_type="function_object_generator",
+        keywords=["custom_phase_difference_probe"],
+        mandatory=True,
+        scientific_reason="Need a new functionObject dictionary composition.",
+    )
+
+    graph = RequirementGraphResolver(registry).resolve([requirement])
+
+    assert len(graph.unresolved) == 1
+    resolution = graph.unresolved[0]
+    assert resolution.status == "CONFIG_EXTENSION_PENDING"
+    assert resolution.strategy == "OPENFOAM_CONFIG_EXTENSION"
     assert resolution.extension_required is True

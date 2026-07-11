@@ -11,6 +11,14 @@ from fluid_scientist.capabilities.models import (
     MissingCapability,
     StrictModel,
 )
+from fluid_scientist.capabilities.orchestrator import (
+    ExtensionLifecycleStatus,
+    ExtensionRunRecord,
+    ExtensionSpec,
+    PipelineCheckpoint,
+    UnknownCapabilityOrchestrator,
+    UnknownCapabilityResult,
+)
 from fluid_scientist.capabilities.resolution import (
     CapabilityRequirementGraph,
     CapabilityResolution,
@@ -45,11 +53,17 @@ __all__ = [
     "CapabilityType",
     "CodeExtensionSpec",
     "CompilerCapability",
+    "ExtensionLifecycleStatus",
+    "ExtensionRunRecord",
+    "ExtensionSpec",
     "MissingCapability",
+    "PipelineCheckpoint",
     "RequirementGraphResolver",
     "ResolutionStatus",
     "ResolutionStrategy",
     "StrictModel",
+    "UnknownCapabilityOrchestrator",
+    "UnknownCapabilityResult",
     "get_capability_registry",
     "reset_registry",
 ]

@@ -38,6 +38,7 @@ from fluid_scientist.capabilities import (
     CapabilityRegistry,
     CapabilityRequirement,
     RequirementGraphResolver,
+    UnknownCapabilityOrchestrator,
     get_capability_registry,
 )
 from fluid_scientist.case_generation.validator import (
@@ -98,6 +99,8 @@ class PipelineState(BaseModel):
     capabilities_used: list[dict[str, Any]] = Field(default_factory=list)
     capabilities_missing: list[dict[str, Any]] = Field(default_factory=list)
     capabilities_extended: list[dict[str, Any]] = Field(default_factory=list)
+    pipeline_checkpoint: dict[str, Any] = Field(default_factory=dict)
+    extension_runs: list[dict[str, Any]] = Field(default_factory=list)
     # Metrics
     scientific_metrics: list[dict[str, Any]] = Field(default_factory=list)
     boundary_verification_metrics: list[dict[str, Any]] = Field(default_factory=list)
@@ -1029,13 +1032,11 @@ class V5WorkflowPipeline:
                 mandatory=True,
             ))
 
-        strict_health = os.environ.get(
-            "FLUID_SCIENTIST_STRICT_CAPABILITY_HEALTH"
-        ) == "1"
+        health_report = self._registry.health_check(mutate=True)
         resolver = RequirementGraphResolver(
             self._registry,
             require_verified=True,
-            require_healthy=strict_health,
+            require_healthy=True,
         )
         graph = resolver.resolve(requirements)
         state.requirements = [r.model_dump() for r in graph.requirements]
@@ -1047,25 +1048,42 @@ class V5WorkflowPipeline:
             for resolution in graph.unresolved
             if resolution.requirement.mandatory
         ]
-        state.capabilities_extended = [
-            resolution.model_dump()
-            for resolution in graph.resolutions
-            if resolution.status == "CONFIG_EXTENSION"
-        ]
+        state.capabilities_extended = []
 
         mandatory_missing = state.capabilities_missing
         if mandatory_missing:
+            orchestrator = UnknownCapabilityOrchestrator(self._work_root)
+            extension_result = orchestrator.orchestrate(
+                session_id=state.session_id,
+                scientific_intent=state.scientific_intent,
+                simulation_plan=state.raw_design,
+                requirement_graph=graph,
+                case_plan={
+                    "geometry": state.geometry,
+                    "mesh": state.mesh,
+                    "solver": state.solver,
+                    "metrics": state.scientific_metrics,
+                },
+            )
+            state.pipeline_checkpoint = extension_result.checkpoint.model_dump()
+            state.extension_runs = [
+                record.model_dump() for record in extension_result.extensions
+            ]
+            state.current_stage = PipelineStatus.EXTENDING_CAPABILITIES
             state.failure = PipelineFailure(
-                failed_stage=PipelineStatus.RESOLVING_CAPABILITIES,
-                failure_category="missing_capability",
+                failed_stage=PipelineStatus.EXTENDING_CAPABILITIES,
+                failure_category="extension_pipeline_incomplete",
                 message=(
-                    "Mandatory OpenFOAM capabilities require extension "
-                    "before case generation."
+                    "Mandatory OpenFOAM capabilities require generated and "
+                    "validated extensions before case generation."
                 ),
                 internal_details={
                     "requirement_graph": graph.model_dump(),
+                    "registry_health": health_report.model_dump(),
                     "missing_capabilities": mandatory_missing,
-                    "next_stage": "EXTENSION_PIPELINE",
+                    "pipeline_checkpoint": state.pipeline_checkpoint,
+                    "extension_runs": state.extension_runs,
+                    "next_stage": "EXTENSION_PIPELINE_EXECUTOR",
                 },
                 can_retry=True,
                 requires_user_input=False,

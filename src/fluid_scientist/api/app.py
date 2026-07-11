@@ -563,6 +563,9 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_application: FastAPI):
+        from fluid_scientist.capabilities import get_capability_registry
+
+        get_capability_registry().health_check(mutate=True)
         planning_service.recover_interrupted()
         try:
             yield

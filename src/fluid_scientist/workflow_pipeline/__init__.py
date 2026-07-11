@@ -29,6 +29,7 @@ class PipelineStatus:
     DESIGNING = "designing"
     CLOSING = "closing"
     RESOLVING_CAPABILITIES = "resolving_capabilities"
+    EXTENDING_CAPABILITIES = "extending_capabilities"
     GENERATING_CASE = "generating_case"
     VALIDATING_CASE = "validating_case"
     # --- Terminal states ---
@@ -46,6 +47,7 @@ class PipelineStatus:
             DESIGNING,
             CLOSING,
             RESOLVING_CAPABILITIES,
+            EXTENDING_CAPABILITIES,
             GENERATING_CASE,
             VALIDATING_CASE,
         }
@@ -100,6 +102,11 @@ STAGE_DESCRIPTORS: dict[str, dict[str, str]] = {
         "description": "匹配现有能力，自动生成缺失扩展",
         "progress": "60%",
     },
+    PipelineStatus.EXTENDING_CAPABILITIES: {
+        "label": "Resolving missing capabilities",
+        "description": "Generating extension specs and validation checkpoints.",
+        "progress": "68%",
+    },
     PipelineStatus.GENERATING_CASE: {
         "label": "正在生成真实算例",
         "description": "生成 OpenFOAM Case 目录和字典文件",
@@ -139,6 +146,14 @@ _PIPELINE_TRANSITIONS: dict[str, frozenset[str]] = {
     ),
     PipelineStatus.RESOLVING_CAPABILITIES: frozenset(
         {
+            PipelineStatus.EXTENDING_CAPABILITIES,
+            PipelineStatus.GENERATING_CASE,
+            PipelineStatus.FAILED,
+        }
+    ),
+    PipelineStatus.EXTENDING_CAPABILITIES: frozenset(
+        {
+            PipelineStatus.RESOLVING_CAPABILITIES,
             PipelineStatus.GENERATING_CASE,
             PipelineStatus.FAILED,
         }
@@ -219,6 +234,7 @@ class PipelineFailure(BaseModel):
         "design_incomplete",
         "closure_conflict",
         "missing_capability",
+        "extension_pipeline_incomplete",
         "extension_generation_failed",
         "case_generation_failed",
         "validation_failed",

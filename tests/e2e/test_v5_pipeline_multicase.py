@@ -77,6 +77,11 @@ def test_pipeline_gathers_all_static_checks(case, work_root):
         )
     else:
         assert state.current_stage == "failed"
+        if state.failure["failed_stage"] == "extending_capabilities":
+            assert state.pipeline_checkpoint
+            assert state.extension_runs
+            assert state.failure["failure_category"] == "extension_pipeline_incomplete"
+            return
         assert state.failure["failed_stage"] == "validating_case"
         assert "OpenFOAM runtime was not found" in state.failure["message"]
 
