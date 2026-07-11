@@ -575,6 +575,40 @@ def test_execution_targets_endpoint_reads_runtime_state_updates() -> None:
     assert body[0]["foam_version"] == "OpenFOAM-13"
 
 
+def test_workstation_detect_reports_inaccessible_ssh_paths(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pathlib import Path
+
+    def denied(self: Path) -> bool:
+        if self.name == "fluid_scientist_ed25519":
+            raise PermissionError("denied")
+        return False
+
+    monkeypatch.setattr(Path, "is_file", denied)
+    api = TestClient(create_app())
+
+    response = api.get("/api/workstation/detect")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["identity_file"] is None
+    assert body["known_hosts_file"] is None
+    assert body["path_errors"]
+    assert body["path_errors"][0]["error"] == "denied"
+
+
+def test_workstation_auto_connect_requests_missing_host_and_user() -> None:
+    api = TestClient(create_app(settings=AppSettings(_env_file=None), execution_targets=()))
+
+    response = api.post("/api/workstation/auto-connect", json={})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["configured"] is False
+    assert body["connected"] is False
+    assert body["needs_input"] is True
+    assert body["diagnostics"]["checks"][0]["name"] == "host"
+
+
 def test_experiment_capabilities_are_ui_safe_and_complete() -> None:
     response = TestClient(create_app()).get("/api/experiment-capabilities")
 

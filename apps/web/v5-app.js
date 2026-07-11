@@ -69,6 +69,7 @@ const API = {
   workstationStatus: () => api("/api/workstation/status"),
   detectWorkstation: () => api("/api/workstation/detect"),
   configureWorkstation: (cfg) => api("/api/workstation/configure", { method: "POST", body: JSON.stringify(cfg) }),
+  autoConnectWorkstation: (cfg) => api("/api/workstation/auto-connect", { method: "POST", body: JSON.stringify(cfg || {}) }),
   getModelConfig: () => api("/api/v5/model-config"),
   configureModel: (cfg) => api("/api/v5/model-config", { method: "POST", body: JSON.stringify(cfg) }),
 };
@@ -850,6 +851,15 @@ async function loadWorkstationStatus() {
   }
 }
 
+function workstationDiagnosticText(result) {
+  const checks = result?.diagnostics?.checks || [];
+  const failed = checks.filter(c => !c.ok);
+  if (!failed.length) {
+    return result?.connected ? "配置成功，工作站已连接" : "配置已保存，连接检查未返回错误详情";
+  }
+  return failed.map(c => `${c.name}: ${c.detail || "failed"}`).join("；");
+}
+
 // ---- Render all ----
 function renderAll() {
   renderSessionList();
@@ -902,9 +912,29 @@ function bindEvents() {
   });
 
   // Workstation config
+  byId("ws-auto-connect").addEventListener("click", async () => {
+    try {
+      byId("ws-config-state").textContent = "正在自动检测并连接...";
+      const resp = await API.autoConnectWorkstation({
+        host: byId("ws-input-host").value || undefined,
+        username: byId("ws-input-user").value || undefined,
+        port: parseInt(byId("ws-input-port").value) || 22,
+        identity_file: byId("ws-input-key").value || undefined,
+        known_hosts_file: byId("ws-input-knownhosts").value || undefined,
+      });
+      if (resp.identity_file) byId("ws-input-key").value = resp.identity_file;
+      if (resp.known_hosts_file) byId("ws-input-knownhosts").value = resp.known_hosts_file;
+      if (resp.host) byId("ws-input-host").value = resp.host;
+      if (resp.username) byId("ws-input-user").value = resp.username;
+      byId("ws-config-state").textContent = workstationDiagnosticText(resp);
+      await loadTargets();
+      await loadWorkstationStatus();
+    } catch (e) { byId("ws-config-state").textContent = "自动连接失败: " + e.message; }
+  });
+
   byId("ws-save-config").addEventListener("click", async () => {
     try {
-      await API.configureWorkstation({
+      const resp = await API.configureWorkstation({
         host: byId("ws-input-host").value, username: byId("ws-input-user").value,
         port: parseInt(byId("ws-input-port").value) || 22,
         identity_file: byId("ws-input-key").value, known_hosts_file: byId("ws-input-knownhosts").value,

@@ -1775,6 +1775,17 @@ def create_app(
         from pathlib import Path
 
         ssh_dir = Path.home() / ".ssh"
+        path_errors: list[dict[str, str]] = []
+
+        def safe_is_file(path: Path) -> bool:
+            try:
+                return path.is_file()
+            except OSError as error:
+                path_errors.append(
+                    {"path": str(path).replace("\\", "/"), "error": str(error)}
+                )
+                return False
+
         # Look for fluid_scientist-specific keys first, then generic keys
         key_candidates = [
             ssh_dir / "fluid_scientist_ed25519",
@@ -1788,14 +1799,14 @@ def create_app(
 
         detected_key = None
         for key_path in key_candidates:
-            if key_path.exists():
+            if safe_is_file(key_path):
                 detected_key = str(key_path).replace("\\", "/")
                 break
 
         detected_known_hosts = None
         detected_hosts: list[str] = []
         for kh_path in known_hosts_candidates:
-            if kh_path.exists():
+            if safe_is_file(kh_path):
                 detected_known_hosts = str(kh_path).replace("\\", "/")
                 try:
                     content = kh_path.read_text(encoding="utf-8")
@@ -1815,6 +1826,170 @@ def create_app(
             "known_hosts_file": detected_known_hosts,
             "detected_hosts": detected_hosts,
             "ssh_dir": str(ssh_dir).replace("\\", "/"),
+            "path_errors": path_errors,
+        }
+
+    def _workstation_diagnostics(
+        *,
+        host: str | None,
+        username: str | None,
+        port: int,
+        identity_file: str | None,
+        known_hosts_file: str | None,
+    ) -> dict[str, Any]:
+        """Run credential-safe local checks for the workstation connection."""
+        import subprocess
+        from pathlib import Path
+
+        checks: list[dict[str, Any]] = []
+
+        def add_check(name: str, ok: bool, detail: str = "") -> None:
+            checks.append({"name": name, "ok": ok, "detail": detail})
+
+        if not host:
+            add_check("host", False, "Host is required")
+        else:
+            add_check("host", True, host)
+        if not username:
+            add_check("username", False, "SSH username is required")
+        else:
+            add_check("username", True, username)
+
+        key_ok = True
+        if identity_file:
+            try:
+                key_ok = Path(identity_file).is_file()
+            except OSError as error:
+                key_ok = False
+                add_check("identity_file", False, str(error))
+            else:
+                add_check(
+                    "identity_file",
+                    key_ok,
+                    identity_file if key_ok else "Identity file is not accessible",
+                )
+        else:
+            add_check("identity_file", True, "No identity file configured; ssh-agent/default keys may be used")
+
+        known_hosts_ok = False
+        if known_hosts_file:
+            try:
+                known_hosts_ok = Path(known_hosts_file).is_file()
+            except OSError as error:
+                add_check("known_hosts_file", False, str(error))
+            else:
+                add_check(
+                    "known_hosts_file",
+                    known_hosts_ok,
+                    known_hosts_file if known_hosts_ok else "known_hosts file is not accessible",
+                )
+        else:
+            add_check("known_hosts_file", False, "known_hosts file is required for strict host verification")
+
+        if not (host and username and key_ok and known_hosts_ok):
+            return {"checks": checks, "ssh_ok": False, "doctor_ok": False}
+
+        base_cmd = [
+            "ssh",
+            "-p",
+            str(port),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={known_hosts_file}",
+            "-o",
+            "ConnectTimeout=8",
+        ]
+        if identity_file:
+            base_cmd.extend(["-i", identity_file])
+        base_cmd.append(f"{username}@{host}")
+
+        def run_remote(label: str, remote_args: list[str]) -> tuple[bool, str]:
+            try:
+                result = subprocess.run(
+                    [*base_cmd, *remote_args],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                    check=False,
+                )
+            except Exception as error:  # noqa: BLE001
+                return False, str(error)
+            output = (result.stdout.strip() or result.stderr.strip())[:500]
+            return result.returncode == 0, output or f"exit code {result.returncode}"
+
+        ssh_ok, ssh_detail = run_remote("ssh", ["echo", "SSH_OK"])
+        add_check("ssh", ssh_ok and "SSH_OK" in ssh_detail, ssh_detail)
+        if not (ssh_ok and "SSH_OK" in ssh_detail):
+            return {"checks": checks, "ssh_ok": False, "doctor_ok": False}
+
+        doctor_ok, doctor_detail = run_remote(
+            "fluid_worker_doctor", [".local/bin/fluid-worker", "doctor", "--json"]
+        )
+        add_check("fluid_worker_doctor", doctor_ok, doctor_detail)
+        return {"checks": checks, "ssh_ok": True, "doctor_ok": doctor_ok}
+
+    @application.post("/api/workstation/auto-connect")
+    def auto_connect_workstation(
+        host: str | None = Body(None, embed=True),
+        username: str | None = Body(None, embed=True),
+        port: int = Body(22, embed=True),
+        identity_file: str = Body("", embed=True),
+        known_hosts_file: str = Body("", embed=True),
+    ) -> dict:
+        """Detect SSH files, configure the workstation, and run connection checks."""
+        detected = detect_workstation_config()
+        ws = runtime_settings.workstation
+        resolved_host = host or (ws.hosts[0] if ws.hosts else None)
+        resolved_username = username or ws.username
+        resolved_identity = identity_file or detected.get("identity_file") or ""
+        resolved_known_hosts = known_hosts_file or detected.get("known_hosts_file") or ""
+
+        diagnostics = _workstation_diagnostics(
+            host=resolved_host,
+            username=resolved_username,
+            port=port,
+            identity_file=resolved_identity,
+            known_hosts_file=resolved_known_hosts,
+        )
+        if not resolved_host or not resolved_username:
+            return {
+                "configured": False,
+                "connected": False,
+                "needs_input": True,
+                "host": resolved_host,
+                "username": resolved_username,
+                "port": port,
+                "identity_file": resolved_identity,
+                "known_hosts_file": resolved_known_hosts,
+                "detected": detected,
+                "diagnostics": diagnostics,
+                "error": "Host and SSH username are required",
+            }
+
+        configured = configure_workstation(
+            host=resolved_host,
+            username=resolved_username,
+            port=port,
+            identity_file=resolved_identity,
+            known_hosts_file=resolved_known_hosts,
+        )
+        fresh_diagnostics = _workstation_diagnostics(
+            host=resolved_host,
+            username=resolved_username,
+            port=port,
+            identity_file=resolved_identity,
+            known_hosts_file=resolved_known_hosts,
+        )
+        return {
+            **configured,
+            "needs_input": False,
+            "identity_file": resolved_identity,
+            "known_hosts_file": resolved_known_hosts,
+            "detected": detected,
+            "diagnostics": fresh_diagnostics,
         }
 
     @application.post("/api/workstation/configure")
@@ -1895,6 +2070,13 @@ def create_app(
         for target in configured_targets:
             if target.kind == "workstation_openfoam":
                 cap = capability_cache.get(target, force_refresh=True)
+                diagnostics = _workstation_diagnostics(
+                    host=host,
+                    username=username,
+                    port=port,
+                    identity_file=identity_file,
+                    known_hosts_file=known_hosts_file,
+                )
                 return {
                     "configured": True,
                     "connected": cap.available,
@@ -1905,6 +2087,7 @@ def create_app(
                     "cpu_count": cap.cpu_count,
                     "memory_gb": cap.memory_gb,
                     "disk_free_gb": cap.disk_free_gb,
+                    "diagnostics": diagnostics,
                     "error": None if cap.available else (cap.reason or "Connection failed"),
                 }
 
@@ -1912,6 +2095,15 @@ def create_app(
             "configured": True,
             "connected": False,
             "host": host,
+            "username": username,
+            "port": port,
+            "diagnostics": _workstation_diagnostics(
+                host=host,
+                username=username,
+                port=port,
+                identity_file=identity_file,
+                known_hosts_file=known_hosts_file,
+            ),
             "error": (
                 "Configuration saved but no workstation target was created."
                 " Check SSH key and known_hosts paths."
@@ -3993,10 +4185,10 @@ def build_execution_targets(
     workstation = settings.workstation
     if not workstation.hosts or not workstation.username or not workstation.known_hosts_file:
         return ()
-    candidates = tuple(
-        (
-            f"candidate-{index}",
-            transport_factory(
+    candidates = []
+    for index, host in enumerate(workstation.hosts, start=1):
+        try:
+            transport = transport_factory(
                 NodeSettings(
                     host=host,
                     username=workstation.username,
@@ -4004,14 +4196,16 @@ def build_execution_targets(
                     identity_file=workstation.identity_file,
                     known_hosts_file=workstation.known_hosts_file,
                 )
-            ),
-        )
-        for index, host in enumerate(workstation.hosts, start=1)
-    )
+            )
+        except Exception:
+            continue
+        candidates.append((f"candidate-{index}", transport))
+    if not candidates:
+        return ()
     return (
         WorkstationOpenFOAMTarget(
             target_id="workstation-openfoam",
-            candidates=candidates,
+            candidates=tuple(candidates),
         ),
     )
 
