@@ -642,10 +642,10 @@ def create_app(
             git_sha = "unknown"
 
         return {
-            "workflow": "v2",
+            "workflow": "v5",
             "git_commit": git_sha,
-            "api_version": "2.0",
-            "schema_version": "2.0",
+            "api_version": "5.0",
+            "schema_version": "5.0",
             "native_compile_enabled": True,
             "measurement_plan_compile_enabled": True,
             "package_version": __version__,

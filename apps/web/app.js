@@ -27,8 +27,8 @@ import {
   plannedResultUrl,
 } from "./result-state.js";
 
-// Workflow mode: "v2" (new ExperimentSpec flow) or "legacy" (old ExperimentPlan flow)
-const workflowMode = "v2";
+// Workflow mode: "v5" (conversation workbench) or "legacy" (old ExperimentPlan flow)
+const workflowMode = "v5";
 
 const $ = (selector) => document.querySelector(selector);
 const byId = (id) => document.getElementById(id);
@@ -61,12 +61,12 @@ async function loadSystemVersion() {
       const badge = document.getElementById('system-version');
       if (badge) {
         const sha = info.git_commit || 'unknown';
-        const wf = info.workflow || 'v2';
+        const wf = info.workflow || 'v5';
         badge.textContent = `Workflow ${wf} · ${sha.substring(0, 7)}`;
       }
       // Populate footer
       const wfMode = document.getElementById('wf-mode');
-      if (wfMode) wfMode.textContent = (info.workflow || 'v2').toUpperCase() + ' Beta';
+      if (wfMode) wfMode.textContent = (info.workflow || 'v5').toUpperCase() + ' Beta';
       const wfGit = document.getElementById('wf-git');
       if (wfGit) wfGit.textContent = info.git_commit ? info.git_commit.substring(0, 12) : '—';
       const wfSchema = document.getElementById('wf-schema');
