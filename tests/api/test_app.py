@@ -77,7 +77,9 @@ def test_system_build_info_exposes_runtime_identity() -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["git_sha"]
-    assert body["source_root"].endswith("AI FOR SCIENCE")
+    assert body["source_root"]
+    assert body["package_path"].startswith(body["source_root"])
+    assert body["frontend_root"].startswith(body["source_root"])
     assert body["package_path"].endswith("src\\fluid_scientist") or body[
         "package_path"
     ].endswith("src/fluid_scientist")
