@@ -521,6 +521,60 @@ def test_model_configuration_accepts_base_url() -> None:
     assert response.json()["model"] == "glm-4-flash"
 
 
+def test_v5_model_config_alias_matches_workbench_api() -> None:
+    api = TestClient(create_app(plan_provider_factory=lambda settings: FakePlanDesigner()))
+
+    response = api.post(
+        "/api/v5/model-config",
+        json={
+            "provider": "glm",
+            "model": "glm-4-flash",
+            "api_key": "secret",
+            "base_url": "https://open.bigmodel.cn/api/paas/v4/",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["configured"] is True
+    assert body["provider"] == "glm"
+    assert body["model"] == "glm-4-flash"
+    assert body["is_mock"] is False
+    assert "glm-4-flash" in body["suggested_models"]["glm"]
+    assert api.get("/api/v5/model-config").json()["model"] == "glm-4-flash"
+
+
+def test_execution_targets_endpoint_reads_runtime_state_updates() -> None:
+    class KnownTarget:
+        target_id = "workstation-openfoam"
+        kind = "workstation_openfoam"
+        declared_capabilities = ("OpenFOAM-13",)
+
+        def doctor(self) -> ExecutionTargetCapability:
+            return ExecutionTargetCapability(
+                target_id=self.target_id,
+                kind="workstation_openfoam",
+                available=True,
+                foam_version="OpenFOAM-13",
+                cpu_count=64,
+                memory_gb=125.1,
+                disk_free_gb=500.0,
+                worker_protocol=1,
+            )
+
+    api = TestClient(create_app(execution_targets=()))
+    assert api.get("/api/execution-targets").json() == []
+
+    api.app.state.execution_targets = (KnownTarget(),)
+    response = api.get("/api/execution-targets")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body[0]["target_id"] == "workstation-openfoam"
+    assert body[0]["available"] is True
+    assert body[0]["foam_version"] == "OpenFOAM-13"
+
+
 def test_experiment_capabilities_are_ui_safe_and_complete() -> None:
     response = TestClient(create_app()).get("/api/experiment-capabilities")
 

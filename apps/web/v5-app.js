@@ -876,10 +876,13 @@ function bindEvents() {
     const provider = byId("model-provider").value;
     const key = byId("model-api-key").value;
     const model = byId("model-id").value;
+    const baseUrl = byId("model-base-url")?.value?.trim();
     if (!key || key.length < 5) { byId("model-config-state").textContent = "API Key 太短"; return; }
     try {
       byId("model-config-state").textContent = "正在连接...";
-      const resp = await API.configureModel({ provider, model, api_key: key });
+      const payload = { provider, model, api_key: key };
+      if (baseUrl) payload.base_url = baseUrl;
+      const resp = await API.configureModel(payload);
       if (resp.configured && !resp.is_mock) {
         byId("model-config-state").textContent = `配置成功: ${resp.provider}/${resp.model}`;
         byId("header-model-status").textContent = `${resp.provider}/${resp.model}`;
@@ -907,7 +910,7 @@ function bindEvents() {
         identity_file: byId("ws-input-key").value, known_hosts_file: byId("ws-input-knownhosts").value,
       });
       byId("ws-config-state").textContent = "配置成功";
-      setTimeout(() => { byId("workstation-settings").close(); loadWorkstationStatus(); }, 800);
+      setTimeout(() => { byId("workstation-settings").close(); loadTargets(); loadWorkstationStatus(); }, 800);
     } catch (e) { byId("ws-config-state").textContent = "配置失败: " + e.message; }
   });
 }

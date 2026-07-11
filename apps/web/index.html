@@ -87,6 +87,8 @@
         <input id="model-api-key" type="password" autocomplete="off" placeholder="在开放平台获取 API Key">
         <label class="field-label" for="model-id">模型 ID</label>
         <input id="model-id" type="text" value="glm-4-flash" placeholder="如 glm-4-plus, glm-4, glm-4-flash">
+        <label class="field-label" for="model-base-url">Base URL</label>
+        <input id="model-base-url" type="text" value="https://open.bigmodel.cn/api/paas/v4/" placeholder="如 https://open.bigmodel.cn/api/paas/v4/">
         <p class="field-hint">GLM: glm-4-plus / glm-4 / glm-4-flash；DeepSeek: deepseek-chat / deepseek-reasoner；OpenAI: gpt-4o</p>
         <p id="model-config-state" class="dialog-state" role="status"></p>
         <div class="dialog-actions"><button value="cancel" class="button button-secondary">取消</button><button id="configure-model" class="button button-primary" type="button">保存并连接</button></div>
