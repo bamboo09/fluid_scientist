@@ -1,4 +1,4 @@
-"""Tests for the LLMClient wiring in the v5 code-extension endpoints.
+﻿"""Tests for the LLMClient wiring in the v5 code-extension endpoints.
 
 These tests verify that the ``generate`` and ``review`` endpoints in the
 v5 router actually invoke :class:`LLMClient` (instead of producing
@@ -85,23 +85,19 @@ def isolated_state(monkeypatch: pytest.MonkeyPatch):
     """Snapshot the module-level state we mutate and restore it on teardown.
 
     Yields a namespace the tests can use to access the working copies of
-    the router's LLM client, the extension store, etc.
+    the router's LLM client.
     """
     # Use isolated copies of mutable module-level state.
     original_llm = v5_router._llm_client
-    original_store = dict(v5_router._extension_store)
 
     fresh_llm = LLMClient()
     monkeypatch.setattr(v5_router, "_llm_client", fresh_llm)
-    monkeypatch.setattr(v5_router, "_extension_store", {})
+    v5_router._reset_repo_for_testing()
 
     try:
-        yield {"llm": fresh_llm, "store": v5_router._extension_store}
+        yield {"llm": fresh_llm}
     finally:
-        # Restore originals (monkeypatch would do this for us, but we
-        # also need to put the dict back since we replaced it).
-        v5_router._extension_store.clear()
-        v5_router._extension_store.update(original_store)
+        v5_router._reset_repo_for_testing()
         v5_router._llm_client = original_llm
 
 
@@ -117,7 +113,7 @@ class TestGenerateCodeExtensionLLM:
         self, isolated_state
     ) -> None:
         spec = _make_spec_in_reviewed_state()
-        isolated_state["store"][spec.extension_id] = spec
+        v5_router._repo.save_extension(spec)
         llm = isolated_state["llm"]
 
         client = _build_client_for_router()
@@ -141,7 +137,7 @@ class TestGenerateCodeExtensionLLM:
             extension_id="ext-no-sess",
             session_id="sess-from-spec",
         )
-        isolated_state["store"][spec.extension_id] = spec
+        v5_router._repo.save_extension(spec)
         llm = isolated_state["llm"]
 
         client = _build_client_for_router()
@@ -158,7 +154,7 @@ class TestGenerateCodeExtensionLLM:
         self, isolated_state
     ) -> None:
         spec = _make_spec_in_reviewed_state()
-        isolated_state["store"][spec.extension_id] = spec
+        v5_router._repo.save_extension(spec)
 
         client = _build_client_for_router()
         response = client.post(
@@ -184,7 +180,7 @@ class TestReviewCodeExtensionLLM:
         self, isolated_state
     ) -> None:
         spec = _make_spec_in_tested_state()
-        isolated_state["store"][spec.extension_id] = spec
+        v5_router._repo.save_extension(spec)
         llm = isolated_state["llm"]
 
         client = _build_client_for_router()
@@ -204,7 +200,7 @@ class TestReviewCodeExtensionLLM:
         self, isolated_state
     ) -> None:
         spec = _make_spec_in_tested_state()
-        isolated_state["store"][spec.extension_id] = spec
+        v5_router._repo.save_extension(spec)
 
         client = _build_client_for_router()
         response = client.post(
@@ -221,7 +217,7 @@ class TestReviewCodeExtensionLLM:
         self, isolated_state
     ) -> None:
         spec = _make_spec_in_tested_state()
-        isolated_state["store"][spec.extension_id] = spec
+        v5_router._repo.save_extension(spec)
 
         client = _build_client_for_router()
         response = client.post(
@@ -247,7 +243,7 @@ class TestLLMFailureResilience:
         self, isolated_state, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         spec = _make_spec_in_reviewed_state()
-        isolated_state["store"][spec.extension_id] = spec
+        v5_router._repo.save_extension(spec)
 
         # Force the LLM client to raise on every call.  The endpoint
         # must catch the exception and fall back to the placeholder
@@ -281,7 +277,7 @@ class TestLLMFailureResilience:
         self, isolated_state, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         spec = _make_spec_in_tested_state()
-        isolated_state["store"][spec.extension_id] = spec
+        v5_router._repo.save_extension(spec)
 
         class _BoomClient:
             def call(self, *args, **kwargs):
@@ -320,7 +316,7 @@ class TestSpecUpdatedWithLLMCode:
         self, isolated_state, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         spec = _make_spec_in_reviewed_state()
-        isolated_state["store"][spec.extension_id] = spec
+        v5_router._repo.save_extension(spec)
 
         # Build a fake LLM that pretends to produce real code.
         produced_code = "def run(*args, **kwargs):\n    return 'real-llm-code'\n"
@@ -385,7 +381,7 @@ class TestSpecUpdatedWithLLMCode:
         assert body["review_notes"] == produced_notes
 
         # And the in-memory store must be updated with the same spec.
-        stored = v5_router._extension_store[spec.extension_id]
+        stored = v5_router._repo.get_extension(spec.extension_id)
         assert stored.generated_code == produced_code
         assert stored.review_notes == produced_notes
 
@@ -394,7 +390,7 @@ class TestSpecUpdatedWithLLMCode:
     ) -> None:
         """When the LLM returns an empty ``code`` field, the placeholder wins."""
         spec = _make_spec_in_reviewed_state()
-        isolated_state["store"][spec.extension_id] = spec
+        v5_router._repo.save_extension(spec)
 
         # The default LLMClient is the mock and returns a generic
         # fallback dict with no ``code``/``generated_code`` keys, so

@@ -54,16 +54,11 @@ def client() -> TestClient:
     original = {
         "persistence": v5_router._session_persistence,
         "store": v5_router._session_store,
-        "drafts": dict(v5_router._draft_store),
-        "batches": dict(v5_router._batch_store),
-        "proposals": dict(v5_router._proposal_store),
         "llm": v5_router._llm_client,
     }
     v5_router._session_persistence = persistence
     v5_router._session_store = store
-    v5_router._draft_store.clear()
-    v5_router._batch_store.clear()
-    v5_router._proposal_store.clear()
+    v5_router._reset_repo_for_testing()
     v5_router._llm_client = FakeLLM()
     app = FastAPI()
     app.include_router(v5_router.router)
@@ -72,12 +67,7 @@ def client() -> TestClient:
     finally:
         v5_router._session_persistence = original["persistence"]
         v5_router._session_store = original["store"]
-        v5_router._draft_store.clear()
-        v5_router._draft_store.update(original["drafts"])
-        v5_router._batch_store.clear()
-        v5_router._batch_store.update(original["batches"])
-        v5_router._proposal_store.clear()
-        v5_router._proposal_store.update(original["proposals"])
+        v5_router._reset_repo_for_testing()
         v5_router._llm_client = original["llm"]
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
@@ -117,7 +107,7 @@ def _draft(session_id: str) -> ExperimentDraft:
             }
         },
     )
-    v5_router._draft_store[draft.draft_id] = draft
+    v5_router._repo.save_draft(draft)
     session = v5_router._session_store.get_session(session_id)
     assert session is not None
     session.current_draft_id = draft.draft_id
@@ -144,7 +134,7 @@ def test_ambiguous_free_slip_supplement_asks_boundary_without_new_study(client: 
     assert session is not None
     assert session.current_draft_id == draft.draft_id
     assert session.selected_study_id is None
-    assert v5_router._draft_store[draft.draft_id].version == 1
+    assert v5_router._repo.get_draft(draft.draft_id).version == 1
 
 
 def test_real_chinese_free_slip_page_flow_asks_boundary_without_new_study(client: TestClient) -> None:
@@ -202,7 +192,7 @@ def test_free_slip_question_only_answers(client: TestClient) -> None:
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["actions"][0]["action"] == "answer"
-    assert not v5_router._proposal_store
+    assert not v5_router._repo.list_proposals()
 
 
 def test_explicit_new_free_slip_pipe_creates_new_study(client: TestClient) -> None:

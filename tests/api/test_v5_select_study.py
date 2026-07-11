@@ -1,4 +1,4 @@
-"""Tests for the ``/api/v5/batches/{batch_id}/select-study`` endpoint.
+﻿"""Tests for the ``/api/v5/batches/{batch_id}/select-study`` endpoint.
 
 Verifies that:
 
@@ -56,26 +56,16 @@ def isolated_router() -> None:
 
     original_persistence = v5_router._session_persistence
     original_store = v5_router._session_store
-    original_drafts = dict(v5_router._draft_store)
-    original_batches = dict(v5_router._batch_store)
-    original_proposals = dict(v5_router._proposal_store)
 
     v5_router._session_persistence = persistence
     v5_router._session_store = store
-    v5_router._draft_store.clear()
-    v5_router._batch_store.clear()
-    v5_router._proposal_store.clear()
+    v5_router._reset_repo_for_testing()
     try:
         yield
     finally:
         v5_router._session_persistence = original_persistence
         v5_router._session_store = original_store
-        v5_router._draft_store.clear()
-        v5_router._draft_store.update(original_drafts)
-        v5_router._batch_store.clear()
-        v5_router._batch_store.update(original_batches)
-        v5_router._proposal_store.clear()
-        v5_router._proposal_store.update(original_proposals)
+        v5_router._reset_repo_for_testing()
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
@@ -145,7 +135,7 @@ class TestSelectStudyReadinessCheck:
             input_type="single_study",
             studies=[study],
         )
-        v5_router._batch_store[batch.batch_id] = batch
+        v5_router._repo.save_batch(batch)
 
         response = client.post(
             f"/api/v5/batches/{batch.batch_id}/select-study",
@@ -187,7 +177,7 @@ class TestSelectStudyReadinessCheck:
             input_type="single_study",
             studies=[study],
         )
-        v5_router._batch_store[batch.batch_id] = batch
+        v5_router._repo.save_batch(batch)
 
         response = client.post(
             f"/api/v5/batches/{batch.batch_id}/select-study",
@@ -199,7 +189,7 @@ class TestSelectStudyReadinessCheck:
         if body["type"] == "pipeline_failed":
             assert body["failure"]
             assert "draft" not in body
-            assert not v5_router._draft_store
+            assert not v5_router._repo.list_drafts()
         else:
             assert body["type"] == "draft_ready"
             assert body["compile_ready_view"]["status"] == "compile_ready"
@@ -219,7 +209,7 @@ class TestSelectStudyReadinessCheck:
             input_type="single_study",
             studies=[study],
         )
-        v5_router._batch_store[batch.batch_id] = batch
+        v5_router._repo.save_batch(batch)
 
         response = client.post(
             f"/api/v5/batches/{batch.batch_id}/select-study",
@@ -258,7 +248,7 @@ class TestSelectStudyReadinessCheck:
             input_type="single_study",
             studies=[study],
         )
-        v5_router._batch_store[batch.batch_id] = batch
+        v5_router._repo.save_batch(batch)
 
         response = client.post(
             f"/api/v5/batches/{batch.batch_id}/select-study",
@@ -283,7 +273,7 @@ class TestSelectStudyReadinessCheck:
             input_type="single_study",
             studies=[study],
         )
-        v5_router._batch_store[batch.batch_id] = batch
+        v5_router._repo.save_batch(batch)
 
         response = client.post(
             f"/api/v5/batches/{batch.batch_id}/select-study",
@@ -303,7 +293,7 @@ class TestSelectStudyReadinessCheck:
             objective="legacy empty draft",
             validation_result={"compile_ready": False, "openfoam_available": False},
         )
-        v5_router._draft_store[draft.draft_id] = draft
+        v5_router._repo.save_draft(draft)
 
         response = client.post(
             f"/api/v5/drafts/{draft.draft_id}/confirm",
@@ -325,7 +315,7 @@ class TestSelectStudyReadinessCheck:
             objective="legacy empty draft",
             validation_result={"compile_ready": False, "openfoam_available": False},
         )
-        v5_router._draft_store[draft.draft_id] = draft
+        v5_router._repo.save_draft(draft)
 
         response = client.post(
             "/api/v5/case-plans/generate",

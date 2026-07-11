@@ -81,24 +81,18 @@ def isolated_router() -> None:
 
     original_persistence = v5_router._session_persistence
     original_store = v5_router._session_store
-    original_drafts = dict(v5_router._draft_store)
-    original_batches = dict(v5_router._batch_store)
     original_llm = v5_router._llm_client
 
     v5_router._session_persistence = persistence
     v5_router._session_store = store
-    v5_router._draft_store.clear()
-    v5_router._batch_store.clear()
+    v5_router._reset_repo_for_testing()
     v5_router._llm_client = _ConfiguredFakeLLM()
     try:
         yield
     finally:
         v5_router._session_persistence = original_persistence
         v5_router._session_store = original_store
-        v5_router._draft_store.clear()
-        v5_router._draft_store.update(original_drafts)
-        v5_router._batch_store.clear()
-        v5_router._batch_store.update(original_batches)
+        v5_router._reset_repo_for_testing()
         v5_router._llm_client = original_llm
         # Best-effort cleanup of the temp dir
         import shutil
@@ -400,7 +394,7 @@ class TestRequestDraftChangeTransition:
             objective="Test objective",
             study_type="cfd_simulation",
         )
-        v5_router._draft_store[draft.draft_id] = draft
+        v5_router._repo.save_draft(draft)
 
         # Track the transitions made by the state machine.
         observed_statuses: list[DraftSessionStatus] = []
@@ -448,7 +442,7 @@ class TestRequestDraftChangeTransition:
         assert updated.current_draft_id is not None
         assert updated.current_draft_id != draft.draft_id
         # The cloned draft must be editable (not locked, not confirmed).
-        cloned = v5_router._draft_store.get(updated.current_draft_id)
+        cloned = v5_router._repo.get_draft(updated.current_draft_id)
         assert cloned is not None
         assert cloned.locked is False
         assert cloned.status == DraftStatus.DRAFT
@@ -481,7 +475,7 @@ class TestRequestDraftChangeTransition:
             objective="Test objective",
             study_type="cfd_simulation",
         )
-        v5_router._draft_store[draft.draft_id] = draft
+        v5_router._repo.save_draft(draft)
 
         response = client.post(
             f"/api/v5/drafts/{draft.draft_id}/changes",

@@ -1,0 +1,34 @@
+{
+  "session_id": "selecttask01",
+  "study_id": "",
+  "draft_version": 1,
+  "pipeline_stage": "EXTENDING_CAPABILITIES",
+  "unresolved_requirement_ids": [
+    "req_mesh",
+    "req_geometry",
+    "req_physics",
+    "req_solver",
+    "req_bcs",
+    "req_ics",
+    "req_fo",
+    "req_postprocess",
+    "req_validation",
+    "req_motion"
+  ],
+  "extension_ids": [
+    "ext-0933d6775553",
+    "ext-b9f7457cfea3",
+    "ext-49ecfe666bfc",
+    "ext-80e47d224052",
+    "ext-3eb984d177bd",
+    "ext-419dd967f91f",
+    "ext-988d4cde82f5",
+    "ext-880b9a3653c4",
+    "ext-bfeac1ddb646",
+    "ext-165f7a0b6b34"
+  ],
+  "scientific_intent_hash": "sha256:9727c388fce53c60b7df205e15d8905137a08d966eaaf3a00958cf23cc5dd42b",
+  "simulation_plan_hash": "sha256:1d57b8321bc77351cba1cdb2c869737a2a8764a1e233941ea67bb97a12b5920d",
+  "requirement_graph_hash": "sha256:1902e67903ba35dc452c8b4169270e58d56acc05387d5be1afabdcc6d98f5690",
+  "case_plan_hash": "sha256:15c65759b1dd6903d2e229da070eb0ae83c61fdb5277efd5f71979a9a866c01d"
+}

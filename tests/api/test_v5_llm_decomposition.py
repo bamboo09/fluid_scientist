@@ -49,26 +49,16 @@ def isolated_router() -> None:
 
     original_persistence = v5_router._session_persistence
     original_store = v5_router._session_store
-    original_drafts = dict(v5_router._draft_store)
-    original_batches = dict(v5_router._batch_store)
-    original_proposals = dict(v5_router._proposal_store)
 
     v5_router._session_persistence = persistence
     v5_router._session_store = store
-    v5_router._draft_store.clear()
-    v5_router._batch_store.clear()
-    v5_router._proposal_store.clear()
+    v5_router._reset_repo_for_testing()
     try:
         yield
     finally:
         v5_router._session_persistence = original_persistence
         v5_router._session_store = original_store
-        v5_router._draft_store.clear()
-        v5_router._draft_store.update(original_drafts)
-        v5_router._batch_store.clear()
-        v5_router._batch_store.update(original_batches)
-        v5_router._proposal_store.clear()
-        v5_router._proposal_store.update(original_proposals)
+        v5_router._reset_repo_for_testing()
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
@@ -87,7 +77,7 @@ def _make_batch(studies: list[StudyIntent], batch_id: str | None = None) -> Batc
         batch_summary=f"{len(studies)} studies",
     )
     # Store it so the endpoint can find it
-    v5_router._batch_store[bid] = batch
+    v5_router._repo.save_batch(batch)
     return batch
 
 

@@ -592,5 +592,77 @@ class V5Repository:
             return None
         return CodeExtensionSpec.model_validate_json(row[0])
 
+    # -- listing / clearing (for test isolation) ---------------------------
+
+    def list_drafts(self) -> list[str]:
+        """Return all draft IDs currently stored."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT draft_id FROM v5_drafts"
+                ).fetchall()
+            finally:
+                conn.close()
+        return [r[0] for r in rows]
+
+    def list_proposals(self) -> list[str]:
+        """Return all proposal IDs currently stored."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT proposal_id FROM v5_proposals"
+                ).fetchall()
+            finally:
+                conn.close()
+        return [r[0] for r in rows]
+
+    def list_batches(self) -> list[str]:
+        """Return all batch IDs currently stored."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT batch_id FROM v5_batches"
+                ).fetchall()
+            finally:
+                conn.close()
+        return [r[0] for r in rows]
+
+    def list_extensions(self) -> list[str]:
+        """Return all code-extension IDs currently stored."""
+        with self._lock:
+            conn = self._connect()
+            try:
+                rows = conn.execute(
+                    "SELECT extension_id FROM v5_code_extensions"
+                ).fetchall()
+            finally:
+                conn.close()
+        return [r[0] for r in rows]
+
+    def clear_all(self) -> None:
+        """Delete every row from all V5 tables (for test isolation)."""
+        tables = [
+            "v5_audit_events",
+            "v5_code_extensions",
+            "v5_compiled_cases",
+            "v5_batches",
+            "v5_case_plans",
+            "v5_proposals",
+            "v5_drafts",
+            "v5_session_messages",
+            "v5_sessions",
+        ]
+        with self._lock:
+            conn = self._connect()
+            try:
+                for table in tables:
+                    conn.execute(f"DELETE FROM {table}")
+                conn.commit()
+            finally:
+                conn.close()
+
 
 __all__ = ["V5Repository"]
