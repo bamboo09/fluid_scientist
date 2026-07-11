@@ -4,10 +4,10 @@ Verifies that:
 
 1. Selecting a study with ``readiness_level == "not_compilable_yet"`` returns
    HTTP 422 with a structured error body that includes blocking issues.
-2. Selecting a study with ``readiness_level == "draftable"`` proceeds normally
-   (returns 200 with a draft).
-3. Selecting a study with ``readiness_level == "needs_clarification"`` is also
-   allowed (it can still produce a draft, albeit with assumptions).
+2. Selecting a study with ``readiness_level == "draftable"`` runs the
+   compile-ready pipeline instead of producing a legacy draft.
+3. Selecting a study with ``readiness_level == "needs_clarification"`` also
+   runs the compile-ready pipeline; it may fail clearly if OpenFOAM is missing.
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from fluid_scientist.study_decomposition.models import (
     StudyIntent,
 )
 from fluid_scientist.api import v5_router
+from fluid_scientist.draft.models import DraftStatus, ExperimentDraft
 from fluid_scientist.draft_session.persistence import JsonSessionPersistence
 from fluid_scientist.draft_session.session_store import DraftSessionStore
 
@@ -173,9 +174,10 @@ class TestSelectStudyReadinessCheck:
         assert "missing_cap" in cap_ids
 
     def test_draftable_study_proceeds_normally(
-        self, isolated_router: None
+        self, isolated_router: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A draftable study must proceed to draft generation (200)."""
+        """A draftable study must run the compile-ready pipeline, not legacy draft generation."""
+        monkeypatch.setenv("FLUID_SCIENTIST_LLM_MODE", "mock")
         client = _build_client()
         session_id = _create_session(client)
 
@@ -194,12 +196,20 @@ class TestSelectStudyReadinessCheck:
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["selected_study_id"] == study.study_id
-        assert "draft" in body
+        if body["type"] == "pipeline_failed":
+            assert body["failure"]
+            assert "draft" not in body
+            assert not v5_router._draft_store
+        else:
+            assert body["type"] == "draft_ready"
+            assert body["compile_ready_view"]["status"] == "compile_ready"
+            assert "draft" in body
 
     def test_needs_clarification_study_proceeds(
-        self, isolated_router: None
+        self, isolated_router: None, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """A needs_clarification study should still be selectable (assumptions ok)."""
+        """A needs_clarification study should still run the compile-ready pipeline."""
+        monkeypatch.setenv("FLUID_SCIENTIST_LLM_MODE", "mock")
         client = _build_client()
         session_id = _create_session(client)
 
@@ -216,6 +226,7 @@ class TestSelectStudyReadinessCheck:
             json={"session_id": session_id, "study_id": study.study_id},
         )
         assert response.status_code == 200, response.text
+        assert response.json()["type"] in {"pipeline_failed", "draft_ready"}
 
     def test_not_compilable_yet_with_only_capability_blocks(
         self, isolated_router: None
@@ -279,3 +290,47 @@ class TestSelectStudyReadinessCheck:
             json={"session_id": session_id, "study_id": "nonexistent"},
         )
         assert response.status_code == 404
+
+    def test_non_compile_ready_draft_cannot_be_confirmed(
+        self, isolated_router: None
+    ) -> None:
+        client = _build_client()
+        session_id = _create_session(client)
+        draft = ExperimentDraft(
+            draft_id="legacy_draft",
+            session_id=session_id,
+            status=DraftStatus.READY,
+            objective="legacy empty draft",
+            validation_result={"compile_ready": False, "openfoam_available": False},
+        )
+        v5_router._draft_store[draft.draft_id] = draft
+
+        response = client.post(
+            f"/api/v5/drafts/{draft.draft_id}/confirm",
+            json={"session_id": session_id, "draft_id": draft.draft_id},
+        )
+
+        assert response.status_code == 409
+        assert "not compile-ready" in response.json()["detail"]
+
+    def test_non_compile_ready_draft_cannot_generate_case_plan(
+        self, isolated_router: None
+    ) -> None:
+        client = _build_client()
+        session_id = _create_session(client)
+        draft = ExperimentDraft(
+            draft_id="legacy_draft",
+            session_id=session_id,
+            status=DraftStatus.CONFIRMED,
+            objective="legacy empty draft",
+            validation_result={"compile_ready": False, "openfoam_available": False},
+        )
+        v5_router._draft_store[draft.draft_id] = draft
+
+        response = client.post(
+            "/api/v5/case-plans/generate",
+            json={"session_id": session_id, "draft_id": draft.draft_id},
+        )
+
+        assert response.status_code == 409
+        assert "not compile-ready" in response.json()["detail"]

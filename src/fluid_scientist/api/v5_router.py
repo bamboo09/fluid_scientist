@@ -893,6 +893,15 @@ def confirm_draft(draft_id: str, request: ConfirmDraftRequest) -> ExperimentDraf
     draft = _draft_store.get(draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
+    if not _draft_is_compile_ready(draft):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Draft is not compile-ready. It must pass the compile-ready "
+                "pipeline, including OpenFOAM runtime validation, before it "
+                "can be confirmed."
+            ),
+        )
 
     result = _validator.validate(draft)
     if not result.valid:
@@ -1016,6 +1025,14 @@ def generate_case_plan(request: GenerateCasePlanRequest) -> CasePlan:
     draft = _draft_store.get(request.draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
+    if not _draft_is_compile_ready(draft):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Draft is not compile-ready. CasePlan generation is disabled "
+                "until mesh/checkMesh/solver dry-run validation has passed."
+            ),
+        )
 
     try:
         case_plan = _case_plan_generator.generate(draft)
@@ -1158,14 +1175,18 @@ def select_study(batch_id: str, request: SelectStudyRequest) -> dict[str, Any]:
         session.selected_study_id = request.study_id
         _session_store.update_session(session)
 
-    # Generate draft from the selected study
-    draft = _draft_generator.generate(study)
-    draft.session_id = request.session_id
-    _draft_store[draft.draft_id] = draft
+    pipeline_result = _run_compile_ready_pipeline_for_study(study, request.session_id)
+    if pipeline_result["type"] == "pipeline_failed":
+        return {
+            "batch_id": batch_id,
+            "selected_study_id": request.study_id,
+            **pipeline_result,
+        }
 
+    draft = pipeline_result["draft"]
     if session:
-        session.current_draft_id = draft.draft_id
-        session.current_draft_version = draft.version
+        session.current_draft_id = draft["draft_id"]
+        session.current_draft_version = draft.get("version", 1)
         with contextlib.suppress(TransitionError):
             session = _state_machine.transition(
                 session, DraftSessionStatus.DRAFT_READY
@@ -1175,7 +1196,7 @@ def select_study(batch_id: str, request: SelectStudyRequest) -> dict[str, Any]:
     return {
         "batch_id": batch_id,
         "selected_study_id": request.study_id,
-        "draft": draft.model_dump(),
+        **pipeline_result,
     }
 
 
@@ -1537,6 +1558,64 @@ class PipelineRunResponse(BaseModel):
     generated_files: list[str] = Field(default_factory=list)
 
 
+def _draft_is_compile_ready(draft: ExperimentDraft) -> bool:
+    result = draft.validation_result or {}
+    return (
+        draft.status in {DraftStatus.READY, DraftStatus.CONFIRMED}
+        and result.get("compile_ready") is True
+        and result.get("openfoam_available") is True
+    )
+
+
+def _study_description(study: StudyIntent) -> str:
+    parts = [
+        study.raw_text,
+        study.research_objective,
+        study.title,
+    ]
+    return "\n".join(part for part in parts if part).strip() or study.study_id
+
+
+def _run_compile_ready_pipeline_for_study(
+    study: StudyIntent,
+    session_id: str,
+) -> dict[str, Any]:
+    from fluid_scientist.capabilities import get_capability_registry
+    from fluid_scientist.workflow_pipeline import PipelineStatus, V5WorkflowPipeline
+
+    pipeline = V5WorkflowPipeline(
+        work_root=os.path.join(tempfile.gettempdir(), "fluid_scientist_v5_pipeline"),
+        registry=get_capability_registry(),
+        llm_client=_llm_client,
+    )
+    state = pipeline.run(
+        user_description=_study_description(study),
+        session_id=session_id,
+        pre_extracted=study.model_dump(mode="json"),
+    )
+    payload = {
+        "session_id": state.session_id,
+        "status": state.current_stage,
+        "current_stage": state.current_stage,
+        "stage_history": [s.model_dump(mode="json") for s in state.stage_history],
+        "failure": state.failure,
+        "case_dir": state.case_dir,
+        "generated_files": state.case_manifest.get("generated_files", []),
+    }
+    if state.current_stage != PipelineStatus.COMPILE_READY or state.draft_view is None:
+        return {"type": "pipeline_failed", **payload}
+
+    draft = _legacy_draft_from_view(state.draft_view)
+    draft = draft.model_copy(update={"session_id": session_id, "study_id": study.study_id})
+    _draft_store[draft.draft_id] = draft
+    return {
+        "type": "draft_ready",
+        **payload,
+        "compile_ready_view": state.draft_view,
+        "draft": draft.model_dump(mode="json"),
+    }
+
+
 @router.post("/pipeline/run", response_model=PipelineRunResponse)
 def run_compile_ready_pipeline(request: PipelineRunRequest) -> PipelineRunResponse:
     """Run the full Compile-Ready pipeline end-to-end.
@@ -1562,8 +1641,8 @@ def run_compile_ready_pipeline(request: PipelineRunRequest) -> PipelineRunRespon
         session_id=request.session_id,
         pre_extracted=request.pre_extracted,
     )
-    # Store draft view keyed by session
-    if state.draft_view:
+    # Store only truly compile-ready draft views.
+    if state.current_stage == PipelineStatus.COMPILE_READY and state.draft_view:
         _draft_store[state.draft_view.get("draft_id", state.session_id)] = _legacy_draft_from_view(state.draft_view)
     return PipelineRunResponse(
         session_id=state.session_id,
