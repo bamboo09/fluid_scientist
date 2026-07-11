@@ -35,9 +35,9 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from fluid_scientist.capabilities import (
-    Capability,
     CapabilityRegistry,
     CapabilityRequirement,
+    RequirementGraphResolver,
     get_capability_registry,
 )
 from fluid_scientist.case_generation.validator import (
@@ -1029,29 +1029,44 @@ class V5WorkflowPipeline:
                 mandatory=True,
             ))
 
-        # Resolve each requirement against the registry
-        caps_used: list[dict[str, Any]] = []
-        caps_missing: list[dict[str, Any]] = []
-        for req in requirements:
-            cap = self._registry.resolve_requirement(req)
-            if cap is not None:
-                req.satisfied_by = cap.capability_id
-                caps_used.append(cap.model_dump())
-            else:
-                req.extension_needed = True
-                caps_missing.append(req.model_dump())
+        strict_health = os.environ.get(
+            "FLUID_SCIENTIST_STRICT_CAPABILITY_HEALTH"
+        ) == "1"
+        resolver = RequirementGraphResolver(
+            self._registry,
+            require_verified=True,
+            require_healthy=strict_health,
+        )
+        graph = resolver.resolve(requirements)
+        state.requirements = [r.model_dump() for r in graph.requirements]
+        state.capabilities_used = [
+            cap.model_dump() for cap in graph.resolved_capabilities
+        ]
+        state.capabilities_missing = [
+            resolution.model_dump()
+            for resolution in graph.unresolved
+            if resolution.requirement.mandatory
+        ]
+        state.capabilities_extended = [
+            resolution.model_dump()
+            for resolution in graph.resolutions
+            if resolution.status == "CONFIG_EXTENSION"
+        ]
 
-        state.requirements = [r.model_dump() for r in requirements]
-        state.capabilities_used = caps_used
-        state.capabilities_missing = caps_missing
-
-        mandatory_missing = [req for req in caps_missing if req.get("mandatory")]
+        mandatory_missing = state.capabilities_missing
         if mandatory_missing:
             state.failure = PipelineFailure(
                 failed_stage=PipelineStatus.RESOLVING_CAPABILITIES,
                 failure_category="missing_capability",
-                message="Mandatory OpenFOAM capabilities are not registered.",
-                internal_details={"missing_capabilities": mandatory_missing},
+                message=(
+                    "Mandatory OpenFOAM capabilities require extension "
+                    "before case generation."
+                ),
+                internal_details={
+                    "requirement_graph": graph.model_dump(),
+                    "missing_capabilities": mandatory_missing,
+                    "next_stage": "EXTENSION_PIPELINE",
+                },
                 can_retry=True,
                 requires_user_input=False,
             ).model_dump()

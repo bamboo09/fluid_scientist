@@ -11,6 +11,13 @@ from fluid_scientist.capabilities.models import (
     MissingCapability,
     StrictModel,
 )
+from fluid_scientist.capabilities.resolution import (
+    CapabilityRequirementGraph,
+    CapabilityResolution,
+    RequirementGraphResolver,
+    ResolutionStatus,
+    ResolutionStrategy,
+)
 from fluid_scientist.capabilities.registry import (
     CAPABILITY_TYPES,
     Capability,
@@ -32,11 +39,16 @@ __all__ = [
     "CapabilityHealthReport",
     "CapabilityRegistry",
     "CapabilityRequirement",
+    "CapabilityRequirementGraph",
+    "CapabilityResolution",
     "CapabilityStatus",
     "CapabilityType",
     "CodeExtensionSpec",
     "CompilerCapability",
     "MissingCapability",
+    "RequirementGraphResolver",
+    "ResolutionStatus",
+    "ResolutionStrategy",
     "StrictModel",
     "get_capability_registry",
     "reset_registry",

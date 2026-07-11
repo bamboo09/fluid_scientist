@@ -145,6 +145,12 @@ class CapabilityRequirement(BaseModel):
     keywords: list[str] = Field(default_factory=list)
     required_input: dict[str, Any] = Field(default_factory=dict)
     expected_output: dict[str, Any] = Field(default_factory=dict)
+    required_by: list[str] = Field(default_factory=list)
+    input_contract: dict[str, Any] = Field(default_factory=dict)
+    output_contract: dict[str, Any] = Field(default_factory=dict)
+    scientific_reason: str = ""
+    openfoam_mapping: dict[str, Any] = Field(default_factory=dict)
+    fallback_options: list[dict[str, Any]] = Field(default_factory=list)
     mandatory: bool = True
     satisfied_by: str | None = None
     extension_needed: bool = False
