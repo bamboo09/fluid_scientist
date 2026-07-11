@@ -29,6 +29,9 @@ $Src = Join-Path $Root "src"
 $Frontend = Join-Path $Root "apps\web"
 $StateBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { [System.IO.Path]::GetTempPath() }
 $StateDir = Join-Path $StateBase "FluidScientist\v5-chatbot-workbench"
+if ((Test-Path -LiteralPath $StateDir -PathType Leaf)) {
+    $StateDir = Join-Path $StateBase "FluidScientist\v5-chatbot-workbench-state"
+}
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
 $env:PYTHONPATH = $Src

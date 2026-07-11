@@ -53,10 +53,13 @@ def _default_db_dir() -> str:
     under the current working directory so startup scripts and tests can
     control where SQLite files are created.
     """
-    return os.environ.get(
+    db_dir = os.environ.get(
         "FLUID_SCIENTIST_STATE_DIR",
         os.path.join(os.getcwd(), ".fluid_scientist"),
     )
+    if os.path.isfile(db_dir):
+        return f"{db_dir}.state"
+    return db_dir
 
 
 def _utcnow_iso() -> str:
