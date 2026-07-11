@@ -3819,12 +3819,14 @@ async function loadWorkstationStatus(skipTextUpdate = false) {
       }
       details.hidden = true;
     }
+    updateSidebarConnection(data.connected, data.host);
     return data;
   } catch (e) {
     const indicator = document.querySelector("#workstation-status .ws-indicator");
     const text = document.querySelector("#workstation-status .ws-text");
     if (indicator) indicator.dataset.state = "disconnected";
     if (!skipTextUpdate && text) text.textContent = "状态未知: " + (e.message || "网络错误");
+    updateSidebarConnection(false);
     return null;
   }
 }
@@ -4028,6 +4030,8 @@ function bindEvents() {
 
 async function init() {
   bindEvents();
+  renderTaskList([]);
+  renderSchemePanel(null);
   loadSystemVersion();
   const modelLoad = loadModelConfiguration().catch((error) => {
     renderError("模型配置", error);
@@ -4100,4 +4104,90 @@ async function generateScientificReport(projectId, experimentId) {
       headers: { "Content-Type": "application/json" },
     },
   );
+}
+
+// =============================================================
+// Three-Panel: Task List + Scheme Panel
+// =============================================================
+
+// === 三面板：研究任务列表 ===
+function renderTaskList(tasks) {
+  const container = document.getElementById('task-list');
+  if (!container) return;
+  if (!tasks || tasks.length === 0) {
+    container.innerHTML = '<p class="sidebar-empty">暂无研究任务<br>在中间输入框描述研究问题开始</p>';
+    return;
+  }
+  container.innerHTML = tasks.map(t => `
+    <div class="task-item ${t.active ? 'active' : ''}" data-session-id="${t.session_id}">
+      <p class="task-item-title">${escapeHtml(t.title)}</p>
+      <div class="task-item-meta">
+        <span class="task-status-chip ${t.status_class}">${escapeHtml(t.status_label)}</span>
+        ${t.draft_version ? `<span class="task-draft-version">Draft v${escapeHtml(t.draft_version)}</span>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+// === 三面板：研究方案渲染 ===
+function renderSchemePanel(draft) {
+  const body = document.getElementById('scheme-body');
+  if (!body) return;
+  if (!draft) {
+    body.innerHTML = '<p class="scheme-empty">尚未生成实验草案<br>请在中间输入框描述研究问题</p>';
+    return;
+  }
+  const versionBadge = document.getElementById('scheme-version');
+  if (versionBadge) {
+    versionBadge.textContent = `v${draft.version || '1.0'} ${draft.status === 'confirmed' ? '已确认' : '更新'}`;
+  }
+
+  const sections = [
+    { title: '研究目标', items: [{ label: draft.objective || '—', value: '', status: 'pending', status_label: '待确认' }] },
+    { title: '研究类型', items: parseSchemeItems(draft.study_type) },
+    { title: '几何配置', items: parseSchemeItems(draft.geometry) },
+    { title: '控制参数', items: parseSchemeItems(draft.control_parameters) },
+    { title: '边界条件', items: parseSchemeItems(draft.boundary_conditions) },
+    { title: '初始条件', items: parseSchemeItems(draft.initial_conditions) },
+    { title: '网格要求', items: parseSchemeItems(draft.mesh) },
+    { title: '求解器', items: parseSchemeItems(draft.solver) },
+  ];
+
+  body.innerHTML = sections.map(s => `
+    <section class="scheme-section">
+      <h3>${escapeHtml(s.title)}</h3>
+      ${s.items.map(item => `
+        <div class="scheme-row">
+          <span class="scheme-label">${escapeHtml(item.label)}</span>
+          <span class="scheme-value">${escapeHtml(item.value || '—')}</span>
+          <span class="scheme-status scheme-status-${item.status || 'pending'}">${escapeHtml(item.status_label || '待确认')}</span>
+        </div>
+      `).join('')}
+    </section>
+  `).join('');
+}
+
+function parseSchemeItems(data) {
+  if (!data) return [{ label: '待配置', value: '', status: 'missing', status_label: '能力缺失' }];
+  if (typeof data === 'string') return [{ label: data, value: '', status: 'pending', status_label: '待确认' }];
+  if (Array.isArray(data)) return data.map(d => ({ label: d.name || d.label || '—', value: d.value || '—', status: d.status || 'pending', status_label: d.status_label || '待确认' }));
+  if (typeof data === 'object') return Object.entries(data).map(([k, v]) => {
+    const val = typeof v === 'object' ? JSON.stringify(v) : String(v);
+    return { label: k, value: val, status: 'pending', status_label: '待确认' };
+  });
+  return [{ label: '—', value: '', status: 'pending', status_label: '待确认' }];
+}
+
+// === 更新侧栏连接状态 ===
+function updateSidebarConnection(connected, host) {
+  const dot = document.getElementById('sidebar-conn-dot');
+  const text = document.getElementById('sidebar-conn-text');
+  if (!dot || !text) return;
+  if (connected) {
+    dot.className = 'connection-dot connected';
+    text.textContent = `已连接 ${host || ''}`;
+  } else {
+    dot.className = 'connection-dot';
+    text.textContent = '未连接';
+  }
 }
