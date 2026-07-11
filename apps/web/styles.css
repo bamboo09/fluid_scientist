@@ -2007,3 +2007,224 @@ body:has(.workflow-stepper:not([hidden])) .workbench-shell {
   .panel-left, .panel-right { display: none; }
 }
 
+/* ============================================
+   Workstation Configuration Panel
+   (dynamically inserted after #workstation-panel-mini
+    in the left panel; consistent with three-panel layout)
+   ============================================ */
+.ws-config-panel {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--sheet);
+  overflow: hidden;
+}
+
+/* Collapsible header (rendered as a <button>) */
+.ws-config-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 0;
+  background: var(--teal-pale);
+  color: var(--teal-dark);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.ws-config-header:hover { background: #cfe3df; }
+.ws-config-title { flex: 0 0 auto; }
+.ws-config-count-inline {
+  flex: 1 1 auto;
+  font-size: 9px;
+  font-family: var(--mono);
+  font-weight: 400;
+  color: var(--faint);
+  letter-spacing: 0;
+}
+.ws-config-toggle { flex: 0 0 auto; font-size: 10px; color: var(--teal); }
+
+/* Expandable body */
+.ws-config-body {
+  padding: 8px 10px 10px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.ws-config-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  flex-wrap: wrap;
+}
+.ws-config-count { font-size: 10px; color: var(--faint); font-family: var(--mono); }
+
+.ws-section-title {
+  margin: 10px 0 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--faint);
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 3px;
+}
+
+.ws-error {
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-radius: 4px;
+  border-left: 3px solid var(--red);
+  background: var(--red-pale);
+  color: var(--red);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.ws-empty-hint {
+  margin: 8px 0;
+  padding: 10px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--faint);
+  background: var(--paper);
+  border-radius: 4px;
+  line-height: 1.5;
+}
+
+/* Candidate & profile cards */
+.ws-candidate-card,
+.ws-profile-card {
+  margin-bottom: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--paper);
+  transition: border-color 0.15s;
+}
+.ws-candidate-card:hover,
+.ws-profile-card:hover { border-color: var(--teal); }
+.ws-profile-default { border-color: var(--teal); background: var(--teal-pale); }
+
+.ws-card-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+.ws-card-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ws-default-badge {
+  flex: 0 0 auto;
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: var(--teal-dark);
+  color: #fff;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Status badges */
+.ws-status-badge {
+  flex: 0 0 auto;
+  font-size: 9px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ws-status-ok { background: #d4edda; color: #155724; }
+.ws-status-error { background: var(--red-pale); color: var(--red); }
+.ws-status-pending { background: var(--amber-pale); color: var(--amber); }
+.ws-status-unknown { background: var(--paper-deep); color: var(--muted); }
+
+/* Card meta rows */
+.ws-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 6px;
+}
+.ws-meta-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+}
+.ws-meta-label { flex: 0 0 auto; color: var(--faint); }
+.ws-meta-value {
+  flex: 1 1 auto;
+  color: var(--ink);
+  text-align: right;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.ws-card-error {
+  margin-bottom: 6px;
+  padding: 4px 6px;
+  border-radius: 3px;
+  background: var(--red-pale);
+  color: var(--red);
+  font-size: 10px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+/* Card action buttons (scoped to the config panel so the global .ws-btn rule
+   used elsewhere is not affected) */
+.ws-card-actions { display: flex; gap: 4px; flex-wrap: wrap; }
+.ws-config-panel .ws-btn {
+  padding: 3px 8px;
+  font-size: 10px;
+  font-weight: 500;
+  border: 1px solid var(--line-strong);
+  border-radius: 3px;
+  background: var(--sheet);
+  color: var(--ink);
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.ws-config-panel .ws-btn:hover:not(:disabled) {
+  border-color: var(--teal);
+  color: var(--teal);
+  background: var(--teal-pale);
+}
+.ws-config-panel .ws-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.ws-config-panel .ws-btn-primary {
+  border-color: var(--teal-dark);
+  background: var(--teal-dark);
+  color: #fff;
+}
+.ws-config-panel .ws-btn-primary:hover:not(:disabled) {
+  background: #063b38;
+  color: #fff;
+}
+.ws-config-panel .ws-btn-danger {
+  border-color: var(--red);
+  color: var(--red);
+  background: var(--sheet);
+}
+.ws-config-panel .ws-btn-danger:hover:not(:disabled) {
+  background: var(--red-pale);
+  color: var(--red);
+}
+
