@@ -27,11 +27,8 @@ $Sha = (git rev-parse --short HEAD).Trim()
 $Python = (Get-Command python).Source
 $Src = Join-Path $Root "src"
 $Frontend = Join-Path $Root "apps\web"
-$StateBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { [System.IO.Path]::GetTempPath() }
-$StateDir = Join-Path $StateBase "FluidScientist\v5-chatbot-workbench"
-if ((Test-Path -LiteralPath $StateDir -PathType Leaf)) {
-    $StateDir = Join-Path $StateBase "FluidScientist\v5-chatbot-workbench-state"
-}
+$StateBase = Join-Path (Split-Path -Parent $Root) ".runtime-state"
+$StateDir = Join-Path $StateBase "v5-chatbot-workbench"
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
 $env:PYTHONPATH = $Src

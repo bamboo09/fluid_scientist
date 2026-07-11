@@ -204,7 +204,11 @@ class V5Repository:
     def __init__(self, db_path: str | None = None) -> None:
         if db_path is None:
             db_dir = _default_db_dir()
-            os.makedirs(db_dir, exist_ok=True)
+            try:
+                os.makedirs(db_dir, exist_ok=True)
+            except OSError:
+                db_dir = os.path.join(os.getcwd(), ".fluid_scientist_state")
+                os.makedirs(db_dir, exist_ok=True)
             db_path = os.path.join(db_dir, _DEFAULT_DB_NAME)
         self._db_path = db_path
         self._lock = threading.Lock()
