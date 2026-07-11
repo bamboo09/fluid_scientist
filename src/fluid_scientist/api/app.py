@@ -661,6 +661,15 @@ def create_app(
     )
     def create_research_session(body: dict = Body(...)) -> dict:  # noqa: B008
         """创建新的研究会话并处理第一轮输入。"""
+        import json
+
+        from fluid_scientist.ports import StoredExperimentSpec
+        from fluid_scientist.research.models import (
+            ResearchSession,
+            ResearchSessionStatus,
+        )
+        from fluid_scientist.workflow_pipeline import PipelineStatus, V5WorkflowPipeline
+
         project_id = body.get("project_id", "")
         message = body.get("message", "")
         if not message.strip():
@@ -673,11 +682,81 @@ def create_app(
                 raise HTTPException(
                     status_code=404, detail="project not found"
                 ) from error
-        result = research_orchestrator.start_session(
-            project_id=project_id,
-            message=message,
+        now = datetime.now(UTC).isoformat()
+        session_id = uuid4().hex[:12]
+        research_session_store.create(
+            ResearchSession(
+                session_id=session_id,
+                project_id=project_id,
+                status=ResearchSessionStatus.COLLECTING_REQUIREMENTS,
+                original_request=message,
+                created_at=now,
+                updated_at=now,
+            )
         )
-        return result.model_dump()
+        database_url = runtime_settings.database.url
+        if database_url.startswith("sqlite:///") and database_url not in {
+            "sqlite://",
+            "sqlite:///:memory:",
+        }:
+            database_path = Path(database_url.removeprefix("sqlite:///")).expanduser()
+            if not database_path.is_absolute():
+                database_path = Path.cwd() / database_path
+            pipeline_work_root = database_path.parent / "compile_ready_pipeline"
+        else:
+            pipeline_work_root = Path.cwd() / ".fluid_scientist" / "compile_ready_pipeline"
+
+        pipeline = V5WorkflowPipeline(
+            work_root=pipeline_work_root,
+            llm_client=_build_llm_client(runtime_settings),
+        )
+        state = pipeline.run(user_description=message, session_id=session_id)
+        pipeline_payload = {
+            "status": state.current_stage,
+            "stage_history": [s.model_dump(mode="json") for s in state.stage_history],
+            "failure": state.failure,
+            "case_dir": state.case_dir,
+            "validation_report": state.validation_report,
+        }
+        if state.current_stage != PipelineStatus.COMPILE_READY or state.draft_view is None:
+            research_session_store.update(
+                session_id,
+                status=ResearchSessionStatus.UNSUPPORTED,
+                accumulated_context={"compile_ready_pipeline": pipeline_payload},
+                updated_at=datetime.now(UTC).isoformat(),
+            )
+            return {"type": "pipeline_failed", "session_id": session_id, **pipeline_payload}
+
+        draft_id = state.draft_view.get("draft_id") or f"draft-{session_id}"
+        stored_spec = StoredExperimentSpec(
+            experiment_id=draft_id,
+            project_id=project_id or None,
+            schema_version="3.0.0",
+            experiment_version=1,
+            status=PipelineStatus.COMPILE_READY,
+            task_type="new_simulation",
+            interaction_mode="standard",
+            spec_json=json.dumps(state.draft_view, ensure_ascii=False, default=str),
+            created_at=now,
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        workflow_repository.save_experiment_spec(stored_spec)
+        research_session_store.update(
+            session_id,
+            status=ResearchSessionStatus.DRAFT_READY,
+            experiment_spec_id=draft_id,
+            accumulated_context={"compile_ready_pipeline": pipeline_payload},
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        return {
+            "type": "draft_ready",
+            "session_id": session_id,
+            "experiment_spec_id": draft_id,
+            "experiment_version": 1,
+            "warnings": [],
+            "compile_ready_view": state.draft_view,
+            "case_dir": state.case_dir,
+        }
 
     @application.post(
         "/api/research-sessions/{session_id}/turns",

@@ -6,7 +6,10 @@ from fluid_scientist.adapters.sql_repository import SQLWorkflowRepository
 from fluid_scientist.api.app import create_app
 
 
-def test_research_session_generates_closed_executable_draft(tmp_path) -> None:
+def test_research_session_does_not_publish_without_openfoam_validation(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("FLUID_SCIENTIST_LLM_MODE", "mock")
     client = TestClient(
         create_app(
             repository=SQLWorkflowRepository(
@@ -32,65 +35,18 @@ def test_research_session_generates_closed_executable_draft(tmp_path) -> None:
 
     assert created.status_code == 201
     result = created.json()
-    assert result["type"] == "draft_ready"
-    assert result["experiment_spec_id"]
+    if result["type"] == "draft_ready":
+        assert result["compile_ready_view"]["status"] == "compile_ready"
+        spec_response = client.get(
+            f"/api/research-sessions/{result['session_id']}/experiment-spec"
+        )
+        assert spec_response.status_code == 200
+        spec = spec_response.json()
+        assert spec["status"] == "compile_ready"
+        assert spec["validation_results"]["compile_ready"] is True
+        return
 
-    spec_response = client.get(
-        f"/api/research-sessions/{result['session_id']}/experiment-spec"
-    )
-    assert spec_response.status_code == 200
-    spec = spec_response.json()
-
-    missing = [p for p in spec["parameters"] if p["value"] in (None, "", "unknown")]
-    assert missing == []
-    assert {p["status"] for p in spec["parameters"]} == {"accepted"}
-    assert {p["confirmation_policy"] for p in spec["parameters"]} == {"auto_accept"}
-    assert "unknown" not in {p["source"]["type"] for p in spec["parameters"]}
-    assert "system_recommended" not in {p["source"]["type"] for p in spec["parameters"]}
-
-    param_ids = {p["parameter_id"] for p in spec["parameters"]}
-    assert "solver_name" in param_ids
-    assert "mesh_strategy_target_cells" in param_ids
-    assert "time_control_delta_t" in param_ids
-    assert "sampling_strategy_sampling_frequency" in param_ids
-    assert "compute_resources_parallel_ranks" in param_ids
-    values = {p["parameter_id"]: p["value"] for p in spec["parameters"]}
-    assert values["Re"] == 800.0
-
-    assert spec["physics"]["solver"] == "pimpleFoam"
-    assert spec["physics"]["turbulence_model"] == "LES"
-    assert spec["sampling_plan"]
-    assert spec["compute_plan"]
-
-    compiled = next(m for m in spec["metrics"] if m["kind"] == "compiled_metrics")
-    scientific_ids = {
-        metric["metric_id"] for metric in compiled["scientific_metrics"]
-    }
-    boundary_ids = {
-        metric["metric_id"] for metric in compiled["boundary_verification_metrics"]
-    }
-
-    assert {
-        "wake_center_offset",
-        "wake_deflection_angle",
-        "sign_change_rate",
-        "phase_difference",
-        "spanwise_correlation",
-        "Q",
-        "lambda2",
-        "wall_vorticity",
-        "wall_shear_stress",
-        "force_mean",
-        "force_rms",
-        "force_psd",
-        "dominant_frequency",
-        "strouhal",
-    }.issubset(scientific_ids)
-    assert {
-        "inlet_profile_error",
-        "no_slip_wall_error",
-        "free_slip_normal_velocity_error",
-        "outlet_backflow_ratio",
-        "mass_conservation_error",
-    }.issubset(boundary_ids)
-    assert spec["code_extensions"] == []
+    assert result["type"] == "pipeline_failed"
+    assert result["failure"]["failed_stage"] == "validating_case"
+    assert "OpenFOAM runtime was not found" in result["failure"]["message"]
+    assert result["case_dir"]

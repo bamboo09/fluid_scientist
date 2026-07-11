@@ -407,9 +407,9 @@ class V5WorkflowPipeline:
     def _stage_understanding(self, state: PipelineState) -> None:
         """Parse the user description into structured scientific intent.
 
-        If an LLM client is available it is used to extract structured
-        entities; otherwise a deterministic keyword-based extractor
-        provides a baseline intent that is still usable.
+        In real mode the configured LLM is mandatory.  The deterministic
+        extractor is available only when tests or local development explicitly
+        set ``FLUID_SCIENTIST_LLM_MODE=mock``.
         """
         text = state.user_description
         intent: dict[str, Any] = {}
@@ -419,10 +419,34 @@ class V5WorkflowPipeline:
         elif self._llm is not None:
             try:
                 intent = self._extract_intent_with_llm(text)
-            except Exception:
-                intent = self._extract_intent_deterministic(text)
-        else:
+            except Exception as exc:
+                state.failure = PipelineFailure(
+                    failed_stage=PipelineStatus.UNDERSTANDING,
+                    failure_category="semantic_parsing",
+                    message=f"Scientific intent model call failed: {exc}",
+                    internal_details={"fallback_used": False},
+                    can_retry=True,
+                    requires_user_input=False,
+                ).model_dump()
+                state.current_stage = PipelineStatus.FAILED
+                return
+        elif os.environ.get("FLUID_SCIENTIST_LLM_MODE") == "mock":
             intent = self._extract_intent_deterministic(text)
+        else:
+            state.failure = PipelineFailure(
+                failed_stage=PipelineStatus.UNDERSTANDING,
+                failure_category="semantic_parsing",
+                message=(
+                    "No LLM client configured. Set FLUID_SCIENTIST_LLM_MODE=mock "
+                    "only for tests; production cannot generate a draft from "
+                    "keyword fallback."
+                ),
+                internal_details={"fallback_used": False},
+                can_retry=True,
+                requires_user_input=False,
+            ).model_dump()
+            state.current_stage = PipelineStatus.FAILED
+            return
 
         # Ensure minimal required fields exist
         intent.setdefault("research_objective", text)
@@ -436,7 +460,7 @@ class V5WorkflowPipeline:
     def _extract_intent_with_llm(self, text: str) -> dict[str, Any]:
         """Call LLM for structured scientific intent parsing."""
         if self._llm is None:
-            return self._extract_intent_deterministic(text)
+            raise RuntimeError("LLM client is not configured")
         try:
             output, _ = self._llm.call(
                 purpose="scientific_intent",
@@ -457,9 +481,9 @@ class V5WorkflowPipeline:
             )
             if isinstance(output, dict):
                 return output
-        except Exception:
-            pass
-        return self._extract_intent_deterministic(text)
+        except Exception as exc:
+            raise RuntimeError(f"LLM scientific intent parsing failed: {exc}") from exc
+        raise RuntimeError("LLM scientific intent parsing returned no JSON object")
 
     def _extract_intent_deterministic(self, text: str) -> dict[str, Any]:
         """Deterministic keyword-based fallback for intent extraction."""
@@ -923,12 +947,8 @@ class V5WorkflowPipeline:
     def _stage_resolve_capabilities(self, state: PipelineState) -> None:
         """Resolve capabilities required by the design against the registry.
 
-        If capabilities are missing, the pipeline attempts generic
-        extension generation.  For this first pass, if a required
-        capability is not native and no extension has been generated,
-        we record it but do NOT fail; we proceed with native
-        capabilities that cover the core workflow and mark extension
-        opportunities.
+        Missing mandatory capabilities are blocking.  They must be resolved by
+        the registry or by an internal extension flow before case generation.
         """
         requirements: list[CapabilityRequirement] = []
         # Determine which capabilities are needed
@@ -1025,10 +1045,17 @@ class V5WorkflowPipeline:
         state.capabilities_used = caps_used
         state.capabilities_missing = caps_missing
 
-        # For the first pass, do NOT fail on missing extensions if
-        # native coverage is sufficient for the core case
-        # (mesh + physics + solver + BCs + ICs + basic FOs + basic postprocessors
-        # are all covered by native capabilities).
+        mandatory_missing = [req for req in caps_missing if req.get("mandatory")]
+        if mandatory_missing:
+            state.failure = PipelineFailure(
+                failed_stage=PipelineStatus.RESOLVING_CAPABILITIES,
+                failure_category="missing_capability",
+                message="Mandatory OpenFOAM capabilities are not registered.",
+                internal_details={"missing_capabilities": mandatory_missing},
+                can_retry=True,
+                requires_user_input=False,
+            ).model_dump()
+            state.current_stage = PipelineStatus.FAILED
 
     # ------------------------------------------------------------------
     # Stage 5: GENERATING_CASE  -- write real OpenFOAM case to disk
@@ -1410,11 +1437,19 @@ class V5WorkflowPipeline:
                     ).model_dump()
                     state.current_stage = PipelineStatus.FAILED
                     return
-                # Static checks all passed; runtime validation can't proceed.
-                # Per requirements: no mocking.  We produce the draft but
-                # keep compile_ready=False with an explicit note.
-                state.validation_report["openfoam_required"] = True
-                # Fall through to finalize COMPILE_READY (see below)
+                state.failure = PipelineFailure(
+                    failed_stage=PipelineStatus.VALIDATING_CASE,
+                    failure_category="validation_failed",
+                    message=(
+                        "OpenFOAM runtime was not found; mesh validation, "
+                        "checkMesh and solver dry-run did not run."
+                    ),
+                    internal_details={"checks": [c.model_dump() for c in report.checks]},
+                    can_retry=True,
+                    requires_user_input=False,
+                ).model_dump()
+                state.current_stage = PipelineStatus.FAILED
+                return
             else:
                 # OpenFOAM was available but some check(s) failed.
                 errors = [c.message for c in report.checks if not c.passed and c.severity == "error"]

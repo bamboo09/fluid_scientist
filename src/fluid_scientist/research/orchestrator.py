@@ -357,8 +357,6 @@ class ResearchOrchestrator:
             (spec, unknown_metrics) 元组。unknown_metrics 为 MetricPlanner
             未能识别的指标 ID 列表。
         """
-        if any(metric.get("kind") == "compiled_metrics" for metric in spec.metrics):
-            return spec, []
         if self._metric_planner is None:
             return spec, []
 

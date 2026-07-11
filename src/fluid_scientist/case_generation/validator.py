@@ -299,7 +299,7 @@ class CompileReadinessValidator:
         required_files = ["system/controlDict", "system/fvSchemes", "system/fvSolution", "0/U", "0/p", "constant/transportProperties"]
         missing_files = [f for f in required_files if not (case_path / f).is_file()]
         report.generated_files = [
-            str(p.relative_to(case_path))
+            p.relative_to(case_path).as_posix()
             for p in sorted(case_path.rglob("*"))
             if p.is_file()
         ]
@@ -398,33 +398,38 @@ class CompileReadinessValidator:
                 # Extract patch names from add/faceZone controls
                 for m in re.finditer(r"(?:wall|patch|faceZone)\s+(\w+)", snappy_text):
                     dynamic_patches.add(m.group(1))
+                for m in re.finditer(r"\bname\s+(\w+)\s*;", snappy_text):
+                    dynamic_patches.add(m.group(1))
 
         # Extract patches from U/p boundaryField
         def extract_bcs(text: str) -> set[str]:
+            cleaned = re.sub(r"//.*", "", text)
+            start = re.search(r"\bboundaryField\b\s*\{", cleaned)
+            if not start:
+                return set()
+
+            pos = start.end()
+            depth = 1
+            body_start = pos
+            while pos < len(cleaned) and depth > 0:
+                if cleaned[pos] == "{":
+                    depth += 1
+                elif cleaned[pos] == "}":
+                    depth -= 1
+                pos += 1
+            if depth != 0:
+                return set()
+
+            body = cleaned[body_start : pos - 1]
             patches: set[str] = set()
-            in_bf = False
-            bf_brace = 0
-            for line in text.split("\n"):
-                s = line.strip()
-                if s.startswith("boundaryField"):
-                    in_bf = True
-                    bf_brace = 0
-                    continue
-                if in_bf:
-                    for ch in s:
-                        if ch == "{":
-                            bf_brace += 1
-                        elif ch == "}":
-                            bf_brace -= 1
-                    if bf_brace <= 0 and "{" not in s:
-                        in_bf = False
-                        continue
-                    # Match patch names: a word followed by optional {
-                    m = re.match(r"^(\w+)\s*\{?\s*$", s)
-                    if m and m.group(1) not in ("type", "value"):
-                        # Only count top-level patches (bf_brace == 1)
-                        if bf_brace == 1:
-                            patches.add(m.group(1))
+            token_re = re.compile(r"\b([A-Za-z_]\w*)\b\s*\{")
+            reserved = {"type", "value", "uniform", "nonuniform"}
+            for match in token_re.finditer(body):
+                prefix = body[: match.start()]
+                local_depth = prefix.count("{") - prefix.count("}")
+                name = match.group(1)
+                if local_depth == 0 and name not in reserved:
+                    patches.add(name)
             return patches
 
         u_patches = extract_bcs(u_path.read_text(encoding="utf-8"))

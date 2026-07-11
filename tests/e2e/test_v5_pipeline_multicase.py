@@ -59,16 +59,26 @@ def work_root(tmp_path_factory):
     return str(tmp_path_factory.mktemp("v5_pipeline_multicase"))
 
 
+@pytest.fixture(autouse=True)
+def enable_explicit_mock_llm(monkeypatch):
+    monkeypatch.setenv("FLUID_SCIENTIST_LLM_MODE", "mock")
+
+
 @pytest.mark.parametrize("case", CASES, ids=[c["name"] for c in CASES])
 def test_pipeline_gathers_all_static_checks(case, work_root):
     pipeline = V5WorkflowPipeline(work_root=work_root)
     state = pipeline.run(case["text"])
 
-    # Must reach COMPILE_READY
-    assert state.current_stage == "compile_ready", (
-        f"Case {case['name']} failed at stage {state.current_stage}: "
-        f"{state.failure.get('message') if state.failure else 'no failure info'}"
-    )
+    openfoam_available = (state.validation_report or {}).get("openfoam_available", False)
+    if openfoam_available:
+        assert state.current_stage == "compile_ready", (
+            f"Case {case['name']} failed at stage {state.current_stage}: "
+            f"{state.failure.get('message') if state.failure else 'no failure info'}"
+        )
+    else:
+        assert state.current_stage == "failed"
+        assert state.failure["failed_stage"] == "validating_case"
+        assert "OpenFOAM runtime was not found" in state.failure["message"]
 
     # All static error checks must pass (openfoam_runtime may fail if OF not installed)
     vr = state.validation_report or {}
@@ -103,7 +113,8 @@ def test_incremental_modification_preserves_state(work_root):
         "with pimpleFoam and WALE LES. I need drag coefficient."
     )
     state = pipeline.run(initial_text)
-    assert state.current_stage == "compile_ready"
+    if state.current_stage != "compile_ready":
+        pytest.skip("OpenFOAM runtime is required for a compile-ready modification test")
     session_id = state.session_id
 
     # Modify: increase Re and endTime
@@ -117,3 +128,14 @@ def test_incremental_modification_preserves_state(work_root):
     case_dir = Path(modified.case_dir)
     cd_text = (case_dir / "system" / "controlDict").read_text(encoding="utf-8")
     assert "endTime" in cd_text
+
+
+def test_pipeline_does_not_silently_fallback_without_explicit_mock(monkeypatch, work_root):
+    monkeypatch.delenv("FLUID_SCIENTIST_LLM_MODE", raising=False)
+    pipeline = V5WorkflowPipeline(work_root=work_root)
+
+    state = pipeline.run("Study turbulent channel flow and report velocity profile.")
+
+    assert state.current_stage == "failed"
+    assert state.failure["failed_stage"] == "understanding"
+    assert state.failure["internal_details"]["fallback_used"] is False

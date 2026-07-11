@@ -782,9 +782,44 @@ function handleResearchTurnResult(result) {
     renderClarificationCard(result);
   } else if (result.type === "draft_ready") {
     renderDraftReadyCard(result);
+  } else if (result.type === "pipeline_failed") {
+    renderPipelineFailedCard(result);
   } else if (result.type === "unsupported") {
     renderUnsupportedCard(result);
   }
+}
+
+function renderPipelineFailedCard(result) {
+  const container = planResults || stream;
+  if (!container) return;
+  container.innerHTML = "";
+
+  const card = document.createElement("div");
+  card.className = "card unsupported-card";
+
+  const title = document.createElement("h3");
+  title.textContent = "求解方案尚未通过验证";
+  card.appendChild(title);
+
+  const reason = document.createElement("p");
+  reason.textContent =
+    result.failure?.message ||
+    "系统未能完成真实 Case 生成与验证，因此不会发布实验草案。";
+  card.appendChild(reason);
+
+  if (Array.isArray(result.stage_history) && result.stage_history.length) {
+    const list = document.createElement("ul");
+    for (const stage of result.stage_history) {
+      const item = document.createElement("li");
+      item.textContent = stage.error
+        ? `${stage.stage}: ${stage.error}`
+        : stage.stage;
+      list.appendChild(item);
+    }
+    card.appendChild(list);
+  }
+
+  container.appendChild(card);
 }
 
 // 渲染澄清卡片
