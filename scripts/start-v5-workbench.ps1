@@ -27,8 +27,12 @@ $Sha = (git rev-parse --short HEAD).Trim()
 $Python = (Get-Command python).Source
 $Src = Join-Path $Root "src"
 $Frontend = Join-Path $Root "apps\web"
+$StateBase = if ($env:LOCALAPPDATA) { $env:LOCALAPPDATA } else { [System.IO.Path]::GetTempPath() }
+$StateDir = Join-Path $StateBase "FluidScientist\v5-chatbot-workbench"
+New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
 $env:PYTHONPATH = $Src
+$env:FLUID_SCIENTIST_STATE_DIR = $StateDir
 $ImportInfo = python -c "import sys, importlib.util; print(sys.executable); print(importlib.util.find_spec('fluid_scientist').origin); print(importlib.util.find_spec('fluid_scientist.api.app').origin)"
 
 Write-Host "Fluid Scientist V5 Workbench"
@@ -37,6 +41,7 @@ Write-Host "sha=$Sha"
 Write-Host "root=$Root"
 Write-Host "python=$Python"
 Write-Host "frontend=$Frontend"
+Write-Host "state-dir=$StateDir"
 Write-Host "import-info:"
 Write-Host $ImportInfo
 Write-Host "build-info=http://$HostAddress`:$Port/api/system/build-info"
