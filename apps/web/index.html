@@ -95,6 +95,83 @@
             </div>
           </article>
 
+          <!-- V5 Compile-Ready Pipeline (Fast Generate) -->
+          <article id="v5-pipeline-card" class="work-card v5-card" hidden>
+            <header class="card-header">
+              <div><p class="card-kicker">一键生成</p><h2>编译就绪流水线 (V5)</h2></div>
+              <span class="type-chip type-chip-teal">Fast Path</span>
+            </header>
+            <p class="v5-desc">直接从自然语言描述生成可编译的 OpenFOAM 算例，跳过多轮对话。</p>
+            <div class="v5-controls">
+              <button id="v5-run-pipeline" class="button button-primary" type="button">
+                一键生成可编译算例 <span aria-hidden="true">⚡</span>
+              </button>
+              <span id="v5-spinner" class="v5-spinner" hidden aria-hidden="true"></span>
+            </div>
+            <p id="v5-pipeline-status" class="v5-status"></p>
+            <div id="v5-error-box" class="v5-error" role="alert" hidden></div>
+            <ul id="v5-stage-list" class="v5-stages" aria-label="流水线阶段"></ul>
+
+            <div id="v5-compile-ready-view" class="v5-result" hidden>
+              <section class="v5-section">
+                <h3>研究目标</h3>
+                <p id="v5-objective" class="v5-objective">—</p>
+              </section>
+
+              <div class="v5-grid">
+                <section class="v5-section">
+                  <h3>求解器配置</h3>
+                  <div id="v5-solver" class="v5-kv"></div>
+                </section>
+                <section class="v5-section">
+                  <h3>几何</h3>
+                  <div id="v5-geometry" class="v5-kv"></div>
+                </section>
+                <section class="v5-section">
+                  <h3>网格</h3>
+                  <div id="v5-mesh" class="v5-kv"></div>
+                </section>
+                <section class="v5-section">
+                  <h3>边界条件</h3>
+                  <div id="v5-bc" class="v5-bc-list"></div>
+                </section>
+              </div>
+
+              <section class="v5-section">
+                <h3>科学指标</h3>
+                <div id="v5-metrics" class="v5-metrics">
+                  <div>
+                    <h4>目标指标</h4>
+                    <div id="v5-scientific-metrics" class="v5-metric-list"></div>
+                  </div>
+                  <div>
+                    <h4>可信度指标</h4>
+                    <div id="v5-credibility-metrics" class="v5-metric-list"></div>
+                  </div>
+                </div>
+              </section>
+
+              <section class="v5-section">
+                <h3>算例验证</h3>
+                <ul id="v5-checks-list" class="v5-checks"></ul>
+              </section>
+
+              <section class="v5-section">
+                <h3>已生成文件 <small id="v5-file-count">0</small> 个</h3>
+                <ul id="v5-generated-files" class="v5-files"></ul>
+              </section>
+
+              <section class="v5-section v5-modify-section">
+                <h3>增量修改</h3>
+                <p id="v5-modifiable-hint" class="v5-hint"></p>
+                <div class="v5-modify-controls">
+                  <input id="v5-modify-input" type="text" placeholder="例如：把雷诺数改为200，终止时间设为50" disabled>
+                  <button id="v5-apply-modify" class="button button-secondary" type="button" disabled>应用修改</button>
+                </div>
+              </section>
+            </div>
+          </article>
+
           <section id="task-card-host" aria-label="远程任务"></section>
 
           <article id="report" class="work-card result-card" hidden>
@@ -221,6 +298,7 @@
       <span>Schema: <code id="wf-schema">—</code></span>
       <span>API: <code id="wf-api">—</code></span>
     </footer>
-    <script type="module" src="/assets/app.js?v=20260710"></script>
+    <script type="module" src="/assets/app.js?v=20260711"></script>
+    <script type="module" src="/assets/v5-pipeline.js?v=20260711"></script>
   </body>
 </html>
