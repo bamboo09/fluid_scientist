@@ -30,3 +30,4 @@ _debug_test.py
 check_turb.py
 inspect_case.py
 case/
+compile_ready_pipeline/
