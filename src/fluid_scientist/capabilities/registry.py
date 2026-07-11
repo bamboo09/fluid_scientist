@@ -8,10 +8,12 @@ extension must be generated.
 
 from __future__ import annotations
 
+import hashlib
+import importlib
+import inspect
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
-
 
 # ---------------------------------------------------------------------------
 # Capability types (exhaustive list across the pipeline)
@@ -39,9 +41,52 @@ CAPABILITY_TYPES = Literal[
 # ---------------------------------------------------------------------------
 
 class CapabilityStatus:
+    DECLARED = "declared"
+    IMPLEMENTED = "implemented"
+    TESTED = "tested"
     REGISTERED = "registered"
     VERIFIED = "verified"
+    UNVERIFIED = "unverified"
     DEPRECATED = "deprecated"
+
+
+class CapabilityHealthIssue(BaseModel):
+    """One concrete health-check issue for a registered capability."""
+
+    capability_id: str
+    severity: Literal["error", "warning", "info"] = "error"
+    issue_code: str
+    message: str
+
+
+class CapabilityHealthRecord(BaseModel):
+    """Health state for one capability registry entry."""
+
+    capability_id: str
+    capability_type: str
+    status_before: str
+    status_after: str
+    implementation_entrypoint: str = ""
+    implementation_hash: str = ""
+    issues: list[CapabilityHealthIssue] = Field(default_factory=list)
+
+    @property
+    def healthy(self) -> bool:
+        return not any(issue.severity == "error" for issue in self.issues)
+
+
+class CapabilityHealthReport(BaseModel):
+    """Registry-wide health check report."""
+
+    total: int = 0
+    verified: int = 0
+    unverified: int = 0
+    degraded: int = 0
+    records: list[CapabilityHealthRecord] = Field(default_factory=list)
+
+    @property
+    def healthy(self) -> bool:
+        return self.unverified == 0
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +106,9 @@ class Capability(BaseModel):
     supported_versions: list[str] = Field(default_factory=list)
     implementation_entrypoint: str = ""
     implementation_module: str = ""
+    implementation_hash: str = ""
+    test_manifest: list[str] = Field(default_factory=list)
+    verification_artifact: str = ""
     tests: list[str] = Field(default_factory=list)
     status: str = CapabilityStatus.REGISTERED
     is_native: bool = False
@@ -403,6 +451,141 @@ class CapabilityRegistry:
         """Register a new capability (typically from code extension)."""
         self._capabilities[capability.capability_id] = capability
 
+    def health_check(self, *, mutate: bool = False) -> CapabilityHealthReport:
+        """Validate registry entries against their implementation contracts.
+
+        The check is intentionally concrete: a VERIFIED capability must expose
+        an importable ``module:function`` entrypoint.  Test manifests and
+        verification artifacts are reported as warnings for built-ins because
+        older native entries do not yet carry per-capability artifacts; dynamic
+        extensions can promote those warnings to blocking policy in later
+        phases.
+        """
+        records: list[CapabilityHealthRecord] = []
+        degraded = 0
+
+        for cap in self._capabilities.values():
+            issues: list[CapabilityHealthIssue] = []
+            implementation_hash = cap.implementation_hash
+            status_before = cap.status
+
+            if cap.status == CapabilityStatus.VERIFIED:
+                if not cap.implementation_entrypoint:
+                    issues.append(CapabilityHealthIssue(
+                        capability_id=cap.capability_id,
+                        issue_code="missing_entrypoint",
+                        message="VERIFIED capability has no implementation_entrypoint.",
+                    ))
+                else:
+                    hash_value, entrypoint_issues = self._inspect_entrypoint(cap)
+                    implementation_hash = hash_value or implementation_hash
+                    issues.extend(entrypoint_issues)
+
+                if not cap.tests and not cap.test_manifest:
+                    issues.append(CapabilityHealthIssue(
+                        capability_id=cap.capability_id,
+                        severity="warning",
+                        issue_code="missing_test_manifest",
+                        message="Capability has no unit/minimal-case test manifest recorded.",
+                    ))
+                if not cap.verification_artifact:
+                    issues.append(CapabilityHealthIssue(
+                        capability_id=cap.capability_id,
+                        severity="warning",
+                        issue_code="missing_verification_artifact",
+                        message="Capability has no verification artifact hash recorded.",
+                    ))
+
+            status_after = cap.status
+            if mutate and any(issue.severity == "error" for issue in issues):
+                status_after = CapabilityStatus.UNVERIFIED
+                cap.status = status_after
+                degraded += 1
+
+            if implementation_hash and implementation_hash != cap.implementation_hash:
+                cap.implementation_hash = implementation_hash
+
+            records.append(CapabilityHealthRecord(
+                capability_id=cap.capability_id,
+                capability_type=cap.capability_type,
+                status_before=status_before,
+                status_after=status_after,
+                implementation_entrypoint=cap.implementation_entrypoint,
+                implementation_hash=implementation_hash,
+                issues=issues,
+            ))
+
+        verified = sum(
+            1
+            for cap in self._capabilities.values()
+            if cap.status == CapabilityStatus.VERIFIED
+        )
+        unverified = sum(
+            1 for record in records
+            if any(issue.severity == "error" for issue in record.issues)
+            or record.status_after == CapabilityStatus.UNVERIFIED
+        )
+        return CapabilityHealthReport(
+            total=len(records),
+            verified=verified,
+            unverified=unverified,
+            degraded=degraded,
+            records=records,
+        )
+
+    def _inspect_entrypoint(
+        self, capability: Capability
+    ) -> tuple[str, list[CapabilityHealthIssue]]:
+        issues: list[CapabilityHealthIssue] = []
+        entrypoint = capability.implementation_entrypoint
+        if ":" not in entrypoint:
+            return "", [CapabilityHealthIssue(
+                capability_id=capability.capability_id,
+                issue_code="invalid_entrypoint_format",
+                message="implementation_entrypoint must use 'module:function'.",
+            )]
+
+        module_name, attr_name = entrypoint.split(":", 1)
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:  # noqa: BLE001 - health report should capture any import failure
+            return "", [CapabilityHealthIssue(
+                capability_id=capability.capability_id,
+                issue_code="entrypoint_import_failed",
+                message=f"Could not import {module_name}: {exc}",
+            )]
+
+        obj = getattr(module, attr_name, None)
+        if obj is None:
+            issues.append(CapabilityHealthIssue(
+                capability_id=capability.capability_id,
+                issue_code="entrypoint_missing_attribute",
+                message=f"Module {module_name} has no attribute {attr_name}.",
+            ))
+            return "", issues
+        if not callable(obj):
+            issues.append(CapabilityHealthIssue(
+                capability_id=capability.capability_id,
+                issue_code="entrypoint_not_callable",
+                message=f"Entrypoint {entrypoint} is not callable.",
+            ))
+            return "", issues
+
+        try:
+            source = inspect.getsource(obj)
+        except (OSError, TypeError):
+            source = repr(obj)
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        implementation_hash = f"sha256:{digest}"
+        expected_hash = capability.implementation_hash
+        if expected_hash and expected_hash != implementation_hash:
+            issues.append(CapabilityHealthIssue(
+                capability_id=capability.capability_id,
+                issue_code="implementation_hash_changed",
+                message="Implementation hash differs from the registry value.",
+            ))
+        return implementation_hash, issues
+
     def unregister(self, capability_id: str) -> None:
         self._capabilities.pop(capability_id, None)
 
@@ -495,6 +678,9 @@ def reset_registry() -> None:
 __all__ = [
     "CAPABILITY_TYPES",
     "Capability",
+    "CapabilityHealthIssue",
+    "CapabilityHealthRecord",
+    "CapabilityHealthReport",
     "CapabilityRequirement",
     "CapabilityRegistry",
     "CapabilityStatus",

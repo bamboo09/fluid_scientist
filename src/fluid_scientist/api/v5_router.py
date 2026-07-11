@@ -1334,6 +1334,42 @@ def list_capabilities() -> dict[str, Any]:
     }
 
 
+@router.get("/capabilities/health")
+def capability_registry_health() -> dict[str, Any]:
+    """Return concrete registry health for the compile-ready pipeline."""
+    from fluid_scientist.capabilities import get_capability_registry
+
+    report = get_capability_registry().health_check(mutate=False)
+    verified = [
+        record.capability_id
+        for record in report.records
+        if record.status_after == "verified" and record.healthy
+    ]
+    unverified = [
+        record.model_dump()
+        for record in report.records
+        if not record.healthy
+    ]
+    declared_or_unverified = [
+        record.model_dump()
+        for record in report.records
+        if record.status_after != "verified"
+    ]
+    return {
+        "healthy": report.healthy,
+        "summary": {
+            "total": report.total,
+            "verified": report.verified,
+            "unverified": report.unverified,
+            "degraded": report.degraded,
+        },
+        "verified_capabilities": verified,
+        "unverified_capabilities": unverified,
+        "declared_or_unverified_capabilities": declared_or_unverified,
+        "records": [record.model_dump() for record in report.records],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Code extension generation / test / review / register endpoints
 # ---------------------------------------------------------------------------

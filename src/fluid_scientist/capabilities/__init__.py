@@ -14,6 +14,9 @@ from fluid_scientist.capabilities.models import (
 from fluid_scientist.capabilities.registry import (
     CAPABILITY_TYPES,
     Capability,
+    CapabilityHealthIssue,
+    CapabilityHealthRecord,
+    CapabilityHealthReport,
     CapabilityRegistry,
     CapabilityRequirement,
     CapabilityStatus,
@@ -24,6 +27,9 @@ from fluid_scientist.capabilities.registry import (
 __all__ = [
     "CAPABILITY_TYPES",
     "Capability",
+    "CapabilityHealthIssue",
+    "CapabilityHealthRecord",
+    "CapabilityHealthReport",
     "CapabilityRegistry",
     "CapabilityRequirement",
     "CapabilityStatus",
