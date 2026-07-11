@@ -1077,8 +1077,16 @@ async function designExperimentFromPrompt(event) {
     appendConversation("assistant", warning, "workflow-event");
     return;
   }
-  const question = researchQuestionInput?.value.trim() || "";
-  if (!question || !modelConfiguration.configured) return;
+  const question = researchQuestionInput?.value.trim() || promptInput?.value.trim() || "";
+  if (!question) return;
+
+  // V5 mode: use compile-ready pipeline directly
+  if (workflowMode === "v5") {
+    await runV5Pipeline(question);
+    return;
+  }
+
+  if (!modelConfiguration.configured) return;
   showResearchQuestion(question);
   if (designExperimentBtn) designExperimentBtn.disabled = true;
   showElement(planProgressCard);
@@ -1092,6 +1100,227 @@ async function designExperimentFromPrompt(event) {
     hideElement(planProgressCard);
     setStatus("");
   }
+}
+
+// ---- V5 Compile-Ready Pipeline ----
+
+let v5SessionId = null;
+
+async function runV5Pipeline(question) {
+  showResearchQuestion(question);
+  if (designExperimentBtn) designExperimentBtn.disabled = true;
+  showElement(planProgressCard);
+  setStatus("正在运行编译就绪流水线…");
+  try {
+    const resp = await fetch("/api/v5/pipeline/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_description: question }),
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`HTTP ${resp.status}: ${text}`);
+    }
+    const result = await resp.json();
+    v5SessionId = result.session_id;
+    renderV5Result(result);
+  } catch (error) {
+    showError(`V5 流水线失败: ${error.message}`);
+  } finally {
+    if (designExperimentBtn) designExperimentBtn.disabled = false;
+    hideElement(planProgressCard);
+    setStatus("");
+  }
+}
+
+function renderV5Result(result) {
+  const container = planResults || stream;
+  if (!container) return;
+  container.innerHTML = "";
+
+  const card = document.createElement("div");
+  card.className = "work-card v5-result-card";
+
+  // Header
+  const header = document.createElement("header");
+  header.className = "card-header";
+  header.innerHTML = `
+    <div><p class="card-kicker">编译就绪</p><h2>OpenFOAM 算例已生成</h2></div>
+    <span class="type-chip type-chip-teal">${result.status === "compile_ready" ? "✓ 就绪" : "✗ " + result.status}</span>
+  `;
+  card.appendChild(header);
+
+  if (result.failure) {
+    const errP = document.createElement("p");
+    errP.className = "v5-error-msg";
+    errP.textContent = result.failure.message || "未知错误";
+    card.appendChild(errP);
+    if (result.stage_history) {
+      const list = document.createElement("ul");
+      list.className = "v5-stages";
+      for (const s of result.stage_history) {
+        const li = document.createElement("li");
+        li.textContent = s.detail ? `${s.stage} — ${s.detail}` : s.stage;
+        if (s.stage === "failed") li.style.color = "var(--red)";
+        list.appendChild(li);
+      }
+      card.appendChild(list);
+    }
+    container.appendChild(card);
+    return;
+  }
+
+  const view = result.compile_ready_view;
+  if (!view) {
+    const p = document.createElement("p");
+    p.textContent = "未收到编译就绪视图数据。";
+    card.appendChild(p);
+    container.appendChild(card);
+    return;
+  }
+
+  // Objective
+  const objSec = document.createElement("section");
+  objSec.className = "v5-section";
+  objSec.innerHTML = `<h3>研究目标</h3><p>${escapeHtml(view.research_objective || "—")}</p>`;
+  card.appendChild(objSec);
+
+  // Solver + mesh grid
+  const grid = document.createElement("div");
+  grid.className = "v5-grid";
+  const solver = view.solver || {};
+  const mesh = view.mesh || {};
+  const geom = view.geometry || {};
+  const bcs = view.boundary_conditions || {};
+  grid.innerHTML = `
+    <section class="v5-section">
+      <h3>求解器配置</h3>
+      <div class="v5-kv">
+        <div class="kv-row"><span class="kv-key">求解器</span><span class="kv-val highlight">${escapeHtml(solver.name || solver.solver_name || "—")}</span></div>
+        <div class="kv-row"><span class="kv-key">湍流模型</span><span class="kv-val">${escapeHtml(solver.turbulence_model || view.physical_models?.turbulence_model || "—")}</span></div>
+        <div class="kv-row"><span class="kv-key">时间推进</span><span class="kv-val">${escapeHtml(solver.temporal_type || view.numerics?.time_control?.temporal_type || "—")}</span></div>
+      </div>
+    </section>
+    <section class="v5-section">
+      <h3>几何</h3>
+      <div class="v5-kv">${fmtV5Kv(geom)}</div>
+    </section>
+    <section class="v5-section">
+      <h3>网格</h3>
+      <div class="v5-kv">
+        <div class="kv-row"><span class="kv-key">网格族</span><span class="kv-val">${escapeHtml(mesh.geometry_family || mesh.family || "—")}</span></div>
+        <div class="kv-row"><span class="kv-key">分辨率</span><span class="kv-val">${escapeHtml(String(mesh.resolution || mesh.mesh_resolution || "—"))}</span></div>
+      </div>
+    </section>
+    <section class="v5-section">
+      <h3>边界条件</h3>
+      <div class="v5-bc-list">${fmtV5BCs(bcs)}</div>
+    </section>
+  `;
+  card.appendChild(grid);
+
+  // Validation checks
+  const checks = (view.validation_results || {}).checks || [];
+  if (checks.length) {
+    const checkSec = document.createElement("section");
+    checkSec.className = "v5-section";
+    checkSec.innerHTML = "<h3>算例验证</h3>";
+    const ul = document.createElement("ul");
+    ul.className = "v5-checks";
+    for (const c of checks) {
+      const li = document.createElement("li");
+      li.className = `check check-${c.passed ? "pass" : "fail"} check-sev-${c.severity}`;
+      li.innerHTML = `<span class="check-icon">${c.passed ? "✓" : "✗"}</span><span class="check-sev check-sev-${c.severity}">${c.severity}</span><span class="check-name">${escapeHtml(c.check_name)}</span><span class="check-msg">${escapeHtml(c.message || "")}</span>`;
+      ul.appendChild(li);
+    }
+    checkSec.appendChild(ul);
+    card.appendChild(checkSec);
+  }
+
+  // Generated files
+  const files = (view.case_manifest || {}).generated_files || result.generated_files || [];
+  if (files.length) {
+    const fileSec = document.createElement("section");
+    fileSec.className = "v5-section";
+    fileSec.innerHTML = `<h3>已生成文件 <small>${files.length}</small> 个</h3>`;
+    const ul = document.createElement("ul");
+    ul.className = "v5-files";
+    for (const f of files) {
+      const li = document.createElement("li");
+      li.textContent = f;
+      ul.appendChild(li);
+    }
+    fileSec.appendChild(ul);
+    card.appendChild(fileSec);
+  }
+
+  // Incremental modification
+  const modSec = document.createElement("section");
+  modSec.className = "v5-section v5-modify-section";
+  modSec.innerHTML = `
+    <h3>增量修改</h3>
+    <p class="v5-hint">${view.modifiable_fields ? "可修改：" + view.modifiable_fields.map(escapeHtml).join("、") : "输入修改描述"}</p>
+    <div class="v5-modify-controls">
+      <input type="text" id="v5-modify-input" placeholder="例如：把雷诺数改为200，终止时间设为50">
+      <button type="button" id="v5-apply-modify" class="button button-secondary">应用修改</button>
+    </div>
+  `;
+  card.appendChild(modSec);
+
+  container.appendChild(card);
+
+  // Bind modify button
+  const modifyBtn = card.querySelector("#v5-apply-modify");
+  const modifyInput = card.querySelector("#v5-modify-input");
+  if (modifyBtn && modifyInput) {
+    modifyBtn.addEventListener("click", async () => {
+      const modText = modifyInput.value.trim();
+      if (modText.length < 3) return;
+      modifyBtn.disabled = true;
+      modifyBtn.textContent = "修改中...";
+      try {
+        const resp = await fetch("/api/v5/pipeline/modify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ session_id: v5SessionId, modification_text: modText }),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const result2 = await resp.json();
+        renderV5Result(result2);
+      } catch (err) {
+        showError(`修改失败: ${err.message}`);
+      } finally {
+        modifyBtn.disabled = false;
+        modifyBtn.textContent = "应用修改";
+      }
+    });
+    modifyInput.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter" && !ev.shiftKey) {
+        ev.preventDefault();
+        modifyBtn.click();
+      }
+    });
+  }
+}
+
+function fmtV5Kv(obj) {
+  if (!obj || typeof obj !== "object") return "";
+  const keys = Object.keys(obj).filter((k) => obj[k] !== undefined && obj[k] !== null);
+  return keys.map((k) => {
+    const v = obj[k];
+    const val = typeof v === "object" && "value" in v ? `${v.value}${v.unit ? " " + v.unit : ""}` : String(v);
+    return `<div class="kv-row"><span class="kv-key">${escapeHtml(k)}</span><span class="kv-val">${escapeHtml(val)}</span></div>`;
+  }).join("");
+}
+
+function fmtV5BCs(bcs) {
+  if (!bcs || typeof bcs !== "object") return '<p class="empty-hint">无边界条件信息</p>';
+  const entries = Object.entries(bcs);
+  if (!entries.length) return '<p class="empty-hint">无边界条件信息</p>';
+  return entries.map(([patch, cfg]) => {
+    const type = typeof cfg === "object" ? (cfg.type || JSON.stringify(cfg)) : cfg;
+    return `<div class="bc-patch"><strong>${escapeHtml(patch)}</strong><span>${escapeHtml(String(type))}</span></div>`;
+  }).join("");
 }
 
 function renderTaskCard(task) {
