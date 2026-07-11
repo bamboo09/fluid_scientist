@@ -23,10 +23,22 @@
   - Pipeline stops before case generation when mandatory capabilities are not healthy and verified.
   - The stop is recorded as `extension_pipeline_incomplete`, not as a fake compile-ready result.
 
+- Started Phase 3A:
+  - Added `ConfigExtensionExecutor`.
+  - Executor generates a real minimal OpenFOAM case directory for low-risk functionObject config extensions.
+  - Generated case includes `0/`, `constant/`, `system/`, `postProcessing/`, `controlDict`, `fvSchemes`, `fvSolution`, `blockMeshDict`, `U`, `p`, and `transportProperties`.
+  - Executor runs existing `CompileReadinessValidator`.
+  - Static validation can pass without OpenFOAM when explicitly requested by tests.
+  - Runtime validation still fails when OpenFOAM is unavailable and does not create a verification artifact.
+
 ## Evidence From This Run
 
 - `python -m pytest tests\capabilities\test_registry_health.py tests\capabilities\test_requirement_graph_resolver.py tests\capabilities\test_unknown_capability_orchestrator.py`
   - Result: `8 passed`
+- `python -m pytest tests\capabilities\test_config_extension_executor.py`
+  - Result: `2 passed`
+- `python -m pytest tests\capabilities\test_config_extension_executor.py tests\capabilities\test_registry_health.py tests\capabilities\test_requirement_graph_resolver.py tests\capabilities\test_unknown_capability_orchestrator.py tests\e2e\test_v5_pipeline_multicase.py tests\api\test_v5_dialogue_draft_mainline.py`
+  - Result: `27 passed, 1 skipped`
 - `python -m pytest tests\e2e\test_v5_pipeline_multicase.py tests\api\test_v5_dialogue_draft_mainline.py`
   - Result: `17 passed, 1 skipped`
 - Registry health check still reports the existing native VERIFIED entries as unhealthy because their entrypoints do not import and they lack test/verification evidence. This is intentionally no longer hidden.
@@ -35,18 +47,16 @@
 
 Implement Phase 3A without bypassing the new gates:
 
-1. Add a real ConfigExtension executor.
-2. Generate functionObject configuration from `ExtensionSpec`.
-3. Write generated config into a minimal OpenFOAM case.
-4. Run dictionary/static validation through typed commands.
-5. Run minimal OpenFOAM validation when OpenFOAM is available.
-6. Save verification artifact and test manifest.
-7. Register the resulting capability only after it is `VERIFIED + REGISTERED + HEALTHY`.
-8. Resume the original checkpoint and rerun capability resolution.
+1. Wire `ConfigExtensionExecutor` into `UnknownCapabilityOrchestrator`.
+2. Add functionObject capability registration after real OpenFOAM validation.
+3. Save verification artifact and test manifest.
+4. Register the resulting capability only after it is `VERIFIED + REGISTERED + HEALTHY`.
+5. Resume the original checkpoint and rerun capability resolution.
+6. Continue with Postprocessor and Boundary Writer loops.
 
 ## Unfinished Items
 
-- No extension executor has generated or validated a real capability yet.
+- A ConfigExtension executor can generate and statically validate a minimal case, but it has not been wired into pipeline resume.
 - No extension has been registered as `VERIFIED + REGISTERED + HEALTHY`.
 - No original pipeline has resumed after a successful extension registration.
 - Case compiler is not yet pluginized by capability stages.

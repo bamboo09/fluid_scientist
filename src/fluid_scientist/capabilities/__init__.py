@@ -11,6 +11,10 @@ from fluid_scientist.capabilities.models import (
     MissingCapability,
     StrictModel,
 )
+from fluid_scientist.capabilities.config_extension import (
+    ConfigExtensionExecution,
+    ConfigExtensionExecutor,
+)
 from fluid_scientist.capabilities.orchestrator import (
     ExtensionLifecycleStatus,
     ExtensionRunRecord,
@@ -53,6 +57,8 @@ __all__ = [
     "CapabilityType",
     "CodeExtensionSpec",
     "CompilerCapability",
+    "ConfigExtensionExecution",
+    "ConfigExtensionExecutor",
     "ExtensionLifecycleStatus",
     "ExtensionRunRecord",
     "ExtensionSpec",
