@@ -652,6 +652,103 @@ def create_app(
             "workflow_v2_enabled": runtime_settings.research_workflow_v2,
         }
 
+    def _pipeline_work_root() -> Path:
+        database_url = runtime_settings.database.url
+        if database_url.startswith("sqlite:///") and database_url not in {
+            "sqlite://",
+            "sqlite:///:memory:",
+        }:
+            database_path = Path(database_url.removeprefix("sqlite:///")).expanduser()
+            if not database_path.is_absolute():
+                database_path = Path.cwd() / database_path
+            return database_path.parent / "compile_ready_pipeline"
+        return Path.cwd() / ".fluid_scientist" / "compile_ready_pipeline"
+
+    def _selected_research_text(session, message: str) -> str:
+        text = message.strip()
+        for prefix in (
+            "选择研究任务:",
+            "选择研究任务：",
+            "选择研究任务",
+            "Selected research task:",
+        ):
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+                break
+        return text or session.original_request
+
+    def _run_compile_ready_pipeline_for_session(session, message: str) -> dict:
+        import json
+
+        from fluid_scientist.ports import StoredExperimentSpec
+        from fluid_scientist.research.models import ResearchSessionStatus
+        from fluid_scientist.workflow_pipeline import PipelineStatus, V5WorkflowPipeline
+
+        state = V5WorkflowPipeline(
+            work_root=_pipeline_work_root(),
+            llm_client=_build_llm_client(runtime_settings),
+        ).run(
+            user_description=_selected_research_text(session, message),
+            session_id=session.session_id,
+        )
+        pipeline_payload = {
+            "status": state.current_stage,
+            "stage_history": [s.model_dump(mode="json") for s in state.stage_history],
+            "failure": state.failure,
+            "case_dir": state.case_dir,
+            "validation_report": state.validation_report,
+        }
+        if state.current_stage != PipelineStatus.COMPILE_READY or state.draft_view is None:
+            research_session_store.update(
+                session.session_id,
+                status=ResearchSessionStatus.UNSUPPORTED,
+                accumulated_context={
+                    **session.accumulated_context,
+                    "compile_ready_pipeline": pipeline_payload,
+                },
+                updated_at=datetime.now(UTC).isoformat(),
+            )
+            return {
+                "type": "pipeline_failed",
+                "session_id": session.session_id,
+                **pipeline_payload,
+            }
+
+        now = datetime.now(UTC).isoformat()
+        draft_id = state.draft_view.get("draft_id") or f"draft-{session.session_id}"
+        stored_spec = StoredExperimentSpec(
+            experiment_id=draft_id,
+            project_id=session.project_id or None,
+            schema_version="3.0.0",
+            experiment_version=1,
+            status=PipelineStatus.COMPILE_READY,
+            task_type="new_simulation",
+            interaction_mode="standard",
+            spec_json=json.dumps(state.draft_view, ensure_ascii=False, default=str),
+            created_at=now,
+            updated_at=now,
+        )
+        workflow_repository.save_experiment_spec(stored_spec)
+        research_session_store.update(
+            session.session_id,
+            status=ResearchSessionStatus.DRAFT_READY,
+            experiment_spec_id=draft_id,
+            accumulated_context={
+                **session.accumulated_context,
+                "compile_ready_pipeline": pipeline_payload,
+            },
+            updated_at=datetime.now(UTC).isoformat(),
+        )
+        return {
+            "type": "draft_ready",
+            "session_id": session.session_id,
+            "experiment_spec_id": draft_id,
+            "experiment_version": 1,
+            "warnings": [],
+            "compile_ready_view": state.draft_view,
+            "case_dir": state.case_dir,
+        }
+
     # ===== Research Session API (Workflow V2) =====
 
     @application.post(
@@ -661,14 +758,10 @@ def create_app(
     )
     def create_research_session(body: dict = Body(...)) -> dict:  # noqa: B008
         """创建新的研究会话并处理第一轮输入。"""
-        import json
-
-        from fluid_scientist.ports import StoredExperimentSpec
         from fluid_scientist.research.models import (
             ResearchSession,
             ResearchSessionStatus,
         )
-        from fluid_scientist.workflow_pipeline import PipelineStatus, V5WorkflowPipeline
 
         project_id = body.get("project_id", "")
         message = body.get("message", "")
@@ -694,69 +787,8 @@ def create_app(
                 updated_at=now,
             )
         )
-        database_url = runtime_settings.database.url
-        if database_url.startswith("sqlite:///") and database_url not in {
-            "sqlite://",
-            "sqlite:///:memory:",
-        }:
-            database_path = Path(database_url.removeprefix("sqlite:///")).expanduser()
-            if not database_path.is_absolute():
-                database_path = Path.cwd() / database_path
-            pipeline_work_root = database_path.parent / "compile_ready_pipeline"
-        else:
-            pipeline_work_root = Path.cwd() / ".fluid_scientist" / "compile_ready_pipeline"
-
-        pipeline = V5WorkflowPipeline(
-            work_root=pipeline_work_root,
-            llm_client=_build_llm_client(runtime_settings),
-        )
-        state = pipeline.run(user_description=message, session_id=session_id)
-        pipeline_payload = {
-            "status": state.current_stage,
-            "stage_history": [s.model_dump(mode="json") for s in state.stage_history],
-            "failure": state.failure,
-            "case_dir": state.case_dir,
-            "validation_report": state.validation_report,
-        }
-        if state.current_stage != PipelineStatus.COMPILE_READY or state.draft_view is None:
-            research_session_store.update(
-                session_id,
-                status=ResearchSessionStatus.UNSUPPORTED,
-                accumulated_context={"compile_ready_pipeline": pipeline_payload},
-                updated_at=datetime.now(UTC).isoformat(),
-            )
-            return {"type": "pipeline_failed", "session_id": session_id, **pipeline_payload}
-
-        draft_id = state.draft_view.get("draft_id") or f"draft-{session_id}"
-        stored_spec = StoredExperimentSpec(
-            experiment_id=draft_id,
-            project_id=project_id or None,
-            schema_version="3.0.0",
-            experiment_version=1,
-            status=PipelineStatus.COMPILE_READY,
-            task_type="new_simulation",
-            interaction_mode="standard",
-            spec_json=json.dumps(state.draft_view, ensure_ascii=False, default=str),
-            created_at=now,
-            updated_at=datetime.now(UTC).isoformat(),
-        )
-        workflow_repository.save_experiment_spec(stored_spec)
-        research_session_store.update(
-            session_id,
-            status=ResearchSessionStatus.DRAFT_READY,
-            experiment_spec_id=draft_id,
-            accumulated_context={"compile_ready_pipeline": pipeline_payload},
-            updated_at=datetime.now(UTC).isoformat(),
-        )
-        return {
-            "type": "draft_ready",
-            "session_id": session_id,
-            "experiment_spec_id": draft_id,
-            "experiment_version": 1,
-            "warnings": [],
-            "compile_ready_view": state.draft_view,
-            "case_dir": state.case_dir,
-        }
+        session = research_session_store.get(session_id)
+        return _run_compile_ready_pipeline_for_session(session, message)
 
     @application.post(
         "/api/research-sessions/{session_id}/turns",
@@ -770,14 +802,17 @@ def create_app(
         if not message.strip():
             raise HTTPException(status_code=422, detail="message is required")
         try:
-            result = research_orchestrator.handle_turn(
-                session_id=session_id,
-                user_message=message,
-            )
+            session = research_session_store.get(session_id)
         except KeyError as error:
             raise HTTPException(
                 status_code=404, detail="research session not found"
             ) from error
+        if session.experiment_spec_id is None:
+            return _run_compile_ready_pipeline_for_session(session, message)
+        result = research_orchestrator.handle_turn(
+            session_id=session_id,
+            user_message=message,
+        )
         return result.model_dump()
 
     @application.get(
