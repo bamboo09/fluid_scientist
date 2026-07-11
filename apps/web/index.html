@@ -27,19 +27,6 @@
     </header>
 
     <div class="workbench-shell">
-      <aside id="task-sidebar" class="task-sidebar" aria-label="研究任务">
-        <header class="sidebar-header">
-          <h2>研究任务</h2>
-          <button id="new-task-btn" class="button button-small button-primary" type="button">+ 新建</button>
-        </header>
-        <div id="task-list" class="task-list">
-          <p class="sidebar-empty">暂无研究任务<br>在中间输入框描述研究问题开始</p>
-        </div>
-        <footer class="sidebar-footer">
-          <span class="connection-dot" id="sidebar-conn-dot">●</span>
-          <span id="sidebar-conn-text">未连接</span>
-        </footer>
-      </aside>
       <main class="workbench">
         <section id="conversation-stream" class="conversation-stream" aria-label="实验对话">
           <article id="welcome-message" class="message message-assistant">
@@ -217,16 +204,14 @@
         </div>
       </main>
 
-      <aside id="scheme-panel" class="scheme-panel" aria-label="研究方案">
-        <span id="task-context" hidden aria-hidden="true"></span>
-        <header class="scheme-header">
-          <h2>研究方案</h2>
-          <span id="scheme-version" class="scheme-version-badge">v1.0 更新</span>
-        </header>
-        <div id="scheme-body" class="scheme-body">
-          <p class="scheme-empty">尚未生成实验草案<br>请在中间输入框描述研究问题</p>
-        </div>
-        <section id="workstation-panel" class="context-section scheme-workstation">
+      <aside id="task-context" class="context-rail" aria-label="当前实验上下文">
+        <header><p class="rail-eyebrow">当前上下文</p><h2>实验记录</h2></header>
+        <section><h3>规划模型</h3><p><strong id="current-model">未连接</strong><span id="context-model-id">API 密钥不会保存在浏览器中</span></p><button type="button" class="text-button" data-open-dialog="model-settings">配置模型</button></section>
+        <section><h3>执行平台</h3><p><strong id="current-target">尚未选择</strong><span id="target-capability-state">等待能力检查</span></p><button type="button" class="text-button" data-open-dialog="target-settings">选择执行平台</button></section>
+        <section><h3>活动项目</h3><p><strong id="current-project">尚未创建</strong><span id="active-project-name">从第一条实验请求开始</span></p></section>
+        <section><h3>远程任务</h3><p><strong id="job-state" data-task-label>空闲</strong><span id="job-id">尚未提交</span></p><div class="progress" aria-hidden="true"><i id="job-progress"></i></div><p id="last-task-update" class="rail-note">没有活动任务</p></section>
+        <nav aria-label="辅助入口"><button id="open-custom-case" type="button" class="rail-link" aria-haspopup="dialog">上传自定义 OpenFOAM 算例 <span>↗</span></button><a class="rail-link" href="#conversation-stream">查看本次对话 <span>↑</span></a></nav>
+        <section id="workstation-panel" class="context-section">
           <h4>工作站</h4>
           <div id="workstation-status" class="workstation-status">
             <span class="ws-indicator" data-state="unknown">●</span>
@@ -244,7 +229,6 @@
             <button id="ws-test-ssh" class="ws-btn" type="button">测试SSH</button>
             <button id="ws-configure" class="ws-btn" type="button">配置工作站</button>
           </div>
-          <button id="open-custom-case" type="button" class="ws-btn scheme-custom-case-btn" aria-haspopup="dialog">上传自定义算例</button>
         </section>
       </aside>
     </div>
