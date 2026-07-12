@@ -318,52 +318,63 @@ class CasePlanGenerator:
     def _generate_numerics_plan(
         self, draft: ExperimentDraft, solver: str
     ) -> dict:
-        """Generate the numerics plan from draft.numerics or defaults.
+        """Generate the numerics plan from draft.numerics and time_control.
 
-        Also includes endTime/deltaT from control_parameters if available.
+        The compiler requires flat keys: endTime, deltaT, writeControl, writeInterval.
+        These are derived from the pipeline's time_control dict (which contains
+        physically-calculated end_time, delta_t, write_interval, etc.) and
+        mapped to OpenFOAM controlDict naming conventions.
         """
         steady = "simple" in solver.lower()
-        if draft.numerics:
-            plan = dict(draft.numerics)
-        else:
-            plan = {}
 
-        # Ensure endTime and deltaT are always present — the compiler requires them.
-        # Try to extract from time_control first, then fall back to sensible defaults.
-        time_ctrl = plan.get("time_control", {}) or {}
+        # Start from draft.numerics (contains steady, pressure_velocity_coupling, etc.)
+        plan = dict(draft.numerics) if draft.numerics else {}
+
+        # The pipeline stores time parameters in time_control (nested dict).
+        # Extract and flatten them to OpenFOAM controlDict keys.
+        time_ctrl = plan.pop("time_control", None) or {}
         if not isinstance(time_ctrl, dict):
             time_ctrl = {}
 
-        if "endTime" not in plan:
-            # Try to get from time_control
-            end_time = time_ctrl.get("end_time") or time_ctrl.get("endTime")
-            if end_time is not None:
-                plan["endTime"] = end_time
-            elif steady:
-                plan["endTime"] = 1000
-            else:
-                plan["endTime"] = 10.0
+        # Also check draft.time_control (CompileReadyDraftView has this as a top-level field)
+        if not time_ctrl and hasattr(draft, "time_control") and draft.time_control:
+            time_ctrl = draft.time_control if isinstance(draft.time_control, dict) else {}
 
-        if "deltaT" not in plan:
-            delta_t = time_ctrl.get("delta_t") or time_ctrl.get("deltaT")
-            if delta_t is not None:
-                plan["deltaT"] = delta_t
-            elif steady:
-                plan["deltaT"] = 1.0
-            else:
-                plan["deltaT"] = 0.01
-
-        # Ensure writeControl and writeInterval exist
-        plan.setdefault("writeControl", "timeStep")
-        plan.setdefault("writeInterval", 100 if steady else 50)
-
-        # Override with values from control_parameters if present
+        # --- endTime ---
+        # Source priority: control_parameters > time_control.end_time > steady default
+        end_time = None
         for param in draft.control_parameters:
-            pid = param.parameter_id.lower()
-            if pid == "endtime" and param.value is not None:
-                plan["endTime"] = param.value
-            elif pid == "deltat" and param.value is not None:
-                plan["deltaT"] = param.value
+            if param.parameter_id.lower() == "endtime" and param.value is not None:
+                end_time = param.value
+                break
+        if end_time is None:
+            end_time = time_ctrl.get("end_time")
+        if end_time is None:
+            # Steady simulations use iteration count; transient uses flow-through time
+            end_time = 10000 if steady else 20.0
+        plan["endTime"] = end_time
+
+        # --- deltaT ---
+        # Source priority: control_parameters > time_control.delta_t > CFL-based default
+        delta_t = None
+        for param in draft.control_parameters:
+            if param.parameter_id.lower() == "deltat" and param.value is not None:
+                delta_t = param.value
+                break
+        if delta_t is None:
+            delta_t = time_ctrl.get("delta_t")
+        if delta_t is None:
+            # Steady: deltaT=1 (acts as iteration count); Transient: CFL-limited
+            delta_t = 1.0 if steady else 0.002
+        plan["deltaT"] = delta_t
+
+        # --- writeControl / writeInterval ---
+        write_interval = time_ctrl.get("write_interval")
+        if write_interval is None:
+            write_interval = 100 if steady else 50
+        plan["writeControl"] = "timeStep"
+        plan["writeInterval"] = int(write_interval)
+
         # Record steady flag for the compiler.
         plan["steady"] = steady
         return plan
