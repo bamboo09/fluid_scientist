@@ -422,7 +422,7 @@ class V5WorkflowPipeline:
             intent = state.scientific_intent
         elif self._llm is not None:
             try:
-                intent = self._extract_intent_with_llm(text)
+                intent = self._extract_intent_with_llm(text, state.session_id)
             except Exception as exc:
                 state.failure = PipelineFailure(
                     failed_stage=PipelineStatus.UNDERSTANDING,
@@ -461,7 +461,7 @@ class V5WorkflowPipeline:
 
         state.scientific_intent = intent
 
-    def _extract_intent_with_llm(self, text: str) -> dict[str, Any]:
+    def _extract_intent_with_llm(self, text: str, session_id: str = "") -> dict[str, Any]:
         """Call LLM for structured scientific intent parsing."""
         if self._llm is None:
             raise RuntimeError("LLM client is not configured")
@@ -480,7 +480,7 @@ class V5WorkflowPipeline:
                     "Return ONLY a valid JSON object."
                 ),
                 user_message=text,
-                session_id=None,
+                session_id=session_id,
                 output_schema="json",
             )
             if isinstance(output, dict):
@@ -1526,7 +1526,38 @@ class V5WorkflowPipeline:
             case_manifest=state.case_manifest,
             modifiable_fields=modifiable,
             assumptions=assumptions,
+            study_type="cfd_simulation",
+            objective=state.scientific_intent.get("research_objective", ""),
+            requested_outputs=self._extract_requested_outputs(state),
+            analysis_goals=state.scientific_intent.get("analysis_goals", []),
+            blocking_issues=[],
         )
+
+    def _extract_requested_outputs(self, state: PipelineState) -> list[dict[str, Any]]:
+        """Extract observable list from scientific metrics and analysis goals."""
+        outputs: list[dict[str, Any]] = []
+        # From scientific metrics
+        for metric in state.scientific_metrics:
+            if isinstance(metric, dict):
+                name = metric.get("display_name") or metric.get("metric_id") or metric.get("name", "")
+                if name:
+                    outputs.append({"name": name, "type": metric.get("type", "field"), "source": "SYSTEM_DERIVED"})
+        # From analysis goals
+        for goal in state.scientific_intent.get("analysis_goals", []):
+            if isinstance(goal, dict):
+                target = goal.get("target_quantity", "")
+                if target and not any(o.get("name") == target for o in outputs):
+                    outputs.append({"name": target, "type": "derived", "source": "SYSTEM_DERIVED"})
+            elif isinstance(goal, str) and goal:
+                if not any(o.get("name") == goal for o in outputs):
+                    outputs.append({"name": goal, "type": "derived", "source": "SYSTEM_DERIVED"})
+        # Default: velocity and pressure fields
+        if not outputs:
+            outputs = [
+                {"name": "velocity_field", "type": "field", "source": "SYSTEM_DEFAULT"},
+                {"name": "pressure_field", "type": "field", "source": "SYSTEM_DEFAULT"},
+            ]
+        return outputs
 
 
 __all__ = ["PipelineState", "V5WorkflowPipeline"]

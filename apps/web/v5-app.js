@@ -346,9 +346,9 @@ function renderDraftViewer() {
   // Study type
   viewer.appendChild(section("研究类型", [
     fieldRow("类型", label(LABELS.studyType, d.study_type), "inferred"),
-    fieldRow("维度", d.physics_models?.dimension || "—", "pending"),
-    fieldRow("时间", d.physics_models?.temporal || "—", "pending"),
-    fieldRow("湍流", d.physics_models?.turbulent ? "是" : "否", "pending"),
+    fieldRow("维度", d.physics_models?.dimension || "—", "inferred"),
+    fieldRow("时间", d.physics_models?.temporal || "—", "inferred"),
+    fieldRow("湍流", d.physics_models?.turbulent ? "是" : "否", "inferred"),
   ]));
 
   // Geometry
@@ -382,42 +382,42 @@ function renderDraftViewer() {
   const bcs = d.boundary_conditions || {};
   const bcKeys = Object.keys(bcs);
   viewer.appendChild(section("边界条件", bcKeys.length
-    ? bcKeys.map(k => fieldRow(k, typeof bcs[k] === "object" ? JSON.stringify(bcs[k]).slice(0, 50) : String(bcs[k]), "pending"))
+    ? bcKeys.map(k => fieldRow(k, typeof bcs[k] === "object" ? JSON.stringify(bcs[k]).slice(0, 50) : String(bcs[k]), "inferred"))
     : [fieldRow("边界条件", "待填充（入口/出口/壁面）", "missing")]
   ));
 
   // Initial conditions
   const ics = d.initial_conditions || {};
   viewer.appendChild(section("初始条件", Object.keys(ics).length
-    ? Object.entries(ics).map(([k, v]) => fieldRow(k, String(v), "pending"))
+    ? Object.entries(ics).map(([k, v]) => fieldRow(k, String(v), "inferred"))
     : [fieldRow("初始条件", "待填充", "missing")]
   ));
 
   // Mesh
   const mesh = d.mesh || {};
   viewer.appendChild(section("网格要求", Object.keys(mesh).length
-    ? Object.entries(mesh).map(([k, v]) => fieldRow(k, String(v), "pending"))
+    ? Object.entries(mesh).map(([k, v]) => fieldRow(k, String(v), "inferred"))
     : [fieldRow("网格", "待配置", "missing")]
   ));
 
   // Solver
   const solver = d.solver || {};
   viewer.appendChild(section("求解器", Object.keys(solver).length
-    ? Object.entries(solver).map(([k, v]) => fieldRow(k, String(v), "pending"))
+    ? Object.entries(solver).map(([k, v]) => fieldRow(k, String(v), "inferred"))
     : [fieldRow("求解器", "待选择", "missing")]
   ));
 
   // Observables / requested outputs
   const outputs = d.requested_outputs || [];
   viewer.appendChild(section("观测量", outputs.length
-    ? outputs.map(o => fieldRow(typeof o === "string" ? o : o.name || "?", "", "pending"))
+    ? outputs.map(o => fieldRow(typeof o === "string" ? o : o.name || "?", "", "inferred"))
     : [fieldRow("观测量", "待指定", "missing")]
   ));
 
   // Analysis goals
   const goals = d.analysis_goals || [];
   viewer.appendChild(section("分析目标", goals.length
-    ? goals.map(g => fieldRow("•", g, "pending"))
+    ? goals.map(g => fieldRow("•", g, "inferred"))
     : [fieldRow("分析目标", "待指定", "missing")]
   ));
 
@@ -449,7 +449,7 @@ function section(title, children) {
 }
 
 function fieldRow(label, value, status) {
-  const statusLabels = { confirmed: "已确认", pending: "待确认", inferred: "模型推断", "user-provided": "用户提供", missing: "能力缺失", conflict: "存在冲突" };
+  const statusLabels = { confirmed: "已确认", pending: "已填充", inferred: "模型推断", "user-provided": "用户提供", missing: "待补充", conflict: "存在冲突" };
   return el("div", { class: "field-row" }, [
     el("span", { class: "field-label-inline", text: label }),
     el("span", { class: "field-value-inline", text: value }),

@@ -303,6 +303,15 @@ class CompileReadyDraftView(BaseModel):
     modifiable_fields: list[str] = Field(default_factory=list)
     # Assumptions made (transparent to user)
     assumptions: list[dict[str, Any]] = Field(default_factory=list)
+    # Study type and objective (for frontend display)
+    study_type: str = "cfd_simulation"
+    objective: str = ""
+    # Requested outputs / observables
+    requested_outputs: list[Any] = Field(default_factory=list)
+    # Analysis goals (from scientific intent)
+    analysis_goals: list[Any] = Field(default_factory=list)
+    # Blocking issues (if any)
+    blocking_issues: list[dict[str, Any]] = Field(default_factory=list)
     # Created timestamp
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
