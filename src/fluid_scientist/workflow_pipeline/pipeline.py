@@ -165,6 +165,30 @@ class V5WorkflowPipeline:
 
         # Use pre-extracted intent if provided (e.g., from study_decomposition)
         if pre_extracted:
+            # Ensure analysis_goals are in the right format (list of dicts)
+            raw_goals = pre_extracted.get("analysis_goals", [])
+            if raw_goals and isinstance(raw_goals[0], str):
+                pre_extracted["analysis_goals"] = [
+                    {"phenomenon": g, "target_quantity": g, "temporal_mode": "time_averaged", "statistic": "mean"}
+                    if isinstance(g, str) else g
+                    for g in raw_goals
+                ]
+            # If analysis_goals is empty, try to extract from LLM
+            if not pre_extracted.get("analysis_goals") and self._llm is not None:
+                try:
+                    llm_intent = self._extract_intent_with_llm(user_description, sid)
+                    if isinstance(llm_intent, dict):
+                        # Merge LLM-extracted fields that are missing from pre_extracted
+                        for key in ("analysis_goals", "boundaries", "motions", "materials",
+                                    "dimensionless_parameters", "flow_regime", "temporal_mode",
+                                    "geometry_family", "physics_family", "heat_transfer",
+                                    "multiphase", "fsi"):
+                            if not pre_extracted.get(key) and llm_intent.get(key):
+                                pre_extracted[key] = llm_intent[key]
+                        if not pre_extracted.get("research_objective"):
+                            pre_extracted["research_objective"] = llm_intent.get("research_objective", user_description)
+                except Exception:
+                    pass  # Fall through to deterministic fallback
             state.scientific_intent = pre_extracted
 
         # Execute stages in order; each stage sets current_stage and
