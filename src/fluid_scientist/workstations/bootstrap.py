@@ -128,12 +128,15 @@ class WorkstationBootstrapService:
             if host_key_status == KnownHostStatus.UNKNOWN:
                 confirmed = self.runner.confirm_host_key(candidate.host_alias)
                 if not confirmed:
+                    accept = getattr(self.runner, "accept_host_key", None)
+                    confirmed = bool(callable(accept) and accept(candidate.host_alias))
+                if not confirmed:
                     return BootstrapResult(
                         status="FAILED",
                         error_code=WorkstationErrorCode.HOST_KEY_CONFIRMATION_REQUIRED.value,
                         error_message=(
-                            f"host key for '{request.host}' could not be fetched; "
-                            "check host/port reachability and try again"
+                            f"host key for '{request.host}' could not be trusted; "
+                            "check host/port reachability and SSH availability"
                         ),
                     )
 

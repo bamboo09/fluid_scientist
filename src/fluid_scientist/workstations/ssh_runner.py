@@ -361,6 +361,28 @@ class SSHCommandRunner:
         logger.debug("confirmed host key for %s", alias)
         return True
 
+    def accept_host_key(self, host_alias: str, *, timeout: float = _DEFAULT_TIMEOUT) -> bool:
+        """Trust a host key through OpenSSH's ``StrictHostKeyChecking=accept-new``.
+
+        Some networks block or throttle ``ssh-keyscan`` while normal SSH
+        handshakes still work.  This fallback mirrors a first manual SSH
+        connection but keeps ``BatchMode=yes`` so the process never prompts
+        for passwords or passphrases.  Authentication may fail; the method
+        only cares whether OpenSSH added the new host key to ``known_hosts``.
+        """
+        alias = SafeHostAlias(host_alias)
+        connect_timeout = max(1, int(timeout))
+        argv = self._ssh_argv(str(alias), connect_timeout) + (
+            "-o",
+            "StrictHostKeyChecking=accept-new",
+            "true",
+        )
+        try:
+            self._run(argv, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return self.get_host_key_status(str(alias)) == KnownHostStatus.KNOWN
+
     def test_authentication(
         self,
         host_alias: str,

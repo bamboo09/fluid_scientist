@@ -17,9 +17,13 @@ class BootstrapRunner:
         *,
         host_key_status: KnownHostStatus = KnownHostStatus.KNOWN,
         auth_ok: bool = True,
+        confirm_ok: bool = True,
+        accept_ok: bool = True,
     ) -> None:
         self.host_key_status = host_key_status
         self.auth_ok = auth_ok
+        self.confirm_ok = confirm_ok
+        self.accept_ok = accept_ok
         self.registered: dict[str, tuple[str, str, int]] = {}
         self.remote_commands: list[str] = []
 
@@ -43,6 +47,14 @@ class BootstrapRunner:
         return "SHA256:test"
 
     def confirm_host_key(self, host_alias: str) -> bool:
+        if not self.confirm_ok:
+            return False
+        self.host_key_status = KnownHostStatus.KNOWN
+        return True
+
+    def accept_host_key(self, host_alias: str) -> bool:
+        if not self.accept_ok:
+            return False
         self.host_key_status = KnownHostStatus.KNOWN
         return True
 
@@ -152,6 +164,33 @@ def test_bootstrap_unknown_host_key_requires_confirmation(tmp_path):
 
 def test_bootstrap_can_trust_unknown_host_key_and_continue(tmp_path):
     runner = BootstrapRunner(host_key_status=KnownHostStatus.UNKNOWN)
+    store = WorkstationProfileStore(str(tmp_path / "workstations.db"))
+    service = WorkstationBootstrapService(
+        runner=runner,
+        store=store,
+        discovery=EmptyDiscovery(),
+    )
+
+    result = service.bootstrap(
+        BootstrapRequest(
+            host="hpc",
+            username="researcher",
+            trust_host_key=True,
+        )
+    )
+
+    assert result.error_code is None
+    assert result.status == PlatformStatus.READY.value
+    assert runner.host_key_status == KnownHostStatus.KNOWN
+    assert store.get_default() is not None
+
+
+def test_bootstrap_falls_back_to_accept_new_when_keyscan_fails(tmp_path):
+    runner = BootstrapRunner(
+        host_key_status=KnownHostStatus.UNKNOWN,
+        confirm_ok=False,
+        accept_ok=True,
+    )
     store = WorkstationProfileStore(str(tmp_path / "workstations.db"))
     service = WorkstationBootstrapService(
         runner=runner,
