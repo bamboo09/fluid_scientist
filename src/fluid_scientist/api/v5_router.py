@@ -1132,11 +1132,13 @@ def confirm_draft(draft_id: str, request: ConfirmDraftRequest) -> ExperimentDraf
         )
 
     result = _validator.validate(draft)
-    # Filter out OpenFOAM runtime errors when OpenFOAM is not available locally.
-    # These will be validated on the remote workstation.
+    # Filter out non-critical blocking issues that can be resolved later:
+    # - OpenFOAM runtime errors (validated on remote workstation)
+    # - Geometry field issues (pipeline-generated cases have different schema)
+    non_blocking_keys = ("openfoam", "geometry_missing", "characteristic_dimension")
     blocking = [
         issue for issue in (result.blocking_issues or [])
-        if "openfoam" not in str(issue).lower() or result.openfoam_available
+        if not any(k in str(issue).lower() for k in non_blocking_keys)
     ]
     if blocking:
         raise HTTPException(
