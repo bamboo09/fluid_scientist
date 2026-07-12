@@ -176,17 +176,24 @@ class V5WorkflowPipeline:
                     if isinstance(g, str) else g
                     for g in raw_goals
                 ]
-            # If analysis_goals is empty, try to extract from LLM
-            if not pre_extracted.get("analysis_goals") and self._llm is not None:
+                print(f"[DEBUG] converted analysis_goals: {pre_extracted['analysis_goals']}", flush=True)
+            # Always try LLM for richer analysis goals and missing fields
+            if self._llm is not None:
                 try:
                     llm_intent = self._extract_intent_with_llm(user_description, sid)
                     if isinstance(llm_intent, dict):
+                        print(f"[DEBUG] LLM intent analysis_goals: {llm_intent.get('analysis_goals')}", flush=True)
                         # Merge LLM-extracted fields that are missing from pre_extracted
                         for key in ("analysis_goals", "boundaries", "motions", "materials",
                                     "dimensionless_parameters", "flow_regime", "temporal_mode",
                                     "geometry_family", "physics_family", "heat_transfer",
                                     "multiphase", "fsi"):
-                            if not pre_extracted.get(key) and llm_intent.get(key):
+                            # For analysis_goals, prefer LLM result if it's richer
+                            if key == "analysis_goals":
+                                llm_goals = llm_intent.get("analysis_goals", [])
+                                if llm_goals and len(llm_goals) >= len(pre_extracted.get("analysis_goals", [])):
+                                    pre_extracted["analysis_goals"] = llm_goals
+                            elif not pre_extracted.get(key) and llm_intent.get(key):
                                 pre_extracted[key] = llm_intent[key]
                         if not pre_extracted.get("research_objective"):
                             pre_extracted["research_objective"] = llm_intent.get("research_objective", user_description)
