@@ -1859,12 +1859,15 @@ class PipelineRunResponse(BaseModel):
 
 def _draft_is_compile_ready(draft: ExperimentDraft) -> bool:
     result = draft.validation_result or {}
-    # Allow confirmation when the draft status is READY and static checks pass.
-    # OpenFOAM runtime availability is not required locally — it will be
-    # validated on the remote workstation after deployment.
+    # Allow confirmation when draft status is READY and no ERROR-level
+    # checks failed. OpenFOAM runtime availability is not required locally.
+    has_blocking_errors = any(
+        not c.get("passed", False) and c.get("severity") == "error"
+        for c in (result.get("checks") or [])
+    )
     return (
         draft.status in {DraftStatus.READY, DraftStatus.CONFIRMED}
-        and result.get("compile_ready") is not False
+        and not has_blocking_errors
     )
 
 
