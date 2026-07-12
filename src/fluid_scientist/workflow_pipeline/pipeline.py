@@ -483,9 +483,11 @@ class V5WorkflowPipeline:
                 session_id=session_id,
                 output_schema="json",
             )
-            _logger.info("LLM intent output keys: %s", list(output.keys()) if isinstance(output, dict) else type(output))
-            _logger.info("LLM intent analysis_goals: %s", output.get("analysis_goals") if isinstance(output, dict) else None)
+            print(f"[DEBUG] LLM intent output type: {type(output)}", flush=True)
             if isinstance(output, dict):
+                print(f"[DEBUG] LLM intent keys: {list(output.keys())}", flush=True)
+                print(f"[DEBUG] analysis_goals: {output.get('analysis_goals')}", flush=True)
+                print(f"[DEBUG] research_objective: {output.get('research_objective', '')[:80]}", flush=True)
                 return output
         except Exception as exc:
             raise RuntimeError(f"LLM scientific intent parsing failed: {exc}") from exc
