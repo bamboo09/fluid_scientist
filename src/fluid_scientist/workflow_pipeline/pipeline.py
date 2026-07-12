@@ -165,9 +165,6 @@ class V5WorkflowPipeline:
 
         # Use pre-extracted intent if provided (e.g., from study_decomposition)
         if pre_extracted:
-            print(f"[DEBUG] pre_extracted keys: {list(pre_extracted.keys())}", flush=True)
-            print(f"[DEBUG] pre_extracted analysis_goals: {pre_extracted.get('analysis_goals')}", flush=True)
-            print(f"[DEBUG] pre_extracted observables: {pre_extracted.get('observables')}", flush=True)
             # Ensure analysis_goals are in the right format (list of dicts)
             raw_goals = pre_extracted.get("analysis_goals", [])
             if raw_goals and isinstance(raw_goals[0], str):
@@ -176,13 +173,11 @@ class V5WorkflowPipeline:
                     if isinstance(g, str) else g
                     for g in raw_goals
                 ]
-                print(f"[DEBUG] converted analysis_goals: {pre_extracted['analysis_goals']}", flush=True)
             # Always try LLM for richer analysis goals and missing fields
             if self._llm is not None:
                 try:
                     llm_intent = self._extract_intent_with_llm(user_description, sid)
                     if isinstance(llm_intent, dict):
-                        print(f"[DEBUG] LLM intent analysis_goals: {llm_intent.get('analysis_goals')}", flush=True)
                         # Merge LLM-extracted fields that are missing from pre_extracted
                         for key in ("analysis_goals", "boundaries", "motions", "materials",
                                     "dimensionless_parameters", "flow_regime", "temporal_mode",
@@ -517,11 +512,7 @@ class V5WorkflowPipeline:
                 session_id=session_id,
                 output_schema="json",
             )
-            print(f"[DEBUG] LLM intent output type: {type(output)}", flush=True)
             if isinstance(output, dict):
-                print(f"[DEBUG] LLM intent keys: {list(output.keys())}", flush=True)
-                print(f"[DEBUG] analysis_goals: {output.get('analysis_goals')}", flush=True)
-                print(f"[DEBUG] research_objective: {output.get('research_objective', '')[:80]}", flush=True)
                 return output
         except Exception as exc:
             raise RuntimeError(f"LLM scientific intent parsing failed: {exc}") from exc
