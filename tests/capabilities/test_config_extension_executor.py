@@ -11,6 +11,25 @@ from fluid_scientist.capabilities import (
     UnknownCapabilityOrchestrator,
 )
 from fluid_scientist.capabilities.config_extension import ConfigExtensionExecutor
+from fluid_scientist.validation.openfoam import (
+    OpenFOAMValidationReport,
+    OpenFOAMValidationRequest,
+)
+
+
+class PassingOpenFOAMRunner:
+    def validate(self, request: OpenFOAMValidationRequest) -> OpenFOAMValidationReport:
+        return OpenFOAMValidationReport(
+            runner="remote",
+            passed=True,
+            profile_id="ws-ready",
+            openfoam_version="13",
+            artifact_hash="sha256:case",
+            commands=request.commands,
+            exit_codes=[0 for _ in request.commands],
+            expected_outputs=request.expected_outputs,
+            actual_outputs=request.expected_outputs,
+        )
 
 
 def _config_extension_record(tmp_path):
@@ -70,3 +89,18 @@ def test_config_extension_does_not_register_or_verify_without_openfoam(tmp_path)
         assert result.record.status == "FAILED"
         assert not result.verification_artifact
         assert "openfoam_runtime" in result.record.error
+
+
+def test_config_extension_uses_openfoam_validation_runner(tmp_path) -> None:
+    record = _config_extension_record(tmp_path)
+
+    result = ConfigExtensionExecutor().execute(
+        record,
+        run_openfoam=True,
+        validation_runner=PassingOpenFOAMRunner(),
+    )
+
+    assert result.record.status == "OPENFOAM_TESTED"
+    assert result.verification_artifact.startswith("sha256:")
+    assert result.validation_report["openfoam_runner"]["passed"] is True
+    assert "openfoam_runtime" not in result.record.error

@@ -14,6 +14,11 @@ from fluid_scientist.case_generation.validator import (
     CompileReadinessReport,
     CompileReadinessValidator,
 )
+from fluid_scientist.validation.openfoam import (
+    OpenFOAMValidationRequest,
+    OpenFOAMValidationRunner,
+    write_validation_report,
+)
 
 
 class ConfigExtensionExecution(BaseModel):
@@ -37,6 +42,7 @@ class ConfigExtensionExecutor:
         record: ExtensionRunRecord,
         *,
         run_openfoam: bool = True,
+        validation_runner: OpenFOAMValidationRunner | None = None,
     ) -> ConfigExtensionExecution:
         if record.spec.extension_kind != "CONFIG_EXTENSION":
             failed = record.model_copy(update={
@@ -58,7 +64,7 @@ class ConfigExtensionExecutor:
             case_dir,
             case_dict=case_dict,
             design={"resolved_values": {"Re": 100.0, "nu": 1e-6, "U_ref": 1.0}},
-            run_openfoam=run_openfoam,
+            run_openfoam=run_openfoam and validation_runner is None,
         )
         static_errors = [
             check for check in report.checks
@@ -96,6 +102,63 @@ class ConfigExtensionExecutor:
                 case_dir=str(case_dir),
                 generated_files=generated,
                 validation_report=report.model_dump(),
+            )
+
+        if validation_runner is not None:
+            openfoam_report = validation_runner.validate(
+                OpenFOAMValidationRequest(
+                    case_dir=str(case_dir),
+                    commands=["blockMesh", "checkMesh", "solver"],
+                    solver="icoFoam",
+                    expected_outputs=["postProcessing"],
+                    fixture_id=record.extension_id,
+                    generated_config_hash=_hash_generated_files(case_dir, generated),
+                )
+            )
+            validation_report = {
+                **report.model_dump(),
+                "openfoam_runner": openfoam_report.model_dump(),
+            }
+            if not openfoam_report.passed:
+                failed = generated_record.model_copy(update={
+                    "status": "FAILED",
+                    "error": (
+                        f"{openfoam_report.error_code}: "
+                        f"{openfoam_report.error_message}"
+                    ).strip(),
+                    "logs": [
+                        *generated_record.logs,
+                        "OpenFOAM runner did not validate the minimal case.",
+                    ],
+                })
+                return ConfigExtensionExecution(
+                    record=failed,
+                    case_dir=str(case_dir),
+                    generated_files=generated,
+                    validation_report=validation_report,
+                )
+
+            artifact_path = workspace / "verification_artifact.json"
+            artifact_hash = write_validation_report(artifact_path, openfoam_report)
+            verified_record = generated_record.model_copy(update={
+                "status": "OPENFOAM_TESTED",
+                "logs": [
+                    *generated_record.logs,
+                    "OpenFOAM runner validated the minimal case.",
+                ],
+                "spec": generated_record.spec.model_copy(update={
+                    "generated_artifacts": [
+                        *generated_record.spec.generated_artifacts,
+                        str(artifact_path),
+                    ],
+                }),
+            })
+            return ConfigExtensionExecution(
+                record=verified_record,
+                case_dir=str(case_dir),
+                generated_files=generated,
+                validation_report=validation_report,
+                verification_artifact=artifact_hash,
             )
 
         if not report.compile_ready:
@@ -329,6 +392,16 @@ def _write_verification_artifact(
     artifact_path = workspace / "verification_artifact.json"
     artifact_path.write_text(payload, encoding="utf-8")
     return f"sha256:{digest}"
+
+
+def _hash_generated_files(case_dir: Path, generated: list[str]) -> str:
+    h = hashlib.sha256()
+    for rel in generated:
+        path = case_dir / rel
+        if path.exists():
+            h.update(rel.encode("utf-8"))
+            h.update(path.read_bytes())
+    return f"sha256:{h.hexdigest()}"
 
 
 __all__ = [
