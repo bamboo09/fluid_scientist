@@ -2088,6 +2088,65 @@ body:has(.workflow-stepper:not([hidden])) .workbench-shell {
   overflow-wrap: anywhere;
 }
 
+/* Connect form */
+.ws-connect-form {
+  margin: 6px 0;
+  padding: 10px;
+  background: var(--paper);
+  border-radius: 6px;
+  border: 1px solid var(--line);
+}
+
+.ws-form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 8px;
+}
+
+.ws-form-label {
+  font-size: 10px;
+  color: var(--faint);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.ws-input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  font-size: 12px;
+  background: var(--white, #fff);
+  color: var(--text);
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.ws-input:focus {
+  border-color: var(--accent, #4a90d9);
+  box-shadow: 0 0 0 2px rgba(74, 144, 217, 0.12);
+}
+
+.ws-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ws-connect-progress {
+  font-size: 11px;
+  color: var(--accent, #4a90d9);
+  animation: ws-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes ws-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 .ws-empty-hint {
   margin: 8px 0;
   padding: 10px;
