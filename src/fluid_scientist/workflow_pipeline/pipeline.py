@@ -488,6 +488,17 @@ class V5WorkflowPipeline:
         intent.setdefault("temporal_mode", "transient")
         intent.setdefault("analysis_goals", [])
 
+        # If analysis_goals are empty or sparse, use LLM to infer observables
+        if not intent.get("analysis_goals") or len(intent.get("analysis_goals", [])) < 2:
+            from fluid_scientist.llm.case_reviewer import infer_observables_with_llm
+            llm_goals = infer_observables_with_llm(
+                self._llm,
+                intent.get("research_objective", text),
+                session_id=getattr(state, "session_id", ""),
+            )
+            if llm_goals:
+                intent["analysis_goals"] = llm_goals
+
         state.scientific_intent = intent
 
     def _extract_intent_with_llm(self, text: str, session_id: str = "") -> dict[str, Any]:

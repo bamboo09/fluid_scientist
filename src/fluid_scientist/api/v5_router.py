@@ -227,6 +227,11 @@ def _require_llm_client() -> LLMClient:
     return _llm_client
 
 
+def _get_llm_client() -> LLMClient | None:
+    """Get the LLM client or None if not configured."""
+    return _llm_client
+
+
 def _reset_repo_for_testing() -> None:
     """Clear all V5 entities for test isolation.
 
@@ -1685,8 +1690,47 @@ def _write_case_to_disk(compiled: dict[str, Any], case_dir: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Capabilities endpoint
+# Case Review endpoint (LLM-powered pre-submission check)
 # ---------------------------------------------------------------------------
+
+@router.post("/case-plans/{case_plan_id}/review")
+def review_case_plan(case_plan_id: str) -> dict[str, Any]:
+    """Review a compiled case using LLM to catch OpenFOAM issues before submission.
+
+    This endpoint reads all generated OpenFOAM files from the compiled case
+    directory and sends them to an LLM for review. The LLM checks for:
+    - Syntax errors in OpenFOAM dictionary format
+    - Security policy violations (libs, $, codeStream, etc.)
+    - Missing required parameters
+    - Invalid configurations that would cause runtime failures
+    """
+    case_plan = _case_plan_store.get(case_plan_id)
+    if case_plan is None:
+        raise HTTPException(status_code=404, detail="Case plan not found")
+
+    # Find the compiled case directory
+    case_dir = os.path.join(
+        tempfile.gettempdir(), f"fluid_case_{case_plan_id}"
+    )
+    if not os.path.exists(case_dir):
+        raise HTTPException(
+            status_code=409,
+            detail="Case has not been compiled yet. Compile first via "
+            "POST /api/v5/case-plans/{case_plan_id}/compile",
+        )
+
+    from fluid_scientist.llm.case_reviewer import review_case_with_llm
+
+    llm = _get_llm_client()
+    result = review_case_with_llm(llm, case_dir, session_id="")
+
+    return {
+        "case_plan_id": case_plan_id,
+        "case_dir": case_dir,
+        "has_issues": result.get("has_issues", False),
+        "issues": result.get("issues", []),
+        "summary": result.get("summary", ""),
+    }
 
 
 @router.get("/capabilities")
