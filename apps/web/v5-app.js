@@ -76,9 +76,12 @@ const API = {
   configureModel: (cfg) => api("/api/v5/model-config", { method: "POST", body: JSON.stringify(cfg) }),
   // ---- Workstation discovery & connection (V5) ----
   // These endpoints drive the left-panel workstation configuration UI.
-  // No private keys / OpenFOAM paths / remote dirs / passwords are sent from
+  // No private keys / OpenFOAM paths / remote dirs are sent from
   // the client; discovery and probing happen server-side.
+  // The /connect endpoint receives a password for one-time key deployment;
+  // the password is never persisted or logged by the backend.
   discoverWorkstations: () => api("/api/v5/workstations/discover"),
+  connectWorkstation: (cfg) => api("/api/v5/workstations/connect", { method: "POST", body: JSON.stringify(cfg) }),
   probeWorkstation: (candidateId) => api(`/api/v5/workstations/${candidateId}/probe`, { method: "POST" }),
   confirmHostKey: (candidateId) => api(`/api/v5/workstations/${candidateId}/confirm-host-key`, { method: "POST" }),
   saveWorkstation: (candidateId, displayName) => api(`/api/v5/workstations/${candidateId}/save`, { method: "POST", body: JSON.stringify({ display_name: displayName }) }),
@@ -1012,6 +1015,8 @@ const wsState = {
   probing: new Set(),
   error: null,
   expanded: false,
+  connecting: false,
+  showConnectForm: false,
 };
 
 function wsStatusKey(status) {
@@ -1097,8 +1102,70 @@ function renderWorkstationPanel() {
       disabled: wsState.probing.has("__discover__"),
       onclick: () => handleDiscover(),
     }),
+    el("button", {
+      type: "button",
+      class: "ws-btn",
+      text: wsState.showConnectForm ? "取消连接" : "添加工作站",
+      onclick: () => { wsState.showConnectForm = !wsState.showConnectForm; wsState.error = null; renderWorkstationPanel(); },
+    }),
     el("span", { class: "ws-config-count", text: `${wsState.candidates.length} 个候选 · ${wsState.profiles.length} 个已保存` }),
   ]));
+
+  // Connect form
+  if (wsState.showConnectForm) {
+    const form = el("div", { class: "ws-connect-form" });
+
+    const hostInput = el("input", {
+      type: "text", class: "ws-input", placeholder: "主机 IP 或域名",
+      id: "ws-connect-host",
+    });
+    const userInput = el("input", {
+      type: "text", class: "ws-input", placeholder: "SSH 用户名",
+      id: "ws-connect-user",
+    });
+    const passInput = el("input", {
+      type: "password", class: "ws-input", placeholder: "SSH 密码",
+      id: "ws-connect-pass",
+    });
+    const nameInput = el("input", {
+      type: "text", class: "ws-input", placeholder: "显示名称（可选）",
+      id: "ws-connect-name",
+    });
+
+    form.appendChild(el("div", { class: "ws-form-row" }, [
+      el("label", { class: "ws-form-label", text: "主机" }),
+      hostInput,
+    ]));
+    form.appendChild(el("div", { class: "ws-form-row" }, [
+      el("label", { class: "ws-form-label", text: "用户名" }),
+      userInput,
+    ]));
+    form.appendChild(el("div", { class: "ws-form-row" }, [
+      el("label", { class: "ws-form-label", text: "密码" }),
+      passInput,
+    ]));
+    form.appendChild(el("div", { class: "ws-form-row" }, [
+      el("label", { class: "ws-form-label", text: "显示名" }),
+      nameInput,
+    ]));
+
+    const progressEl = wsState.connecting
+      ? el("div", { class: "ws-connect-progress", text: "正在连接并配置…" })
+      : null;
+
+    form.appendChild(el("div", { class: "ws-form-actions" }, [
+      el("button", {
+        type: "button",
+        class: "ws-btn ws-btn-primary",
+        text: wsState.connecting ? "配置中…" : "一键连接",
+        disabled: wsState.connecting,
+        onclick: () => handleConnect(hostInput.value, userInput.value, passInput.value, nameInput.value),
+      }),
+      progressEl,
+    ]));
+
+    body.appendChild(form);
+  }
 
   // Error banner
   if (wsState.error) {
@@ -1250,6 +1317,50 @@ async function handleDiscover() {
     wsState.candidates = [];
   } finally {
     wsState.probing.delete("__discover__");
+    renderWorkstationPanel();
+  }
+}
+
+async function handleConnect(host, username, password, displayName) {
+  if (!host || !username || !password) {
+    wsState.error = "请填写主机、用户名和密码";
+    renderWorkstationPanel();
+    return;
+  }
+  wsState.error = null;
+  wsState.connecting = true;
+  renderWorkstationPanel();
+  try {
+    const resp = await API.connectWorkstation({
+      host: host.trim(),
+      username: username.trim(),
+      password: password,
+      display_name: displayName ? displayName.trim() : null,
+    });
+    wsState.showConnectForm = false;
+    wsState.connecting = false;
+    // Refresh profiles list to include the new workstation.
+    await loadWorkstationProfiles();
+    // Show success summary.
+    if (resp.profile) {
+      const p = resp.profile;
+      const steps = (resp.steps || []).filter(s => s.success).length;
+      const totalSteps = (resp.steps || []).length;
+      const ofStatus = p.openfoam_available ? `OpenFOAM ${p.openfoam_version || ""}`.trim() : "OpenFOAM 未检测到";
+      wsState.error = null;
+      addMessage("system", `工作站「${p.display_name}」连接成功！${ofStatus}，${p.cpu_count} 核 CPU，${Math.round((p.memory_bytes || 0) / 1073741824)} GB 内存。完成 ${steps}/${totalSteps} 步配置。`);
+    }
+  } catch (e) {
+    wsState.connecting = false;
+    let errMsg = e.message;
+    try {
+      const detail = JSON.parse(e.message);
+      if (detail.error_message) errMsg = detail.error_message;
+    } catch (_) {}
+    wsState.error = `连接失败: ${errMsg}`;
+    renderWorkstationPanel();
+  } finally {
+    wsState.connecting = false;
     renderWorkstationPanel();
   }
 }

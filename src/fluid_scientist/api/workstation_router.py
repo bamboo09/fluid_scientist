@@ -1,18 +1,21 @@
 """FastAPI router for workstation discovery, probing, and profile management.
 
 Exposes REST endpoints under ``/api/v5/workstations`` that wire together the
-workstation discovery, connection-probe, and profile-persistence services.
+workstation discovery, connection-probe, profile-persistence, and one-click
+setup services.
 
-No private keys, passwords, or identity-file paths are ever collected or
-returned by any endpoint.  All SSH operations rely on the system SSH
-configuration and ``ssh-agent``.
+No private keys, passwords, or identity-file paths are ever persisted.
+Passwords are received only by the ``/connect`` endpoint, used in-memory
+for key deployment, and immediately discarded.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException, status
+from pydantic import BaseModel, Field
 
 from fluid_scientist.workstations.connection import WorkstationConnectionService
 from fluid_scientist.workstations.discovery import WorkstationDiscoveryService
@@ -21,6 +24,7 @@ from fluid_scientist.workstations.models import (
     WorkstationErrorCode,
 )
 from fluid_scientist.workstations.profile_store import WorkstationProfileStore
+from fluid_scientist.workstations.setup import WorkstationSetupService
 from fluid_scientist.workstations.ssh_runner import SSHCommandRunner
 
 router = APIRouter(prefix="/api/v5/workstations", tags=["workstations"])
@@ -33,8 +37,29 @@ _runner = SSHCommandRunner()
 _store = WorkstationProfileStore()
 _discovery = WorkstationDiscoveryService(runner=_runner, profile_store=_store)
 _connection = WorkstationConnectionService(runner=_runner, store=_store)
+_setup = WorkstationSetupService(runner=_runner, store=_store, connection=_connection)
 
 _SSH_CONFIG_PATH = Path.home() / ".ssh" / "config"
+
+# ---------------------------------------------------------------------------
+# Request models
+# ---------------------------------------------------------------------------
+
+
+class ConnectRequest(BaseModel):
+    """Request body for ``POST /api/v5/workstations/connect``.
+
+    The password is used only in-memory for the initial password-based
+    SSH connection and public-key deployment.  It is never logged,
+    persisted, or returned in any response.
+    """
+
+    host: str = Field(..., description="Remote host IP or hostname")
+    username: str = Field(..., description="SSH username on the remote host")
+    password: str = Field(..., description="SSH password (used once, never stored)")
+    port: int = Field(default=22, ge=1, le=65535, description="SSH port")
+    display_name: str | None = Field(default=None, description="Optional display name")
+
 
 # ---------------------------------------------------------------------------
 # Error-code → HTTP-status mapping
@@ -61,6 +86,14 @@ _ERROR_STATUS_MAP: dict[str, int] = {
     WorkstationErrorCode.NO_USABLE_SYSTEM_SSH_IDENTITY.value: (
         status.HTTP_401_UNAUTHORIZED
     ),
+    "INVALID_HOST": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "INVALID_USERNAME": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "PASSWORD_REQUIRED": status.HTTP_422_UNPROCESSABLE_ENTITY,
+    "PARAMIKO_NOT_INSTALLED": status.HTTP_503_SERVICE_UNAVAILABLE,
+    "KEY_GENERATION_FAILED": status.HTTP_500_INTERNAL_SERVER_ERROR,
+    "KEY_DEPLOYMENT_FAILED": status.HTTP_502_BAD_GATEWAY,
+    "CONFIG_UPDATE_FAILED": status.HTTP_500_INTERNAL_SERVER_ERROR,
+    "PROFILE_SAVE_FAILED": status.HTTP_500_INTERNAL_SERVER_ERROR,
 }
 
 
@@ -114,6 +147,35 @@ def _find_candidate(candidate_id: str) -> WorkstationCandidate:
 # ---------------------------------------------------------------------------
 # Endpoints — fixed paths first (must precede /{profile_id})
 # ---------------------------------------------------------------------------
+
+
+@router.post("/connect")
+async def connect_workstation(req: ConnectRequest) -> dict[str, Any]:
+    """One-click workstation setup.
+
+    Takes host credentials (IP, username, password) and performs the full
+    automated setup:
+
+    1. Test password-based SSH connectivity.
+    2. Generate SSH key pair if none exists.
+    3. Deploy public key to remote ``authorized_keys``.
+    4. Add host key to local ``known_hosts``.
+    5. Create/update ``~/.ssh/config``.
+    6. Run full environment probe (OpenFOAM, scheduler, resources).
+    7. Save the workstation profile.
+
+    The password is used only in-memory and never persisted or logged.
+    """
+    result = _setup.setup(
+        host=req.host,
+        username=req.username,
+        password=req.password,
+        port=req.port,
+        display_name=req.display_name,
+    )
+    if result.get("error_code"):
+        _raise_for_error(result["error_code"], result.get("error_message"))
+    return result
 
 
 @router.get("/discover")
