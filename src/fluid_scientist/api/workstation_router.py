@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, status
+from fastapi import APIRouter, Body, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from fluid_scientist.workstations.connection import WorkstationConnectionService
@@ -150,7 +150,7 @@ def _find_candidate(candidate_id: str) -> WorkstationCandidate:
 
 
 @router.post("/connect")
-async def connect_workstation(req: ConnectRequest) -> dict[str, Any]:
+async def connect_workstation(req: ConnectRequest, request: Request) -> dict[str, Any]:
     """One-click workstation setup.
 
     Takes host credentials (IP, username, password) and performs the full
@@ -163,6 +163,8 @@ async def connect_workstation(req: ConnectRequest) -> dict[str, Any]:
     5. Create/update ``~/.ssh/config``.
     6. Run full environment probe (OpenFOAM, scheduler, resources).
     7. Save the workstation profile.
+    8. Rebuild execution targets so the new workstation appears in
+       ``/api/execution-targets`` immediately.
 
     The password is used only in-memory and never persisted or logged.
     """
@@ -175,6 +177,11 @@ async def connect_workstation(req: ConnectRequest) -> dict[str, Any]:
     )
     if result.get("error_code"):
         _raise_for_error(result["error_code"], result.get("error_message"))
+    # Rebuild execution targets so the new workstation is immediately
+    # visible in /api/execution-targets and the target registry.
+    rebuild = getattr(request.app.state, "rebuild_targets", None)
+    if callable(rebuild):
+        rebuild()
     return result
 
 
@@ -372,7 +379,7 @@ async def set_default(profile_id: str) -> dict:
 
 
 @router.delete("/{profile_id}")
-async def delete_profile(profile_id: str) -> dict:
+async def delete_profile(profile_id: str, request: Request) -> dict:
     """Delete a local workstation profile.
 
     Only the local database row is removed; ``~/.ssh/config``,
@@ -388,4 +395,9 @@ async def delete_profile(profile_id: str) -> dict:
             },
         )
     _store.delete(profile_id)
+    # Rebuild execution targets so the deleted workstation is removed
+    # from /api/execution-targets and the target registry.
+    rebuild = getattr(request.app.state, "rebuild_targets", None)
+    if callable(rebuild):
+        rebuild()
     return {"profile_id": profile_id, "deleted": True}
