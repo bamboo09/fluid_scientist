@@ -519,6 +519,15 @@ def create_app(
     configured_targets = execution_targets
     if configured_targets is None:
         configured_targets = build_execution_targets(runtime_settings, transport_factory)
+    # Merge in V5 workstation profiles (from SQLite store) so that
+    # workstations saved via /api/v5/workstations/connect appear in
+    # the execution-target dropdown and target registry.
+    v5_targets = build_v5_execution_targets(transport_factory)
+    # Deduplicate by target_id (static targets take precedence).
+    existing_ids = {t.target_id for t in configured_targets}
+    configured_targets = configured_targets + tuple(
+        t for t in v5_targets if t.target_id not in existing_ids
+    )
     coupled_plan_args = (plan_designer, plan_provider_name, plan_model_name)
     if model_configuration is not None and (
         experiment_designer is not None
@@ -599,6 +608,26 @@ def create_app(
     target_registry = {target.target_id: target for target in configured_targets}
     capability_cache = target_capability_cache or TargetCapabilityCache()
     application.state.target_capability_cache = capability_cache
+
+    def _rebuild_targets() -> None:
+        """Rebuild execution targets from settings + V5 profiles.
+
+        Called after a V5 workstation profile is saved or deleted so
+        the new configuration takes effect immediately.
+        """
+        nonlocal configured_targets
+        static_targets = build_execution_targets(runtime_settings)
+        v5_targets = build_v5_execution_targets()
+        existing_ids = {t.target_id for t in static_targets}
+        configured_targets = static_targets + tuple(
+            t for t in v5_targets if t.target_id not in existing_ids
+        )
+        application.state.execution_targets = configured_targets
+        target_registry.clear()
+        for t in configured_targets:
+            target_registry[t.target_id] = t
+
+    application.state.rebuild_targets = _rebuild_targets
     research_session_store = SessionStore()
     from fluid_scientist.code_extension.registry import ExtensionRegistry
     from fluid_scientist.measurement.planner import MetricPlanner
@@ -1810,7 +1839,12 @@ def create_app(
         # Reload settings and rebuild execution targets
         nonlocal runtime_settings, configured_targets
         runtime_settings = AppSettings()
-        configured_targets = build_execution_targets(runtime_settings)
+        static_targets = build_execution_targets(runtime_settings)
+        v5_targets = build_v5_execution_targets()
+        existing_ids = {t.target_id for t in static_targets}
+        configured_targets = static_targets + tuple(
+            t for t in v5_targets if t.target_id not in existing_ids
+        )
         application.state.execution_targets = configured_targets
 
         # Update target_registry
@@ -3941,6 +3975,71 @@ def build_execution_targets(
             candidates=candidates,
         ),
     )
+
+
+def build_v5_execution_targets(
+    transport_factory: Callable[[NodeSettings], SSHTransport] = SSHTransport,
+) -> tuple[ExecutionTargetAdapter, ...]:
+    """Build execution targets from V5 WorkstationProfileStore.
+
+    Reads saved workstation profiles from the SQLite store and creates
+    :class:`WorkstationOpenFOAMTarget` objects for each profile that is
+    not in ``UNAVAILABLE`` state.
+
+    Uses the default SSH key (``~/.ssh/fluid_scientist_ed25519``) and
+    ``~/.ssh/known_hosts`` for transport, matching the paths configured
+    by :class:`WorkstationSetupService`.
+    """
+    from fluid_scientist.workstations.profile_store import WorkstationProfileStore
+
+    try:
+        store = WorkstationProfileStore()
+        profiles = store.list_all()
+    except Exception:
+        return ()
+
+    ssh_dir = Path.home() / ".ssh"
+    identity_file = str(ssh_dir / "fluid_scientist_ed25519")
+    known_hosts_file = str(ssh_dir / "known_hosts")
+
+    # Skip if known_hosts doesn't exist (SSHTransport requires it).
+    if not Path(known_hosts_file).is_file():
+        return ()
+
+    targets: list[ExecutionTargetAdapter] = []
+    for profile in profiles:
+        # Skip unavailable profiles.
+        platform_status = getattr(profile, "platform_status", None)
+        if platform_status and str(platform_status).upper() == "UNAVAILABLE":
+            continue
+
+        host = profile.resolved_host or profile.host_alias
+        username = profile.detected_username
+        port = profile.detected_port or 22
+        if not host or not username:
+            continue
+
+        try:
+            transport = transport_factory(
+                NodeSettings(
+                    host=host,
+                    username=username,
+                    port=port,
+                    identity_file=identity_file,
+                    known_hosts_file=known_hosts_file,
+                )
+            )
+        except Exception:
+            continue
+
+        target_id = f"v5-{profile.profile_id}"
+        target = WorkstationOpenFOAMTarget(
+            target_id=target_id,
+            candidates=((profile.host_alias, transport),),
+        )
+        targets.append(target)
+
+    return tuple(targets)
 
 
 def _operation_view(record: OperationRecord) -> OperationView:

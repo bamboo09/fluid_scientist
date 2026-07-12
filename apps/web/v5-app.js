@@ -973,10 +973,20 @@ async function loadTargets() {
       return;
     }
     for (const c of caps) {
-      sel.appendChild(el("option", { value: c.target_id, text: `${c.target_id} (${c.available ? "可用" : "不可用"})` }));
+      // Build a user-friendly label: show target_id and resource info.
+      let label = c.target_id;
+      if (c.foam_version) label += ` · OpenFOAM ${c.foam_version}`;
+      if (c.cpu_count) label += ` · ${c.cpu_count}核`;
+      if (c.memory_gb) label += ` · ${Math.round(c.memory_gb)}GB`;
+      label += c.available ? " (可用)" : " (不可用)";
+      sel.appendChild(el("option", { value: c.target_id, text: label }));
     }
     const avail = caps.find(c => c.available);
-    if (avail) byId("header-target-status").textContent = avail.target_id;
+    if (avail) {
+      byId("header-target-status").textContent = avail.target_id;
+    } else {
+      byId("header-target-status").textContent = `${caps.length}个平台(待验证)`;
+    }
   } catch {
     byId("header-target-status").textContent = "检查失败";
   }
@@ -1341,6 +1351,8 @@ async function handleConnect(host, username, password, displayName) {
     wsState.connecting = false;
     // Refresh profiles list to include the new workstation.
     await loadWorkstationProfiles();
+    // Refresh execution-target dropdown so the new workstation appears.
+    await loadTargets();
     // Show success summary.
     if (resp.profile) {
       const p = resp.profile;
