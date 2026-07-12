@@ -1589,9 +1589,14 @@ class V5WorkflowPipeline:
         for goal in state.scientific_intent.get("analysis_goals", []):
             if isinstance(goal, dict):
                 target = goal.get("target_quantity", "")
-                if target and not any(o.get("name") == target for o in outputs):
-                    outputs.append({"name": target, "type": "derived", "source": "SYSTEM_DERIVED"})
-            elif isinstance(goal, str) and goal:
+                # Use phenomenon as the observable name (it's always English)
+                phenomenon = goal.get("phenomenon", "")
+                obs_name = phenomenon if phenomenon else target
+                # Skip if name is empty or contains non-ASCII chars (would
+                # produce invalid OpenFOAM dictionary keywords downstream)
+                if obs_name and obs_name.isascii() and not any(o.get("name") == obs_name for o in outputs):
+                    outputs.append({"name": obs_name, "type": "derived", "source": "SYSTEM_DERIVED"})
+            elif isinstance(goal, str) and goal and goal.isascii():
                 if not any(o.get("name") == goal for o in outputs):
                     outputs.append({"name": goal, "type": "derived", "source": "SYSTEM_DERIVED"})
         # Default: velocity and pressure fields

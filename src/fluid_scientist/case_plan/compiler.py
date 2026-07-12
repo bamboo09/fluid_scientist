@@ -231,10 +231,12 @@ class NativeCaseCompiler:
             result["outputInterval"] = write_interval
 
         # Merge type-specific configuration.
-        # Skip empty probeLocations (causes OpenFOAM parse errors).
+        # Skip empty probeLocations and empty dicts (causes OpenFOAM parse errors).
         for key, value in fo.configuration.items():
             if key == "probeLocations" and not value:
                 continue  # Skip empty probe locations
+            if isinstance(value, (dict, list)) and not value:
+                continue  # Skip empty dicts and lists
             result.setdefault(key, value)
 
         return result
