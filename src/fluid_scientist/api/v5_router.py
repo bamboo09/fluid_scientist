@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import os
 import tempfile
+import traceback
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -112,6 +114,8 @@ _design_synthesizer = ExperimentDesignSynthesizer()
 _design_closure_engine = DesignClosureEngine()
 _goal_metric_compiler = GoalMetricCompiler()
 _boundary_metric_compiler = BoundaryVerificationCompiler()
+
+_logger = logging.getLogger(__name__)
 
 _PROVIDER_BASE_URLS = {
     "openai": None,
@@ -677,6 +681,7 @@ def _classify_with_llm(
     except HTTPException:
         raise
     except Exception as exc:
+        _logger.error("input_routing failed: %s\n%s", exc, traceback.format_exc())
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     intent = str(output.get("intent", "UNRESOLVED")).upper()
@@ -780,6 +785,7 @@ def send_message(
         except HTTPException:
             raise
         except Exception as exc:
+            _logger.error("batch_decomposition failed: %s\n%s", exc, traceback.format_exc())
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         if isinstance(llm_output, dict):
             studies_val = llm_output.get("studies")
@@ -789,6 +795,11 @@ def send_message(
         if llm_studies_output:
             existing_titles = {s.title.strip().lower() for s in batch.studies}
             for llm_study in llm_studies_output:
+                # Coerce string items to dicts (LLM may return bare strings).
+                if isinstance(llm_study, str):
+                    llm_study = {"title": llm_study, "research_objective": llm_study}
+                if not isinstance(llm_study, dict):
+                    continue
                 title = (llm_study.get("title") or "").strip()
                 if title and title.lower() not in existing_titles:
                     batch.studies.append(StudyIntent(
@@ -846,6 +857,7 @@ def send_message(
         except HTTPException:
             raise
         except Exception as exc:
+            _logger.error("single_study_decomposition failed: %s\n%s", exc, traceback.format_exc())
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         response_actions.append({
