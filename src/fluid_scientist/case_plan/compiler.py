@@ -142,12 +142,18 @@ class NativeCaseCompiler:
     # ------------------------------------------------------------------
 
     def _generate_control_dict(self, case_plan: CasePlan) -> dict[str, Any]:
-        """Generate the controlDict dictionary."""
+        """Generate the controlDict dictionary.
+
+        Uses 'solver incompressibleFluid;' instead of 'application pimpleFoam;'
+        to comply with the workstation's security policy which requires exactly
+        one literal incompressibleFluid solver entry. The workstation runs cases
+        via 'foamRun -solver incompressibleFluid'.
+        """
         numerics = case_plan.numerics_plan
         measurement = case_plan.measurement_plan
 
         control_dict: dict[str, Any] = {
-            "application": case_plan.solver,
+            "solver": "incompressibleFluid",
             "startFrom": "latestTime",
             "startTime": 0,
             "stopAt": "endTime",
