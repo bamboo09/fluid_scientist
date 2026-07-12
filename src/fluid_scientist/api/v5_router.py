@@ -405,6 +405,8 @@ def _decompose_message(message: str) -> BatchStudyPlan:
 
 def _merge_llm_study(study: StudyIntent, llm_study: dict[str, Any]) -> StudyIntent:
     """Merge model analysis into deterministic extraction without overwriting facts."""
+    from fluid_scientist.study_decomposition.models import ObservableSpec
+
     updates: dict[str, Any] = {}
     for field in ("study_type", "research_objective"):
         value = llm_study.get(field)
@@ -430,6 +432,24 @@ def _merge_llm_study(study: StudyIntent, llm_study: dict[str, Any]) -> StudyInte
             elif field in ("geometry", "physical_models") and not isinstance(value, dict):
                 # Coerce non-dict scalars into a minimal dict.
                 value = {"type": str(value), "source": "SYSTEM_DERIVED"}
+
+            # Convert observable dicts to ObservableSpec objects.
+            if field == "observables" and isinstance(value, list):
+                converted = []
+                for item in value:
+                    if isinstance(item, dict):
+                        try:
+                            converted.append(ObservableSpec(**item))
+                        except Exception:
+                            converted.append(ObservableSpec(
+                                observable_id=str(item.get("observable_id", item.get("id", "unknown"))),
+                                display_name=str(item.get("display_name", item.get("name", "unknown"))),
+                                category=str(item.get("category", "custom")),
+                            ))
+                    elif hasattr(item, "observable_id"):
+                        converted.append(item)
+                value = converted
+
             updates[field] = value
     missing = llm_study.get("missing_information") or llm_study.get("missing_info")
     if isinstance(missing, list):
