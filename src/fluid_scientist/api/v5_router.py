@@ -655,6 +655,41 @@ def _answer_draft_question(session: DraftSession, user_message: str) -> str:
     )
 
 
+def _normalize_clarification_questions(items: list[Any]) -> list[dict[str, Any]]:
+    """Return clarification questions as dictionaries for API/UI consumers."""
+
+    questions: list[dict[str, Any]] = []
+    for item in items:
+        if isinstance(item, dict):
+            question = dict(item)
+            suggested = (
+                question.get("suggested_question")
+                or question.get("question")
+                or question.get("message")
+                or ""
+            )
+            question["suggested_question"] = str(suggested)
+            questions.append(question)
+        elif item is not None:
+            questions.append({
+                "field": "user_intent",
+                "issue": str(item),
+                "suggested_question": str(item),
+            })
+    return questions
+
+
+def _first_clarification_message(questions: list[dict[str, Any]]) -> str:
+    if not questions:
+        return "Please clarify the specific part you want to change."
+    return str(
+        questions[0].get("suggested_question")
+        or questions[0].get("question")
+        or questions[0].get("message")
+        or "Please clarify the specific part you want to change."
+    )
+
+
 @router.post("/sessions/{session_id}/messages")
 def send_message(
     session_id: str, request: UserMessageRequest
@@ -797,6 +832,9 @@ def send_message(
                 ),
             )
             if proposal.clarification_required and not proposal.changes:
+                clarification_questions = _normalize_clarification_questions(
+                    proposal.clarification_required
+                )
                 proposal.status = "cancelled"
                 _repo.save_proposal(proposal)
                 refreshed = _session_store.get_session(session_id)
@@ -806,10 +844,8 @@ def send_message(
                     _session_store.update_session(refreshed)
                 response_actions.append({
                     "action": "clarification_required",
-                    "questions": proposal.clarification_required,
-                    "message": proposal.clarification_required[0].get(
-                        "suggested_question", "请补充需要修改的具体位置。"
-                    ),
+                    "questions": clarification_questions,
+                    "message": _first_clarification_message(clarification_questions),
                 })
             else:
                 response_actions.append({

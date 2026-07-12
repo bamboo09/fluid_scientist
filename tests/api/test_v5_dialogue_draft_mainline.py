@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 import tempfile
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -135,6 +136,35 @@ def test_ambiguous_free_slip_supplement_asks_boundary_without_new_study(client: 
     assert session.current_draft_id == draft.draft_id
     assert session.selected_study_id is None
     assert v5_router._repo.get_draft(draft.draft_id).version == 1
+
+
+def test_string_clarification_question_does_not_502(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session_id = _session(client)
+    _draft(session_id)
+    monkeypatch.setattr(
+        v5_router,
+        "request_draft_change",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            proposal_id="proposal_string_clarification",
+            status="pending",
+            changes=[],
+            clarification_required=["Please specify which boundary to change."],
+        ),
+    )
+    monkeypatch.setattr(v5_router._repo, "save_proposal", lambda _proposal: None)
+
+    response = client.post(
+        f"/api/v5/sessions/{session_id}/messages",
+        json={"session_id": session_id, "message": "change the boundary condition"},
+    )
+
+    assert response.status_code == 200, response.text
+    action = response.json()["actions"][0]
+    assert action["action"] == "clarification_required"
+    assert action["message"] == "Please specify which boundary to change."
+    assert action["questions"][0]["suggested_question"] == action["message"]
 
 
 def test_real_chinese_free_slip_page_flow_asks_boundary_without_new_study(client: TestClient) -> None:
