@@ -266,6 +266,15 @@ function renderMessageExtra(msg) {
       cp.can_compile ? el("span", { style: "color:#155724;font-size:11px;", text: "✓ 可编译" }) : el("span", { style: "color:#721c24;font-size:11px;", text: "⚠ 有阻塞: " + (cp.blocking_reasons || []).join(", ") }),
     ]));
   }
+  // Compiled case in conversation
+  if (msg.compiledCase) {
+    const cc = msg.compiledCase;
+    extras.push(el("div", { style: "margin-top:8px;padding:10px;border:1px solid #155724;border-radius:6px;background:#d4edda;" }, [
+      el("strong", { text: `算例编译完成: ${cc.solver || "?"} · ${cc.file_count || 0} 个文件` }),
+      el("br"),
+      cc.file_list ? el("span", { style: "color:#155724;font-size:11px;", text: `文件: ${cc.file_list}` }) : null,
+    ]));
+  }
   // Codex V5 Pipeline result card (one-click compile-ready generation)
   if (msg.pipeline) {
     extras.push(renderPipelineCard(msg.pipeline));
@@ -803,9 +812,9 @@ async function compileCase() {
     const result = await API.compileCasePlan(state.casePlan.case_plan_id);
     state.compiledCase = result;
     const fc = result.file_count || 0;
-    const fileList = result.files?.length ? `\n生成文件: ${result.files.join(", ")}` : "";
+    const fileList = result.files?.length ? result.files.join(", ") : "";
     if (fc > 0) {
-      addMessage("assistant", `算例编译完成。共 ${fc} 个文件。${fileList}`);
+      addMessage("assistant", `算例编译完成: ${state.casePlan.solver} · ${fc} 个文件`, { compiledCase: { ...result, solver: state.casePlan.solver, file_list: fileList } });
     } else {
       addMessage("system", `编译完成但生成了 0 个文件，请检查配置。`);
     }

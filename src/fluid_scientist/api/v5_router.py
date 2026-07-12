@@ -1581,48 +1581,75 @@ def compile_case_plan(case_plan_id: str) -> dict[str, Any]:
 def _format_openfoam_dict(data: Any, indent: int = 0) -> str:
     """Format a Python dict/list/value as an OpenFOAM dictionary string.
 
-    This produces the native OpenFOAM syntax (not JSON) so that the
-    workstation can directly parse the files with OpenFOAM's native parser.
+    Handles special OpenFOAM syntax:
+    - {"uniform": value} -> "uniform value;"
+    - "[0 1 -1 0 0 0 0]" (dimensions string) -> "[0 1 -1 0 0 0 0]"
+    - Lists of vectors -> "(x y z)" format
     """
     pad = "    " * indent
     if isinstance(data, dict):
         lines = []
         for key, val in data.items():
-            if isinstance(val, dict):
-                lines.append(f"{pad}{key}")
-                lines.append(f"{pad}{{")
-                lines.append(_format_openfoam_dict(val, indent + 1))
-                lines.append(f"{pad}}}")
+            # Special case: {"uniform": value} should be "uniform value;"
+            if key == "uniform" and not isinstance(val, dict):
+                if isinstance(val, list):
+                    vec = " ".join(_fmt_num(v) for v in val)
+                    lines.append(f"{pad}uniform ({vec});")
+                else:
+                    lines.append(f"{pad}uniform {_fmt_num(val)};")
+            # Special case: dimensions string like "[0 1 -1 0 0 0 0]"
+            elif key == "dimensions" and isinstance(val, str) and val.startswith("["):
+                lines.append(f"{pad}dimensions {val};")
+            elif isinstance(val, dict):
+                # Check if it's a "uniform" wrapper
+                if "uniform" in val and len(val) == 1:
+                    uv = val["uniform"]
+                    if isinstance(uv, list):
+                        vec = " ".join(_fmt_num(v) for v in uv)
+                        lines.append(f"{pad}{key} uniform ({vec});")
+                    else:
+                        lines.append(f"{pad}{key} uniform {_fmt_num(uv)};")
+                else:
+                    lines.append(f"{pad}{key}")
+                    lines.append(f"{pad}{{")
+                    lines.append(_format_openfoam_dict(val, indent + 1))
+                    lines.append(f"{pad}}}")
             elif isinstance(val, list):
                 # OpenFOAM lists: ( item1 item2 item3 )
-                items = " ".join(str(v) for v in val)
-                lines.append(f"{pad}{key} ({items});")
+                if val and isinstance(val[0], list):
+                    # List of vectors
+                    items = " ".join(f"({' '.join(_fmt_num(v) for v in vec)})" for vec in val)
+                    lines.append(f"{pad}{key}\n{pad}(\n{pad}    {items}\n{pad});")
+                else:
+                    items = " ".join(_fmt_num(v) if not isinstance(v, str) else v for v in val)
+                    lines.append(f"{pad}{key} ({items});")
             else:
-                # Scalar value
                 if isinstance(val, bool):
                     lines.append(f"{pad}{key} {'true' if val else 'false'};")
                 elif isinstance(val, (int, float)):
-                    lines.append(f"{pad}{key} {val};")
+                    lines.append(f"{pad}{key} {_fmt_num(val)};")
                 else:
                     lines.append(f"{pad}{key} {val};")
         return "\n".join(lines)
     elif isinstance(data, list):
-        items = " ".join(str(v) for v in data)
+        items = " ".join(_fmt_num(v) if not isinstance(v, str) else v for v in data)
         return f"({items})"
     else:
         return str(data)
 
 
+def _fmt_num(v: Any) -> str:
+    """Format a number nicely for OpenFOAM output."""
+    if isinstance(v, float):
+        if v == int(v) and abs(v) < 1e15:
+            return f"{v:.1f}"
+        return repr(v)
+    return str(v)
+
+
 def _write_case_to_disk(compiled: dict[str, Any], case_dir: str) -> None:
     """Write the compiled case structure to disk as OpenFOAM native dictionary files."""
     os.makedirs(case_dir, exist_ok=True)
-    # Write an Allrun script for convenience
-    allrun_path = os.path.join(case_dir, "Allrun")
-    with open(allrun_path, "w", encoding="utf-8", newline="\n") as f:
-        f.write("#!/bin/bash\n")
-        f.write("cd \"${0%/*}\" || exit\n")
-        f.write("blockMesh\n")
-        f.write("pimpleFoam\n")
     for section_name, section_content in compiled.items():
         section_dir = os.path.join(case_dir, section_name)
         os.makedirs(section_dir, exist_ok=True)
@@ -1630,7 +1657,19 @@ def _write_case_to_disk(compiled: dict[str, Any], case_dir: str) -> None:
             for filename, content in section_content.items():
                 filepath = os.path.join(section_dir, filename)
                 with open(filepath, "w", encoding="utf-8", newline="\n") as f:
-                    if isinstance(content, (dict, list)):
+                    if isinstance(content, str):
+                        # Already a pre-formatted OpenFOAM string (e.g. blockMeshDict)
+                        f.write("/*--------------------------------*- C++ -*----------------------------------*\\\n")
+                        f.write("| =========                 |                                                 |\n")
+                        f.write("| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |\n")
+                        f.write("|  \\\\    /   O peration     | Version:  v2406                                 |\n")
+                        f.write("|   \\\\  /    A nd           | Web:      www.OpenFOAM.com                      |\n")
+                        f.write("|    \\/     M anipulation   |                                                 |\n")
+                        f.write("\\*---------------------------------------------------------------------------*/\n")
+                        f.write(f"// Generated by Fluid Scientist\n\n")
+                        f.write(content)
+                        f.write("\n")
+                    elif isinstance(content, (dict, list)):
                         f.write("/*--------------------------------*- C++ -*----------------------------------*\\\n")
                         f.write("| =========                 |                                                 |\n")
                         f.write("| \\\\      /  F ield         | OpenFOAM: The Open Source CFD Toolbox           |\n")
