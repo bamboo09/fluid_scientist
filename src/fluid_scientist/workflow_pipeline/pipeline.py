@@ -642,19 +642,33 @@ class V5WorkflowPipeline:
             intent["temporal_mode"] = "steady"
             intent["compressibility"] = "compressible"
 
-        # Analysis goals
+        # Analysis goals — infer from research topic keywords
         goals: list[dict[str, Any]] = []
-        if any(k in lower for k in ("drag", "lift", "force", "阻力", "升力")):
+        if any(k in lower for k in ("drag", "lift", "force", "阻力", "升力", "力系数")):
             goals.append({"phenomenon": "force_coefficients", "target_quantity": "Cd_Cl", "temporal_mode": "statistical", "statistic": "mean+rms+psd"})
-        if any(k in lower for k in ("wake", "尾迹", "vortex", "涡")):
+        if any(k in lower for k in ("wake", "尾迹", "vortex", "涡", "vortical", "q-criterion", "q准则")):
             goals.append({"phenomenon": "wake_vortex", "target_quantity": "wake_structure", "temporal_mode": "statistical", "statistic": "mean+snapshot"})
-        if any(k in lower for k in ("pressure drop", "压降", "flow rate", "流量")):
+        if any(k in lower for k in ("pressure drop", "压降", "flow rate", "流量", "pressure gradient", "压力梯度")):
             goals.append({"phenomenon": "pressure_loss", "target_quantity": "delta_p", "temporal_mode": "time_averaged", "statistic": "mean"})
-        if any(k in lower for k in ("spectrum", "frequency", "频谱", "频率", "strouhal")):
+        if any(k in lower for k in ("spectrum", "frequency", "频谱", "频率", "strouhal", "涡脱落")):
             if not any(g["phenomenon"] == "force_coefficients" for g in goals):
                 goals.append({"phenomenon": "force_coefficients", "target_quantity": "Cd_Cl", "temporal_mode": "statistical", "statistic": "psd"})
+        if any(k in lower for k in ("torque", "力矩", "扭矩")):
+            goals.append({"phenomenon": "torque", "target_quantity": "torque_coefficient", "temporal_mode": "time_averaged", "statistic": "mean+rms"})
+        if any(k in lower for k in ("velocity profile", "速度分布", "速度剖面", "velocity distribution", "流场分布")):
+            goals.append({"phenomenon": "velocity_profile", "target_quantity": "velocity_profile", "temporal_mode": "statistical", "statistic": "mean"})
+        if any(k in lower for k in ("taylor vortex", "泰勒涡", "taylor-couette", "泰勒-库埃特", "couette")):
+            goals.append({"phenomenon": "vortex_identification", "target_quantity": "q_criterion", "temporal_mode": "statistical", "statistic": "mean+snapshot"})
+            goals.append({"phenomenon": "velocity_profile", "target_quantity": "axial_velocity_distribution", "temporal_mode": "statistical", "statistic": "mean"})
+            goals.append({"phenomenon": "torque", "target_quantity": "torque_coefficient", "temporal_mode": "time_averaged", "statistic": "mean+rms"})
+        if any(k in lower for k in ("asymmetr", "不对称", "破裂", "breakdown", "instability", "不稳定")):
+            goals.append({"phenomenon": "vortex_identification", "target_quantity": "q_criterion", "temporal_mode": "transient", "statistic": "snapshot+psd"})
+        if any(k in lower for k in ("heat transfer", "传热", "nusselt", "温度场")):
+            goals.append({"phenomenon": "heat_transfer", "target_quantity": "Nu", "temporal_mode": "time_averaged", "statistic": "mean"})
+        # Default: always include velocity and pressure as baseline
         if not goals:
             goals.append({"phenomenon": "baseline_flow", "target_quantity": "velocity_field", "temporal_mode": "time_averaged", "statistic": "mean"})
+            goals.append({"phenomenon": "vortex_identification", "target_quantity": "q_criterion", "temporal_mode": "statistical", "statistic": "mean+snapshot"})
         intent["analysis_goals"] = goals
         return intent
 
