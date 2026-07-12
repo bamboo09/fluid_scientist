@@ -80,13 +80,16 @@ class AmbiguityDetector:
 
         # 2. Heat flux ambiguity
         has_heat_flux_obs = any(
-            o.category == "heat_flux" or "heat" in o.observable_id
+            (getattr(o, "category", "") == "heat_flux"
+             or (isinstance(o, dict) and o.get("category") == "heat_flux")
+             or "heat" in str(getattr(o, "observable_id", o.get("observable_id", "")) if isinstance(o, dict) else o.observable_id))
             for o in study.observables
         )
         has_heat_flux_bc = any(
             "heat" in str(bc.get("type", "")).lower()
             or "thermal" in str(bc.get("type", "")).lower()
             for bc in study.boundary_conditions
+            if isinstance(bc, dict)
         )
         if has_heat_flux_obs or has_heat_flux_bc:
             items.append(
@@ -238,6 +241,7 @@ class AmbiguityDetector:
             "fully_developed" in str(ic.get("type", "")).lower()
             or "充分发展" in str(ic.get("type", ""))
             for ic in study.initial_conditions
+            if isinstance(ic, dict)
         )
         if has_fully_developed:
             items.append(
@@ -259,6 +263,7 @@ class AmbiguityDetector:
             "advective" in str(bc.get("type", "")).lower()
             or "对流" in str(bc.get("type", ""))
             for bc in study.boundary_conditions
+            if isinstance(bc, dict)
         )
         if has_advective:
             items.append(
