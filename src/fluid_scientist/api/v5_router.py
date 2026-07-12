@@ -949,6 +949,27 @@ def send_message(
             _logger.error("single_study_decomposition failed: %s\n%s", exc, traceback.format_exc())
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
+        # Create and persist a batch so the study can be selected later.
+        from fluid_scientist.study_decomposition.models import BatchStudyPlan
+        batch = BatchStudyPlan(
+            batch_id=f"batch_{uuid.uuid4().hex[:12]}",
+            session_id=session_id,
+            studies=[study],
+        )
+        study.batch_id = batch.batch_id
+        _repo.save_batch(batch)
+
+        # Update session with batch_id.
+        try:
+            session = _state_machine.transition(
+                session, DraftSessionStatus.BATCH_REVIEW
+            )
+            session.batch_id = batch.batch_id
+            _session_store.update_session(session)
+        except TransitionError:
+            session.batch_id = batch.batch_id
+            _session_store.update_session(session)
+
         response_actions.append({
             "action": "study_decomposed",
             "study": study.model_dump(),
