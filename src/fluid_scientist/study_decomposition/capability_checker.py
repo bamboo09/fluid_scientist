@@ -231,16 +231,13 @@ class CapabilityPreChecker:
 
         # --- Determine readiness ---
         has_blocking = any(m["severity"] == "blocking" for m in missing)
-        has_warning = any(m["severity"] == "warning" for m in missing)
-        has_uncertain = len(uncertain) > 0
 
         if has_blocking:
             readiness = "not_compilable_yet"
             can_compile = False
-        elif has_uncertain or has_warning:
-            readiness = "needs_clarification"
-            can_compile = False
         else:
+            # Warnings and uncertainties don't block draft generation —
+            # the system fills in defaults via the pipeline.
             readiness = "draftable"
             can_compile = True
 

@@ -354,7 +354,7 @@ function renderDraftViewer() {
   // Geometry
   const geo = d.geometry || {};
   viewer.appendChild(section("几何配置", Object.keys(geo).length
-    ? Object.entries(geo).map(([k, v]) => fieldRow(k, String(v), "inferred"))
+    ? Object.entries(geo).map(([k, v]) => fieldRow(k, formatValue(v), "inferred"))
     : [fieldRow("几何", "待填充", "missing")]
   ));
 
@@ -389,21 +389,21 @@ function renderDraftViewer() {
   // Initial conditions
   const ics = d.initial_conditions || {};
   viewer.appendChild(section("初始条件", Object.keys(ics).length
-    ? Object.entries(ics).map(([k, v]) => fieldRow(k, String(v), "inferred"))
+    ? Object.entries(ics).map(([k, v]) => fieldRow(k, formatValue(v), "inferred"))
     : [fieldRow("初始条件", "待填充", "missing")]
   ));
 
   // Mesh
   const mesh = d.mesh || {};
   viewer.appendChild(section("网格要求", Object.keys(mesh).length
-    ? Object.entries(mesh).map(([k, v]) => fieldRow(k, String(v), "inferred"))
+    ? Object.entries(mesh).map(([k, v]) => fieldRow(k, formatValue(v), "inferred"))
     : [fieldRow("网格", "待配置", "missing")]
   ));
 
   // Solver
   const solver = d.solver || {};
   viewer.appendChild(section("求解器", Object.keys(solver).length
-    ? Object.entries(solver).map(([k, v]) => fieldRow(k, String(v), "inferred"))
+    ? Object.entries(solver).map(([k, v]) => fieldRow(k, formatValue(v), "inferred"))
     : [fieldRow("求解器", "待选择", "missing")]
   ));
 
@@ -448,7 +448,20 @@ function section(title, children) {
   ]);
 }
 
-function fieldRow(label, value, status) {
+function formatValue(v) {
+    if (v == null) return "—";
+    if (typeof v === "object") {
+      // For nested objects, show key=value pairs
+      const entries = Object.entries(v);
+      if (entries.length <= 3) {
+        return entries.map(([k, val]) => `${k}=${formatValue(val)}`).join(", ");
+      }
+      return JSON.stringify(v).slice(0, 80);
+    }
+    return String(v);
+  }
+
+  function fieldRow(label, value, status) {
   const statusLabels = { confirmed: "已确认", pending: "已填充", inferred: "模型推断", "user-provided": "用户提供", missing: "待补充", conflict: "存在冲突" };
   return el("div", { class: "field-row" }, [
     el("span", { class: "field-label-inline", text: label }),
@@ -463,33 +476,34 @@ function updateActionBar() {
   bar.innerHTML = "";
   const actions = [];
 
-  // Codex V5 Pipeline fast-path: one-click compile-ready case generation.
-  // Shown whenever an active draft exists, alongside the state-based actions,
-  // so the Codex pipeline quick path remains reachable from the Trae UI.
-  if (state.draft) {
-    actions.push({ text: "一键生成可编译算例 ⚡", class: "button-secondary", fn: () => runCodexPipeline() });
-  }
-
+  // Proposal pending: handle confirm/cancel first
   if (state.proposal?.status === "pending") {
     actions.push({ text: "确认修改", class: "button-primary", fn: () => applyProposal(state.proposal) });
     actions.push({ text: "取消修改", class: "button-secondary", fn: () => cancelProposal(state.proposal) });
-  } else if (state.draft && state.draft.status !== "confirmed") {
-    actions.push({ text: "确认草案", class: "button-primary", fn: () => confirmDraft() });
-    actions.push({ text: "重新校验", class: "button-secondary", fn: () => validateDraft() });
-  } else if (state.draft?.status === "confirmed" && !state.casePlan) {
-    actions.push({ text: "生成 CasePlan", class: "button-primary", fn: () => generateCasePlan() });
-  } else if (state.casePlan) {
-    if (state.casePlan.can_compile && !state.compiledCase) {
-      actions.push({ text: "编译算例", class: "button-primary", fn: () => compileCase() });
-    } else if (state.compiledCase) {
-      if (!state.job) {
-        actions.push({ text: "提交工作站", class: "button-primary", fn: () => submitToWorkstation() });
-      } else if (state.job.state === "running" || state.job.state === "queued") {
-        actions.push({ text: "刷新状态", class: "button-secondary", fn: () => pollJobStatus() });
-        actions.push({ text: "取消任务", class: "button-secondary", fn: () => cancelJob() });
-      } else if (state.job.state === "succeeded") {
-        actions.push({ text: "查看结果", class: "button-primary", fn: () => fetchJobResults() });
+  } else if (state.draft) {
+    if (state.draft.status === "confirmed") {
+      // Draft is confirmed — show next steps
+      if (state.casePlan) {
+        if (state.casePlan.can_compile && !state.compiledCase) {
+          actions.push({ text: "编译算例", class: "button-primary", fn: () => compileCase() });
+        } else if (state.compiledCase) {
+          if (!state.job) {
+            actions.push({ text: "提交工作站", class: "button-primary", fn: () => submitToWorkstation() });
+          } else if (state.job.state === "running" || state.job.state === "queued") {
+            actions.push({ text: "刷新状态", class: "button-secondary", fn: () => pollJobStatus() });
+            actions.push({ text: "取消任务", class: "button-secondary", fn: () => cancelJob() });
+          } else if (state.job.state === "succeeded") {
+            actions.push({ text: "查看结果", class: "button-primary", fn: () => fetchJobResults() });
+          }
+        }
+      } else {
+        actions.push({ text: "生成 CasePlan", class: "button-primary", fn: () => generateCasePlan() });
       }
+      actions.push({ text: "重新校验", class: "button-secondary", fn: () => validateDraft() });
+    } else {
+      // Draft not yet confirmed — primary action is confirm
+      actions.push({ text: "确认草案", class: "button-primary", fn: () => confirmDraft() });
+      actions.push({ text: "重新校验", class: "button-secondary", fn: () => validateDraft() });
     }
   }
 
