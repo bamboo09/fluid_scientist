@@ -266,22 +266,43 @@ class CasePlanGenerator:
     def _generate_geometry_plan(self, draft: ExperimentDraft) -> dict:
         """Generate the geometry plan from draft.geometry.
 
-        Also includes domain dimensions from control_parameters so the
-        compiler has the required ``length`` and ``height`` values.
+        The pipeline stores domain dimensions in geometry.domain (nested dict).
+        The compiler requires flat keys: length, height. Extract them from
+        domain and flatten into the plan.
         """
-        plan = dict(draft.geometry)
-        # Include domain dimensions from control_parameters
+        plan = dict(draft.geometry) if draft.geometry else {}
+
+        # Extract domain dimensions from geometry.domain -> flat keys
+        domain = plan.pop("domain", None) or {}
+        if isinstance(domain, dict):
+            for k in ("length", "height", "diameter", "spanwise", "upstream", "downstream", "cross_stream"):
+                if k in domain and k not in plan:
+                    plan[k] = domain[k]
+
+        # Also check control_parameters for domain dimensions
         for param in draft.control_parameters:
             pid = param.parameter_id.lower()
             if pid == "domain_length" and param.value is not None:
-                plan["length"] = param.value
+                plan.setdefault("length", param.value)
             elif pid == "domain_height" and param.value is not None:
-                plan["height"] = param.value
-            elif pid == "step_height" and param.value is not None:
                 plan.setdefault("height", param.value)
             elif pid == "cylinder_diameter" and param.value is not None:
                 plan.setdefault("diameter", param.value)
                 plan.setdefault("D", param.value)
+
+        # If length/height still missing, derive from reference_length
+        ref_len = plan.get("reference_length")
+        if "length" not in plan and ref_len is not None:
+            # For external flow, domain length is typically ~35x reference length
+            # For internal flow, domain length is typically ~20x reference length
+            geo_family = plan.get("family", "")
+            if geo_family == "external_flow":
+                plan["length"] = float(ref_len) * 35.0
+            else:
+                plan["length"] = float(ref_len) * 20.0
+        if "height" not in plan and ref_len is not None:
+            plan["height"] = float(ref_len) * 10.0
+
         return plan
 
     def _generate_mesh_plan(self, draft: ExperimentDraft, dimensions: str) -> dict:
