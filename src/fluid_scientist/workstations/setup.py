@@ -237,8 +237,8 @@ class WorkstationSetupService:
             )
             stdin, stdout, stderr = client.exec_command(deploy_cmd, timeout=_KEY_DEPLOY_TIMEOUT)
             deploy_output = stdout.read().decode().strip()
-            client.close()
             if "KEY_DEPLOYED_OK" not in deploy_output:
+                client.close()
                 return _fail(
                     "deploy_key",
                     f"key deployment failed: {deploy_output}",
@@ -252,15 +252,20 @@ class WorkstationSetupService:
                 pass
             return _fail("deploy_key", f"key deployment error: {exc}", "KEY_DEPLOYMENT_FAILED")
 
-        # --- Step 4: Add host key to known_hosts via ssh-keyscan ---
+        # --- Step 4: Write host key to known_hosts from paramiko ---
+        # Extract the host key directly from the paramiko connection (more
+        # reliable than ssh-keyscan on Windows).  The key was already
+        # accepted by AutoAddPolicy during the password connection.
         try:
-            confirmed = self._runner.confirm_host_key(host)
-            if confirmed:
-                steps.append(SetupStepResult("trust_host_key", True, "host key added to known_hosts"))
-            else:
-                steps.append(SetupStepResult("trust_host_key", True, "host key already known or scan skipped"))
+            self._write_host_key_to_known_hosts(client, host, port)
+            steps.append(SetupStepResult("trust_host_key", True, "host key written to known_hosts"))
         except Exception as exc:
-            steps.append(SetupStepResult("trust_host_key", True, f"host key scan skipped: {exc}"))
+            steps.append(SetupStepResult("trust_host_key", True, f"host key write skipped: {exc}"))
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
 
         # --- Step 5: Create or update ~/.ssh/config ---
         try:
@@ -323,6 +328,48 @@ class WorkstationSetupService:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _write_host_key_to_known_hosts(self, client: Any, host: str, port: int) -> None:
+        """Write the remote host key to ``known_hosts``.
+
+        Uses the host key already accepted by paramiko's
+        :class:`paramiko.AutoAddPolicy` during the password connection.
+        This is more reliable than ``ssh-keyscan`` on Windows.
+
+        Writes in the OpenSSH ``known_hosts`` format:
+        ``[host]:port <key-type> <base64-key>``
+        """
+        import base64
+
+        known_hosts = self._ssh_dir / "known_hosts"
+        self._ssh_dir.mkdir(parents=True, exist_ok=True)
+
+        host_keys = client.get_host_keys()
+        if host_keys is None:
+            return
+
+        # paramiko's HostKeys maps hostname -> dict[key_type -> PKey].
+        key_hostname = f"[{host}]:{port}" if port != 22 else host
+
+        lines_to_write: list[str] = []
+        for hostname, key_dict in host_keys.items():
+            if hostname != host and hostname != f"[{host}]:{port}":
+                continue
+            for key_type, pkey in key_dict.items():
+                key_b64 = base64.b64encode(pkey.asbytes()).decode("ascii")
+                lines_to_write.append(f"{key_hostname} {key_type} {key_b64}\n")
+
+        if not lines_to_write:
+            return
+
+        existing = ""
+        if known_hosts.is_file():
+            existing = known_hosts.read_text(encoding="utf-8")
+
+        with open(known_hosts, "a", encoding="utf-8") as f:
+            for line in lines_to_write:
+                if line not in existing:
+                    f.write(line)
 
     def _update_ssh_config(self, host: str, username: str, port: int) -> None:
         """Create or update the SSH config entry for *host*.
