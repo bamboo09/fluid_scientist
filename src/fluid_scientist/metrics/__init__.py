@@ -572,13 +572,16 @@ class GoalToMetricCompiler:
 
             if any(kw in phenomenon + " " + target_qty for kw in ("force", "drag", "lift", "阻力", "升力", "载荷")):
                 new_metrics = self._catalog.scientific_force_coefficients(goal_id, fo_wall_patches)
-            elif any(kw in phenomenon + " " + target_qty for kw in ("pressure drop", "flow rate", "压降", "流量")):
+            elif any(kw in phenomenon + " " + target_qty for kw in ("torque", "力矩", "扭矩")):
+                # Torque is a special case of forces on rotating surfaces
+                new_metrics = self._catalog.scientific_force_coefficients(goal_id, fo_wall_patches)
+            elif any(kw in phenomenon + " " + target_qty for kw in ("pressure drop", "flow rate", "压降", "流量", "pressure_loss", "delta_p")):
                 new_metrics = self._catalog.scientific_pressure_drop(goal_id, inlet_patches[0], outlet_patches[0])
-            elif any(kw in phenomenon + " " + target_qty for kw in ("velocity profile", "wake", "尾迹", "剖面", "速度分布")):
+            elif any(kw in phenomenon + " " + target_qty for kw in ("velocity profile", "wake", "尾迹", "剖面", "速度分布", "velocity_field", "axial_velocity")):
                 new_metrics = self._catalog.scientific_velocity_profile(goal_id, [])
                 if "wake" in phenomenon or "尾迹" in phenomenon:
                     new_metrics.extend(self._catalog.scientific_wake_analysis(goal_id))
-            elif any(kw in phenomenon + " " + target_qty for kw in ("vortex", "q-criterion", "vortical", "涡")):
+            elif any(kw in phenomenon + " " + target_qty for kw in ("vortex", "q-criterion", "vortical", "涡", "q_criterion", "wake_vortex")):
                 new_metrics = self._catalog.scientific_vortex_identification(goal_id)
             elif any(kw in phenomenon + " " + target_qty for kw in ("spectrum", "spectral", "frequency", "psf", "频谱", "频率")):
                 new_metrics = self._catalog.scientific_spectral_analysis(goal_id)
@@ -587,6 +590,7 @@ class GoalToMetricCompiler:
             else:
                 # Generic baseline
                 new_metrics = self._catalog.scientific_velocity_profile(goal_id, [])
+                new_metrics.extend(self._catalog.scientific_vortex_identification(goal_id))
 
             for m in new_metrics:
                 if m.metric_id not in seen_ids:

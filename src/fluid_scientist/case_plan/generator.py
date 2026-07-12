@@ -422,26 +422,54 @@ class CasePlanGenerator:
     ) -> FunctionObjectSpec | None:
         """Map a requested output observable_id to a FunctionObjectSpec.
 
-        Unknown observables get a default ``probes`` functionObject so that
-        at least some data is collected for post-processing.
+        Tries exact match, then keyword-based fuzzy match, then falls back
+        to a probes functionObject for unknown observables.
         """
-        entry = _OUTPUT_FO_MAP.get(obs_id.lower())
+        # Normalize: lowercase and replace spaces/hyphens with underscores
+        normalized = obs_id.lower().strip().replace(" ", "_").replace("-", "_")
+        entry = _OUTPUT_FO_MAP.get(normalized)
         if entry is None:
-            # Fallback: create a probes functionObject for unknown observables
+            # Fuzzy match: check if any known key is a substring of the obs_id
+            for key, val in _OUTPUT_FO_MAP.items():
+                if key in normalized or normalized in key:
+                    entry = val
+                    break
+        if entry is None:
+            # Keyword-based mapping for common CFD observables
+            if any(kw in normalized for kw in ("force", "drag", "lift", "cd", "cl", "阻力", "升力")):
+                entry = _OUTPUT_FO_MAP.get("drag")
+            elif any(kw in normalized for kw in ("torque", "力矩", "扭矩")):
+                entry = ("forces", ["wall"], ["U", "p"], {"rho": "rhoInf", "rhoInf": 1.0})
+            elif any(kw in normalized for kw in ("pressure", "压", "delta_p")):
+                entry = _OUTPUT_FO_MAP.get("pressure")
+            elif any(kw in normalized for kw in ("velocity", "速度", "profile", "剖面", "分布")):
+                entry = _OUTPUT_FO_MAP.get("velocity_profile")
+            elif any(kw in normalized for kw in ("vortex", "涡", "q_criterion", "q准则", "wake", "尾迹")):
+                # Vortex identification uses fieldAverage + Q criterion
+                entry = ("fieldAverage", [], ["U"], {"fields": ["U"], "functions": {}})
+            elif any(kw in normalized for kw in ("spectrum", "频谱", "frequency", "频率", "strouhal")):
+                entry = _OUTPUT_FO_MAP.get("strouhal")
+        if entry is not None:
+            fo_type, patches, fields, config = entry
+            # Sanitize function_object_id to be a valid OpenFOAM keyword
+            safe_id = normalized.replace(" ", "_").replace("-", "_")
+            safe_id = "".join(c if c.isalnum() or c == "_" else "_" for c in safe_id)
             return FunctionObjectSpec(
-                function_object_id=f"probes_{obs_id}",
-                function_object_type="probes",
-                fields=["U", "p"],
-                patches=[],
-                configuration={"probeLocations": []},
+                function_object_id=f"{fo_type}_{safe_id}",
+                function_object_type=fo_type,
+                fields=list(fields),
+                patches=list(patches),
+                configuration=dict(config),
             )
-        fo_type, patches, fields, config = entry
+        # Final fallback: create a probes functionObject for unknown observables
+        safe_id = normalized.replace(" ", "_").replace("-", "_")
+        safe_id = "".join(c if c.isalnum() or c == "_" else "_" for c in safe_id)
         return FunctionObjectSpec(
-            function_object_id=f"{fo_type}_{obs_id}",
-            function_object_type=fo_type,
-            fields=list(fields),
-            patches=list(patches),
-            configuration=dict(config),
+            function_object_id=f"probes_{safe_id}",
+            function_object_type="probes",
+            fields=["U", "p"],
+            patches=[],
+            configuration={},
         )
 
     # ------------------------------------------------------------------
