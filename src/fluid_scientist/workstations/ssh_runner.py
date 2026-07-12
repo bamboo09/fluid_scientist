@@ -28,6 +28,28 @@ _DEFAULT_TIMEOUT = 30.0
 _KEYSCAN_TIMEOUT = 15.0
 _KEYGEN_TIMEOUT = 10.0
 
+# SSH standard private key names that the client auto-discovers.
+# When -i is used, SSH replaces its default list, so these must be
+# included explicitly in the -i arguments.
+_STANDARD_KEY_NAMES = frozenset({
+    "id_rsa", "id_ecdsa", "id_ed25519", "id_xmss", "id_dsa", "identity",
+})
+
+# Suffixes that identify private key files (e.g. fluid_scientist_ed25519).
+_KEY_SUFFIXES = ("_rsa", "_ed25519", "_ecdsa", "_dsa")
+
+# Maximum number of identity files to try (prevents MaxAuthTries exhaustion).
+_MAX_IDENTITY_FILES = 5
+
+# Files to exclude when scanning ~/.ssh/ for private keys.
+_SSH_DIR_EXCLUDES = frozenset({
+    "known_hosts", "known_hosts2", "config", "authorized_keys",
+    "authorized_keys2", "environment",
+})
+
+# Extensions to exclude (scripts, public keys, etc.).
+_SSH_DIR_EXCLUDE_SUFFIXES = (".pub", ".ps1", ".sh", ".py", ".bat", ".cmd", ".pem", ".crt")
+
 
 @dataclass(frozen=True)
 class SafeHostAlias:
@@ -218,15 +240,15 @@ class SSHCommandRunner:
         """
         alias = SafeHostAlias(host_alias)
         connect_timeout = max(1, int(timeout))
-        argv = (
+        identity_args = self._identity_args()
+        argv: list[str] = [
             "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            f"ConnectTimeout={connect_timeout}",
+            "-o", "BatchMode=yes",
+            "-o", f"ConnectTimeout={connect_timeout}",
+            *identity_args,
             str(alias),
             command,
-        )
+        ]
         logger.debug("executing remote command on %s", alias)
         try:
             return self._run(argv, timeout=timeout)
@@ -347,17 +369,16 @@ class SSHCommandRunner:
         """
         alias = SafeHostAlias(host_alias)
         connect_timeout = max(1, int(timeout))
-        argv = (
+        identity_args = self._identity_args()
+        argv: list[str] = [
             "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            f"ConnectTimeout={connect_timeout}",
-            "-o",
-            "StrictHostKeyChecking=yes",
+            "-o", "BatchMode=yes",
+            "-o", f"ConnectTimeout={connect_timeout}",
+            "-o", "StrictHostKeyChecking=yes",
+            *identity_args,
             str(alias),
             "true",
-        )
+        ]
         logger.debug("testing authentication for %s", alias)
         try:
             result = self._run(argv, timeout=timeout)
@@ -376,6 +397,58 @@ class SSHCommandRunner:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
+
+    def _detect_identity_files(self) -> list[str]:
+        """Detect SSH private key files in ``~/.ssh/``.
+
+        SSH automatically tries standard key names (``id_rsa``,
+        ``id_ed25519``, etc.).  When ``-i`` is used, SSH *replaces* its
+        default list, so we must include standard names explicitly.
+
+        Scans for:
+        * Standard names: ``id_rsa``, ``id_ecdsa``, ``id_ed25519``,
+          ``id_xmss``, ``id_dsa``, ``identity``
+        * Non-standard names ending in ``_rsa``, ``_ed25519``,
+          ``_ecdsa``, ``_dsa`` (e.g. ``fluid_scientist_ed25519``)
+
+        Returns a list of absolute path strings (capped at
+        :data:`_MAX_IDENTITY_FILES`).  No paths are logged.
+        """
+        ssh_dir = self._known_hosts_file.parent
+        if not ssh_dir.is_dir():
+            return []
+        identities: list[str] = []
+        try:
+            entries = sorted(ssh_dir.iterdir())
+        except OSError:
+            return []
+        for entry in entries:
+            name = entry.name
+            # Exclude public keys, scripts, and config files.
+            if name.endswith(_SSH_DIR_EXCLUDE_SUFFIXES):
+                continue
+            if name in _SSH_DIR_EXCLUDES:
+                continue
+            # Match standard names or non-standard key suffixes.
+            is_standard = name in _STANDARD_KEY_NAMES
+            has_key_suffix = any(name.endswith(s) for s in _KEY_SUFFIXES)
+            if not (is_standard or has_key_suffix):
+                continue
+            # Must be a regular file.
+            if not entry.is_file():
+                continue
+            identities.append(str(entry))
+            if len(identities) >= _MAX_IDENTITY_FILES:
+                break
+        return identities
+
+    def _identity_args(self) -> tuple[str, ...]:
+        """Return ``-i <path>`` argument pairs for all detected key files."""
+        identities = self._detect_identity_files()
+        args: list[str] = []
+        for identity in identities:
+            args.extend(["-i", identity])
+        return tuple(args)
 
     def _run(
         self,
