@@ -182,10 +182,28 @@ class NativeCaseCompiler:
     def _build_functions(
         self, measurement: MeasurementPlanSpec
     ) -> dict[str, dict[str, Any]]:
-        """Build the ``functions`` block from the measurement plan."""
+        """Build the ``functions`` block from the measurement plan.
+
+        Function object IDs are sanitized to be valid OpenFOAM dictionary
+        keywords (no spaces, special chars). Duplicate names are disambiguated.
+        """
         functions: dict[str, dict[str, Any]] = {}
+        used_names: set[str] = set()
         for fo in measurement.function_objects:
-            functions[fo.function_object_id] = self._function_object_to_dict(
+            # Sanitize: replace spaces and special chars with underscores
+            raw_id = fo.function_object_id or "probe"
+            safe_id = "".join(c if c.isalnum() or c == "_" else "_" for c in raw_id)
+            safe_id = safe_id.strip("_")
+            if not safe_id:
+                safe_id = "probe"
+            # Disambiguate duplicates
+            final_id = safe_id
+            counter = 2
+            while final_id in used_names:
+                final_id = f"{safe_id}_{counter}"
+                counter += 1
+            used_names.add(final_id)
+            functions[final_id] = self._function_object_to_dict(
                 fo, measurement.write_interval
             )
         return functions
@@ -213,7 +231,10 @@ class NativeCaseCompiler:
             result["outputInterval"] = write_interval
 
         # Merge type-specific configuration.
+        # Skip empty probeLocations (causes OpenFOAM parse errors).
         for key, value in fo.configuration.items():
+            if key == "probeLocations" and not value:
+                continue  # Skip empty probe locations
             result.setdefault(key, value)
 
         return result
