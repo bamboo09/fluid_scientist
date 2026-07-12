@@ -2036,7 +2036,8 @@ def _legacy_draft_from_view(view: dict[str, Any]) -> ExperimentDraft:
         session_id=view.get("session_id", ""),
         version=view.get("draft_version", 1),
         status=DraftStatus.READY if view.get("status") == "compile_ready" else DraftStatus.DRAFT,
-        objective=view.get("research_objective", ""),
+        objective=view.get("objective") or view.get("research_objective", ""),
+        study_type=view.get("study_type", "cfd_simulation"),
         geometry=view.get("geometry", {}),
         materials=view.get("materials", {}),
         physics_models=view.get("physical_models", {}),
@@ -2052,6 +2053,11 @@ def _legacy_draft_from_view(view: dict[str, Any]) -> ExperimentDraft:
         },
         control_parameters=params,
         validation_result=view.get("validation_results", {}),
+        requested_outputs=view.get("requested_outputs", []),
+        analysis_goals=[
+            g if isinstance(g, str) else str(g.get("phenomenon", g.get("target_quantity", str(g))))
+            for g in view.get("analysis_goals", [])
+        ],
     )
 
 
