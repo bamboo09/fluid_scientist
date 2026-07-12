@@ -125,6 +125,69 @@ _PROVIDER_MODELS: dict[str, list[str]] = {
     "deepseek": ["deepseek-chat", "deepseek-reasoner"],
 }
 
+# Path for persisting LLM model configuration (provider, model, api_key).
+# The file is stored in the user's .fluid_scientist config directory with
+# restrictive permissions.  This allows the LLM config to survive server
+# restarts without requiring the user to re-enter the API key each time.
+_LLM_CONFIG_PATH = Path.home() / ".fluid_scientist" / "llm_config.json"
+
+
+def _save_llm_config(provider: str, model: str, api_key: str) -> None:
+    """Persist LLM configuration to disk so it survives server restarts."""
+    import json
+    try:
+        _LLM_CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        config = {"provider": provider, "model": model, "api_key": api_key}
+        _LLM_CONFIG_PATH.write_text(json.dumps(config), encoding="utf-8")
+        # Restrict permissions on the config file (best-effort on Windows).
+        try:
+            _LLM_CONFIG_PATH.chmod(0o600)
+        except OSError:
+            pass
+    except Exception:
+        pass  # Non-fatal: in-memory config still works for this session.
+
+
+def _load_llm_config() -> dict[str, str] | None:
+    """Load persisted LLM configuration from disk."""
+    import json
+    try:
+        if not _LLM_CONFIG_PATH.is_file():
+            return None
+        config = json.loads(_LLM_CONFIG_PATH.read_text(encoding="utf-8"))
+        if isinstance(config, dict) and config.get("provider") and config.get("api_key"):
+            return config
+    except Exception:
+        pass
+    return None
+
+
+def _try_auto_configure_llm() -> None:
+    """Attempt to restore LLM configuration from disk on startup."""
+    global _llm_client, _draft_generator
+    config = _load_llm_config()
+    if config is None:
+        return
+    try:
+        provider = config["provider"]
+        model = config["model"]
+        api_key = config["api_key"]
+        if provider not in _PROVIDER_BASE_URLS:
+            return
+        _llm_client = LLMClient(
+            provider=provider,
+            model_name=model,
+            api_key=api_key,
+            base_url=_PROVIDER_BASE_URLS[provider],
+        )
+        _draft_generator = DraftGenerator(llm_client=_llm_client)
+    except Exception:
+        pass
+
+
+# Auto-restore LLM config on module import (server startup).
+_try_auto_configure_llm()
+
 
 def configure_llm_client(
     *,
@@ -1931,7 +1994,8 @@ def get_v5_model_config() -> ModelConfigView:
 def configure_v5_model(request: ModelConfigRequest) -> ModelConfigView:
     """Configure the v5 LLM model to use a real provider.
 
-    The API key is kept only in memory and never persisted to disk.
+    The API key is persisted to ``~/.fluid_scientist/llm_config.json`` so
+    it survives server restarts.  The file has restrictive permissions.
     """
     global _llm_client, _draft_generator
     if request.provider not in _PROVIDER_BASE_URLS:
@@ -1952,6 +2016,8 @@ def configure_v5_model(request: ModelConfigRequest) -> ModelConfigView:
         api_key=request.api_key,
         base_url=_PROVIDER_BASE_URLS[request.provider],
     )
+    # Persist to disk so the config survives server restarts.
+    _save_llm_config(request.provider, request.model, request.api_key)
     return ModelConfigView(
         configured=not _llm_client.is_mock,
         provider=_llm_client.provider,
