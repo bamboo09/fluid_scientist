@@ -61,6 +61,7 @@ const API = {
   compileCasePlan: (id) => api(`/api/v5/case-plans/${id}/compile`, { method: "POST" }),
   reviewCasePlan: (id) => api(`/api/v5/case-plans/${id}/review`, { method: "POST" }),
   fixCasePlan: (id, issues) => api(`/api/v5/case-plans/${id}/fix`, { method: "POST", body: JSON.stringify({ issues }) }),
+  diagnoseFixJob: (jobId) => api(`/api/v5/jobs/${jobId}/diagnose-fix`, { method: "POST" }),
   submitCase: (casePlanId) => api(`/api/v5/cases/${casePlanId}/submit`, { method: "POST" }),
   getJobStatus: (jobId) => api(`/api/v5/jobs/${jobId}`),
   cancelJob: (jobId) => api(`/api/v5/jobs/${jobId}/cancel`, { method: "POST" }),
@@ -516,6 +517,9 @@ function updateActionBar() {
           } else if (state.job.state === "running" || state.job.state === "queued") {
             actions.push({ text: "刷新状态", class: "button-secondary", fn: () => pollJobStatus() });
             actions.push({ text: "取消任务", class: "button-secondary", fn: () => cancelJob() });
+          } else if (state.job.state === "failed") {
+            actions.push({ text: "AI 诊断修复", class: "button-primary", fn: () => diagnoseAndFixJob() });
+            actions.push({ text: "刷新状态", class: "button-secondary", fn: () => pollJobStatus() });
           } else if (state.job.state === "succeeded") {
             actions.push({ text: "查看结果", class: "button-primary", fn: () => fetchJobResults() });
           }
@@ -900,6 +904,35 @@ async function fixCaseIssues() {
     renderAll();
   } catch (e) {
     addMessage("system", `AI 修复失败: ${e.message}`, { error: e.message });
+  }
+}
+
+async function diagnoseAndFixJob() {
+  if (!state.job) return;
+  const jobId = state.job.job_id;
+  try {
+    addMessage("assistant", `正在诊断任务失败原因...`);
+    const result = await API.diagnoseFixJob(jobId);
+    const diag = result.diagnosis || {};
+    const fixedFiles = result.fixed_files || [];
+
+    // Show diagnosis
+    let diagText = `任务失败诊断:\n`;
+    diagText += `  失败阶段: ${diag.failure_stage || "unknown"}\n`;
+    diagText += `  错误类型: ${diag.error_type || "unknown"}\n`;
+    diagText += `  根因分析: ${diag.root_cause || "N/A"}\n`;
+    diagText += `  影响文件: ${(diag.affected_files || []).join(", ") || "N/A"}`;
+
+    if (result.fixed && fixedFiles.length > 0) {
+      addMessage("assistant", `${diagText}\n\n已自动修复 ${fixedFiles.length} 个文件: ${fixedFiles.join(", ")}\n\n${result.summary}\n\n请确认后重新提交工作站。`, { diagnoseResult: result });
+      // Show resubmit button
+      state.job = null; // Clear failed job to allow resubmit
+    } else {
+      addMessage("system", `${diagText}\n\n未能自动修复，请手动检查算例文件。${result.summary}`, { diagnoseResult: result });
+    }
+    renderAll();
+  } catch (e) {
+    addMessage("system", `AI 诊断修复失败: ${e.message}`, { error: e.message });
   }
 }
 

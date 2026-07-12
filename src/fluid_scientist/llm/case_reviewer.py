@@ -554,3 +554,256 @@ def _static_case_fix(
         "remaining_issues": remaining_issues,
         "summary": f"Static fix applied to {len(fixed_files)} file(s)" if fixed_files else "No static fixes could be applied",
     }
+
+
+# ---------------------------------------------------------------------------
+# Runtime Failure Diagnosis & Fix
+# ---------------------------------------------------------------------------
+
+def diagnose_and_fix_runtime_error(
+    llm_client: Any,
+    case_dir: str,
+    error_message: str,
+    case_plan_summary: dict[str, Any] | None = None,
+    session_id: str = "",
+) -> dict[str, Any]:
+    """Diagnose a runtime error from a failed workstation job and fix the case.
+
+    This is used when a job has already been submitted to the workstation and
+    failed during execution (e.g. blockMesh crashed, solver diverged). The LLM
+    analyzes the error message along with the case files to determine the root
+    cause and output fixed files.
+
+    Returns:
+        {
+            "diagnosis": {
+                "failure_stage": str,   # blockMesh|checkMesh|foamRun|unknown
+                "error_type": str,      # syntax|parameter|mesh|numerical|memory|other
+                "root_cause": str,
+                "affected_files": list[str],
+            },
+            "fixed": bool,
+            "fixed_files": list[str],
+            "summary": str,
+        }
+    """
+    case_files = _collect_case_files(case_dir)
+    if not case_files:
+        return {
+            "diagnosis": {
+                "failure_stage": "unknown",
+                "error_type": "other",
+                "root_cause": "No case files found to diagnose",
+                "affected_files": [],
+            },
+            "fixed": False,
+            "fixed_files": [],
+            "summary": "No case files found",
+        }
+
+    if not llm_client:
+        return _static_runtime_diagnosis(case_dir, case_files, error_message)
+
+    try:
+        system_prompt = load_prompt("runtime_diagnosis")
+        user_message = _format_diagnosis_input(error_message, case_plan_summary, case_files)
+
+        output, _record = llm_client.call(
+            purpose="case_fix",
+            prompt_name="runtime_diagnosis",
+            system_prompt=system_prompt,
+            user_message=user_message,
+            session_id=session_id,
+            output_schema="json",
+        )
+
+        result = _parse_diagnosis_output(output, case_dir)
+        if result:
+            logger.info(
+                "Runtime diagnosis: stage=%s, type=%s, fixed=%d files",
+                result.get("diagnosis", {}).get("failure_stage", "?"),
+                result.get("diagnosis", {}).get("error_type", "?"),
+                len(result.get("fixed_files", [])),
+            )
+            return result
+
+        logger.warning("LLM diagnosis returned no result, using static diagnosis")
+        return _static_runtime_diagnosis(case_dir, case_files, error_message)
+
+    except Exception as e:
+        logger.warning("LLM runtime diagnosis failed (%s), using static diagnosis", e)
+        return _static_runtime_diagnosis(case_dir, case_files, error_message)
+
+
+def _format_diagnosis_input(
+    error_message: str,
+    case_plan_summary: dict[str, Any] | None,
+    files: dict[str, str],
+) -> str:
+    """Format error + case plan + file contents for the LLM diagnosis prompt."""
+    import json as _json
+    parts = []
+    parts.append("[ERROR]")
+    parts.append(error_message or "(no error message)")
+    parts.append("")
+    parts.append("[CASE PLAN]")
+    if case_plan_summary:
+        parts.append(_json.dumps(case_plan_summary, ensure_ascii=False, indent=2, default=str))
+    else:
+        parts.append("{}")
+    parts.append("")
+    parts.append("[CURRENT FILES]")
+    for filepath, content in sorted(files.items()):
+        parts.append(f"=== FILE: {filepath} ===")
+        parts.append(content)
+        parts.append("")
+    return "\n".join(parts)
+
+
+def _parse_diagnosis_output(output: Any, case_dir: str) -> dict[str, Any] | None:
+    """Parse LLM diagnosis output and apply fixes to disk."""
+    if isinstance(output, str):
+        try:
+            output = json.loads(output)
+        except json.JSONDecodeError:
+            match = re.search(r'\{.*\}', output, re.DOTALL)
+            if match:
+                try:
+                    output = json.loads(match.group())
+                except json.JSONDecodeError:
+                    return None
+            else:
+                return None
+
+    if not isinstance(output, dict):
+        return None
+
+    diagnosis = output.get("diagnosis", {})
+    fixes = output.get("fixes", {})
+    summary = output.get("summary", "")
+
+    # Apply fixes to disk
+    fixed_files = []
+    case_path = Path(case_dir)
+    for filepath, content in fixes.items():
+        if not isinstance(content, str):
+            continue
+        full_path = case_path / filepath
+        try:
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+            full_path.write_text(content, encoding="utf-8")
+            fixed_files.append(filepath)
+        except Exception as e:
+            logger.warning("Failed to write diagnosed fix for %s: %s", filepath, e)
+
+    return {
+        "diagnosis": {
+            "failure_stage": diagnosis.get("failure_stage", "unknown"),
+            "error_type": diagnosis.get("error_type", "other"),
+            "root_cause": diagnosis.get("root_cause", ""),
+            "affected_files": diagnosis.get("affected_files", []),
+        },
+        "fixed": len(fixed_files) > 0,
+        "fixed_files": fixed_files,
+        "summary": summary or f"Fixed {len(fixed_files)} file(s)",
+    }
+
+
+def _static_runtime_diagnosis(
+    case_dir: str,
+    files: dict[str, str],
+    error_message: str,
+) -> dict[str, Any]:
+    """Deterministic runtime error diagnosis when LLM is unavailable."""
+    error_lower = error_message.lower()
+    failure_stage = "unknown"
+    error_type = "other"
+    root_cause = error_message
+    affected_files: list[str] = []
+    fixed_files: list[str] = []
+
+    case_path = Path(case_dir)
+
+    # Determine failure stage
+    if "blockmesh" in error_lower:
+        failure_stage = "blockMesh"
+    elif "checkmesh" in error_lower:
+        failure_stage = "checkMesh"
+    elif "foamrun" in error_lower or "pimplefoam" in error_lower or "solver" in error_lower:
+        failure_stage = "foamRun"
+
+    # Common error patterns
+    if "ill defined primitiveentry" in error_lower:
+        error_type = "syntax"
+        root_cause = "OpenFOAM dictionary entry contains invalid syntax (likely keyword with spaces or invalid characters)"
+        affected_files = ["system/controlDict"]
+        # Fix: sanitize function object names
+        cd = files.get("system/controlDict", "")
+        if cd:
+            # Replace function object names with spaces
+            new_cd = re.sub(
+                r'(\w+_\w+)\s+(\w+)',
+                lambda m: m.group(1) + "_" + m.group(2) if " " in m.group(0) else m.group(0),
+                cd
+            )
+            if new_cd != cd:
+                (case_path / "system" / "controlDict").write_text(new_cd, encoding="utf-8")
+                fixed_files.append("system/controlDict")
+
+    elif "incompressiblefluid" in error_lower or "literal solver" in error_lower:
+        error_type = "parameter"
+        root_cause = "controlDict does not use 'solver incompressibleFluid;' as required by the workstation"
+        affected_files = ["system/controlDict"]
+        cd = files.get("system/controlDict", "")
+        if cd:
+            new_cd = cd.replace("application pimpleFoam;", "solver incompressibleFluid;")
+            new_cd = new_cd.replace("application simpleFoam;", "solver incompressibleFluid;")
+            if new_cd != cd:
+                (case_path / "system" / "controlDict").write_text(new_cd, encoding="utf-8")
+                fixed_files.append("system/controlDict")
+
+    elif "libs" in error_lower and ("forbidden" in error_lower or "dynamic" in error_lower):
+        error_type = "parameter"
+        root_cause = "controlDict contains 'libs' directive which is forbidden by workstation security policy"
+        affected_files = ["system/controlDict"]
+        cd = files.get("system/controlDict", "")
+        if cd:
+            new_cd = re.sub(r'\n\s*libs\s*\([^)]*\)\s*;', '', cd)
+            if new_cd != cd:
+                (case_path / "system" / "controlDict").write_text(new_cd, encoding="utf-8")
+                fixed_files.append("system/controlDict")
+
+    elif "diverg" in error_lower or "floating point" in error_lower or "nan" in error_lower:
+        error_type = "numerical"
+        root_cause = "Numerical divergence detected — solver became unstable"
+        affected_files = ["system/fvSolution", "system/controlDict"]
+        # Fix: reduce relaxation factors and deltaT
+        fvs = files.get("system/fvSolution", "")
+        if fvs:
+            new_fvs = re.sub(r'(relaxationFactors\s*\{[^}]*?)0\.\d+', r'\g<1>0.3', fvs)
+            if new_fvs != fvs:
+                (case_path / "system" / "fvSolution").write_text(new_fvs, encoding="utf-8")
+                fixed_files.append("system/fvSolution")
+        cd = files.get("system/controlDict", "")
+        if cd:
+            # Halve deltaT
+            new_cd = re.sub(
+                r'(deltaT\s+)(\d+\.?\d*)',
+                lambda m: f"{m.group(1)}{float(m.group(2)) / 2}",
+                cd
+            )
+            if new_cd != cd:
+                (case_path / "system" / "controlDict").write_text(new_cd, encoding="utf-8")
+                fixed_files.append("system/controlDict")
+
+    return {
+        "diagnosis": {
+            "failure_stage": failure_stage,
+            "error_type": error_type,
+            "root_cause": root_cause,
+            "affected_files": affected_files,
+        },
+        "fixed": len(fixed_files) > 0,
+        "fixed_files": fixed_files,
+        "summary": f"Static diagnosis: {failure_stage}/{error_type}. Fixed {len(fixed_files)} file(s)." if fixed_files else f"Static diagnosis: {failure_stage}/{error_type}. Could not auto-fix.",
+    }

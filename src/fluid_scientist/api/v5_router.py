@@ -2618,4 +2618,98 @@ def get_job_results(
     return result
 
 
+@router.post("/jobs/{job_id}/diagnose-fix")
+def diagnose_and_fix_job(
+    job_id: str,
+    request: Request,
+    target_id: str = "",
+) -> dict[str, Any]:
+    """Diagnose a failed job's runtime error and auto-fix the case files.
+
+    This endpoint is called when a workstation job has failed. It:
+    1. Queries the job status to get the error message
+    2. Finds the compiled case directory
+    3. Uses LLM to diagnose the root cause and fix the files
+    4. Returns the diagnosis + fix result for user confirmation
+
+    After reviewing the fixes, the user can re-submit via
+    POST /api/v5/cases/{case_plan_id}/submit
+    """
+    target = _get_workstation_target(request)
+    try:
+        job_record = target.status(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Failed to query job status: {e}") from e
+
+    # Extract error and case_plan_id from job record
+    if hasattr(job_record, "model_dump"):
+        job_data = job_record.model_dump()
+    elif hasattr(job_record, "__dict__"):
+        job_data = job_record.__dict__
+    else:
+        job_data = {"job_id": job_id, "state": str(job_record)}
+
+    error_message = job_data.get("error", "")
+    if not error_message:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Job {job_id} has no error message (state={job_data.get('state', 'unknown')}). Only failed jobs can be diagnosed.",
+        )
+
+    # Extract case_plan_id from job_id (format: v5-{timestamp}-{case_plan_id[:8]})
+    parts = job_id.split("-")
+    case_plan_prefix = parts[-1] if len(parts) >= 3 else ""
+
+    # Find the compiled case directory by matching prefix
+    import glob as _glob
+    pattern = os.path.join(tempfile.gettempdir(), f"fluid_case_*{case_plan_prefix}*")
+    matching_dirs = _glob.glob(pattern)
+    if not matching_dirs:
+        # Try to find by looking at all case dirs
+        all_pattern = os.path.join(tempfile.gettempdir(), "fluid_case_*")
+        all_dirs = _glob.glob(all_pattern)
+        # Use the most recently modified one
+        if all_dirs:
+            matching_dirs = [max(all_dirs, key=os.path.getmtime)]
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Could not find compiled case directory for job {job_id}",
+            )
+    case_dir = matching_dirs[0]
+
+    # Get case plan summary for context
+    case_plan_summary: dict[str, Any] = {}
+    # Try to find case_plan_id from compiled case store
+    for cp_id, record in _repo._compiled_cases.items() if hasattr(_repo, '_compiled_cases') else []:
+        if record.get("case_dir") == case_dir:
+            plan = _repo.get_case_plan(cp_id)
+            if plan:
+                case_plan_summary = {
+                    "solver": plan.solver,
+                    "physics_family": plan.physics_plan.get("physics_family", ""),
+                    "dimensions": plan.dimensions,
+                    "endTime": plan.numerics_plan.get("endTime", ""),
+                    "deltaT": plan.numerics_plan.get("deltaT", ""),
+                }
+                break
+
+    from fluid_scientist.llm.case_reviewer import diagnose_and_fix_runtime_error
+
+    llm = _get_llm_client()
+    result = diagnose_and_fix_runtime_error(
+        llm, case_dir, error_message, case_plan_summary, session_id=""
+    )
+
+    return {
+        "job_id": job_id,
+        "error_message": error_message,
+        "case_dir": case_dir,
+        "diagnosis": result.get("diagnosis", {}),
+        "fixed": result.get("fixed", False),
+        "fixed_files": result.get("fixed_files", []),
+        "summary": result.get("summary", ""),
+    }
+
+
 __all__ = ["router"]
