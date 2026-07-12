@@ -148,3 +148,26 @@ def test_bootstrap_unknown_host_key_requires_confirmation(tmp_path):
 
     assert result.error_code == "HOST_KEY_CONFIRMATION_REQUIRED"
     assert store.get_default() is None
+
+
+def test_bootstrap_can_trust_unknown_host_key_and_continue(tmp_path):
+    runner = BootstrapRunner(host_key_status=KnownHostStatus.UNKNOWN)
+    store = WorkstationProfileStore(str(tmp_path / "workstations.db"))
+    service = WorkstationBootstrapService(
+        runner=runner,
+        store=store,
+        discovery=EmptyDiscovery(),
+    )
+
+    result = service.bootstrap(
+        BootstrapRequest(
+            host="hpc",
+            username="researcher",
+            trust_host_key=True,
+        )
+    )
+
+    assert result.error_code is None
+    assert result.status == PlatformStatus.READY.value
+    assert runner.host_key_status == KnownHostStatus.KNOWN
+    assert store.get_default() is not None

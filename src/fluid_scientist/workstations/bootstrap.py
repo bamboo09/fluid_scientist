@@ -14,6 +14,7 @@ from fluid_scientist.workstations.models import (
     CandidateSource,
     ConnectionStatus,
     CredentialSource,
+    KnownHostStatus,
     PlatformStatus,
     WorkstationCandidate,
     WorkstationErrorCode,
@@ -48,6 +49,7 @@ class BootstrapRequest(BaseModel):
     host: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)]
     username: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=64)]
     port: int = Field(default=22, ge=1, le=65535)
+    trust_host_key: bool = False
 
 
 class BootstrapResult(BaseModel):
@@ -117,6 +119,23 @@ class WorkstationBootstrapService:
                 error_code=WorkstationErrorCode.INVALID_BOOTSTRAP_REQUEST.value,
                 error_message=str(error),
             )
+
+        if request.trust_host_key:
+            try:
+                host_key_status = self.runner.get_host_key_status(candidate.host_alias)
+            except Exception:
+                host_key_status = KnownHostStatus.UNKNOWN
+            if host_key_status == KnownHostStatus.UNKNOWN:
+                confirmed = self.runner.confirm_host_key(candidate.host_alias)
+                if not confirmed:
+                    return BootstrapResult(
+                        status="FAILED",
+                        error_code=WorkstationErrorCode.HOST_KEY_CONFIRMATION_REQUIRED.value,
+                        error_message=(
+                            f"host key for '{request.host}' could not be fetched; "
+                            "check host/port reachability and try again"
+                        ),
+                    )
 
         probe = self.connection.probe(candidate)
         if probe.error_code:

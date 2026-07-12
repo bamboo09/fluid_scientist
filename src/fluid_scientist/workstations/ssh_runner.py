@@ -268,9 +268,10 @@ class SSHCommandRunner:
         otherwise :attr:`KnownHostStatus.UNKNOWN`.
         """
         alias = SafeHostAlias(host_alias)
+        lookup = self._known_host_lookup(str(alias))
         try:
             result = self._run(
-                ("ssh-keygen", "-F", str(alias)),
+                ("ssh-keygen", "-F", lookup),
                 timeout=_KEYGEN_TIMEOUT,
             )
         except OSError:
@@ -291,9 +292,10 @@ class SSHCommandRunner:
         or the fingerprint cannot be determined.
         """
         alias = SafeHostAlias(host_alias)
+        argv = self._keyscan_argv(str(alias), hashed=False)
         try:
             keyscan = self._run(
-                ("ssh-keyscan", "-T", "10", str(alias)),
+                argv,
                 timeout=_KEYSCAN_TIMEOUT,
             )
         except OSError:
@@ -332,9 +334,10 @@ class SSHCommandRunner:
         the key was successfully appended.
         """
         alias = SafeHostAlias(host_alias)
+        argv = self._keyscan_argv(str(alias), hashed=True)
         try:
             result = self._run(
-                ("ssh-keyscan", "-H", "-T", "10", str(alias)),
+                argv,
                 timeout=_KEYSCAN_TIMEOUT,
             )
         except OSError:
@@ -450,6 +453,28 @@ class SSHCommandRunner:
             return base + (alias,)
         hostname, username, port = target
         return base + ("-l", username, "-p", str(port), hostname)
+
+    def _known_host_lookup(self, alias: str) -> str:
+        target = self._targets.get(alias)
+        if target is None:
+            return alias
+        hostname, _username, port = target
+        if port == 22:
+            return hostname
+        return f"[{hostname}]:{port}"
+
+    def _keyscan_argv(self, alias: str, *, hashed: bool) -> tuple[str, ...]:
+        target = self._targets.get(alias)
+        host = alias
+        port = 22
+        if target is not None:
+            host, _username, port = target
+        base = ("ssh-keyscan",)
+        if hashed:
+            base += ("-H",)
+        if port != 22:
+            base += ("-p", str(port))
+        return base + ("-T", "10", host)
 
     def _truncate(self, text: str) -> str:
         if len(text) <= self._max_output_chars:

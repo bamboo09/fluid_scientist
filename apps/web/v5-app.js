@@ -1277,6 +1277,7 @@ async function handleBootstrap(formData) {
       host: String(formData.get("host") || "").trim(),
       username: String(formData.get("username") || "").trim(),
       port: Number(formData.get("port") || 22),
+      trust_host_key: true,
     };
     const displayName = String(formData.get("display_name") || "").trim();
     if (displayName) payload.display_name = displayName;
@@ -1451,6 +1452,7 @@ function bindEvents() {
         host: byId("ws-input-host").value,
         username: byId("ws-input-user").value,
         port: parseInt(byId("ws-input-port").value) || 22,
+        trust_host_key: true,
       };
       const displayName = byId("ws-input-name") ? byId("ws-input-name").value.trim() : "";
       if (displayName) payload.display_name = displayName;
