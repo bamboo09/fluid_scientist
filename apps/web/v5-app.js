@@ -60,6 +60,7 @@ const API = {
   getCasePlan: (id) => api(`/api/v5/case-plans/${id}`),
   compileCasePlan: (id) => api(`/api/v5/case-plans/${id}/compile`, { method: "POST" }),
   reviewCasePlan: (id) => api(`/api/v5/case-plans/${id}/review`, { method: "POST" }),
+  fixCasePlan: (id, issues) => api(`/api/v5/case-plans/${id}/fix`, { method: "POST", body: JSON.stringify({ issues }) }),
   submitCase: (casePlanId) => api(`/api/v5/cases/${casePlanId}/submit`, { method: "POST" }),
   getJobStatus: (jobId) => api(`/api/v5/jobs/${jobId}`),
   cancelJob: (jobId) => api(`/api/v5/jobs/${jobId}/cancel`, { method: "POST" }),
@@ -498,8 +499,20 @@ function updateActionBar() {
           actions.push({ text: "编译算例", class: "button-primary", fn: () => compileCase() });
         } else if (state.compiledCase) {
           if (!state.job) {
-            actions.push({ text: "AI 预检查", class: "button-secondary", fn: () => reviewCase() });
-            actions.push({ text: "提交工作站", class: "button-primary", fn: () => submitToWorkstation() });
+            // Check if there are review errors to fix
+            const reviewMsg = [...state.messages].reverse().find(m => m.reviewResult);
+            const hasReviewErrors = reviewMsg?.reviewResult?.has_issues &&
+              reviewMsg.reviewResult.issues?.some(i => i.severity === "error");
+            // Check if fix was already applied
+            const fixMsg = [...state.messages].reverse().find(m => m.fixResult);
+            const alreadyFixed = fixMsg?.fixResult?.fixed;
+            if (hasReviewErrors && !alreadyFixed) {
+              actions.push({ text: "AI 修复问题", class: "button-primary", fn: () => fixCaseIssues() });
+              actions.push({ text: "AI 预检查", class: "button-secondary", fn: () => reviewCase() });
+            } else {
+              actions.push({ text: "AI 预检查", class: "button-secondary", fn: () => reviewCase() });
+              actions.push({ text: "提交工作站", class: "button-primary", fn: () => submitToWorkstation() });
+            }
           } else if (state.job.state === "running" || state.job.state === "queued") {
             actions.push({ text: "刷新状态", class: "button-secondary", fn: () => pollJobStatus() });
             actions.push({ text: "取消任务", class: "button-secondary", fn: () => cancelJob() });
@@ -847,6 +860,46 @@ async function reviewCase() {
     renderAll();
   } catch (e) {
     addMessage("system", `AI 预检查失败: ${e.message}`, { error: e.message });
+  }
+}
+
+async function fixCaseIssues() {
+  if (!state.casePlan) return;
+  // Get issues from the last review result in state
+  const reviewMsg = state.messages.findLast?.(m => m.reviewResult) ||
+    [...state.messages].reverse().find(m => m.reviewResult);
+  const issues = reviewMsg?.reviewResult?.issues || [];
+  if (issues.length === 0) {
+    addMessage("system", "没有可修复的问题，请先运行 AI 预检查");
+    return;
+  }
+  try {
+    addMessage("assistant", `正在用 AI 修复 ${issues.length} 个问题...`);
+    const result = await API.fixCasePlan(state.casePlan.case_plan_id, issues);
+    const fixedFiles = result.fixed_files || [];
+    const remaining = result.remaining_issues || [];
+    const postReview = result.post_fix_review || {};
+
+    if (result.fixed && fixedFiles.length > 0) {
+      const fileList = fixedFiles.join(", ");
+      if (postReview.has_issues && postReview.issues?.length > 0) {
+        const remainingErrors = postReview.issues.filter(i => i.severity === "error");
+        const remainingWarnings = postReview.issues.filter(i => i.severity === "warning");
+        if (remainingErrors.length > 0) {
+          const errList = remainingErrors.map(e => `  • [${e.file}] ${e.description}`).join("\n");
+          addMessage("system", `AI 修复了 ${fixedFiles.length} 个文件 (${fileList})，但仍有 ${remainingErrors.length} 个错误:\n${errList}`, { fixResult: result });
+        } else {
+          addMessage("assistant", `AI 修复了 ${fixedFiles.length} 个文件 (${fileList})。剩余 ${remainingWarnings.length} 个警告，不影响提交。`, { fixResult: result });
+        }
+      } else {
+        addMessage("assistant", `AI 修复完成，已修复 ${fixedFiles.length} 个文件 (${fileList})。重新检查通过，可以提交工作站。`, { fixResult: result });
+      }
+    } else {
+      addMessage("system", `AI 修复未能解决问题: ${result.summary}`, { fixResult: result });
+    }
+    renderAll();
+  } catch (e) {
+    addMessage("system", `AI 修复失败: ${e.message}`, { error: e.message });
   }
 }
 

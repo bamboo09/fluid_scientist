@@ -1734,6 +1734,92 @@ def review_case_plan(case_plan_id: str) -> dict[str, Any]:
     }
 
 
+@router.post("/case-plans/{case_plan_id}/fix")
+def fix_case_plan(
+    case_plan_id: str,
+    payload: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Auto-fix OpenFOAM case files based on review issues.
+
+    Takes the review result (issues list) and uses an LLM to fix the
+    problematic files. After fixing, automatically re-reviews the case
+    to verify the fixes were successful.
+
+    Request body (optional):
+        {
+            "issues": [...]  # Review issues to fix. If omitted, runs review first.
+        }
+
+    Returns:
+        {
+            "case_plan_id": str,
+            "fixed": bool,
+            "fixed_files": list[str],
+            "remaining_issues": list,
+            "post_fix_review": {...},  # Re-review result after fixes
+            "summary": str,
+        }
+    """
+    case_plan = _repo.get_case_plan(case_plan_id)
+    if case_plan is None:
+        raise HTTPException(status_code=404, detail="Case plan not found")
+
+    # Find the compiled case directory
+    import glob as _glob
+    pattern = os.path.join(tempfile.gettempdir(), f"fluid_case_{case_plan_id}*")
+    matching_dirs = _glob.glob(pattern)
+    if not matching_dirs:
+        raise HTTPException(
+            status_code=409,
+            detail="Case has not been compiled yet. Compile first via "
+            "POST /api/v5/case-plans/{case_plan_id}/compile",
+        )
+    case_dir = matching_dirs[0]
+
+    from fluid_scientist.llm.case_reviewer import (
+        fix_case_with_llm,
+        review_case_with_llm,
+    )
+
+    llm = _get_llm_client()
+
+    # Get issues from request body or run review first
+    if payload and payload.get("issues"):
+        review_result = {"has_issues": True, "issues": payload["issues"]}
+    else:
+        review_result = review_case_with_llm(llm, case_dir, session_id="")
+
+    if not review_result.get("has_issues"):
+        return {
+            "case_plan_id": case_plan_id,
+            "fixed": False,
+            "fixed_files": [],
+            "remaining_issues": [],
+            "post_fix_review": review_result,
+            "summary": "No issues found — nothing to fix",
+        }
+
+    # Apply fixes
+    fix_result = fix_case_with_llm(llm, case_dir, review_result, session_id="")
+
+    # Re-review after fixes
+    post_fix_review = review_case_with_llm(llm, case_dir, session_id="")
+
+    return {
+        "case_plan_id": case_plan_id,
+        "case_dir": case_dir,
+        "fixed": fix_result.get("fixed", False),
+        "fixed_files": fix_result.get("fixed_files", []),
+        "remaining_issues": fix_result.get("remaining_issues", []),
+        "post_fix_review": {
+            "has_issues": post_fix_review.get("has_issues", False),
+            "issues": post_fix_review.get("issues", []),
+            "summary": post_fix_review.get("summary", ""),
+        },
+        "summary": fix_result.get("summary", ""),
+    }
+
+
 @router.get("/capabilities")
 def list_capabilities() -> dict[str, Any]:
     """List registered capabilities in the capability registry."""
