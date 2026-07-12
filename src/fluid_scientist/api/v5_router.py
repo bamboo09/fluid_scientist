@@ -795,6 +795,15 @@ def _classify_with_llm(
         and not any(k in user_message.lower() for k in ("新建", "另一个", "new", "another"))
     ):
         intent = "UNRESOLVED"
+    # If the session has no draft yet, but the LLM classified the message as
+    # MODIFY_DRAFT or SUPPLEMENT_DRAFT, treat it as NEW_RESEARCH instead —
+    # there is nothing to modify.
+    if (
+        not session.current_draft_id
+        and intent in ("MODIFY_DRAFT", "SUPPLEMENT_DRAFT")
+    ):
+        intent = "NEW_RESEARCH"
+        reason = "No existing draft in session; treating as new research request."
     return route.model_copy(
         update={
             "input_type": mapping.get(intent, route.input_type),
