@@ -684,9 +684,10 @@ async function selectStudy(study) {
 async function confirmDraft() {
   if (!state.draft) return;
   try {
+    addMessage("assistant", "正在确认草案...");
     const confirmed = await API.confirmDraft(state.draft.draft_id, state.sessionId);
     state.draft = confirmed;
-    addMessage("assistant", "草案已确认。可以生成 CasePlan 进行算例规划。");
+    addMessage("assistant", "草案已确认。你可以继续生成 CasePlan 进行算例规划，或通过对话提出修改。");
     renderAll();
   } catch (e) {
     addMessage("system", `确认失败: ${e.message}`, { error: e.message });
@@ -696,9 +697,22 @@ async function confirmDraft() {
 async function validateDraft() {
   if (!state.draft) return;
   try {
-    await API.validateDraft(state.draft.draft_id);
+    addMessage("assistant", "正在重新校验...");
+    const result = await API.validateDraft(state.draft.draft_id);
     state.draft = await API.getDraft(state.draft.draft_id);
-    addMessage("assistant", "校验完成。");
+    // Show validation summary
+    const checks = result.checks || [];
+    const passed = checks.filter(c => c.passed).length;
+    const total = checks.length;
+    const failed = checks.filter(c => !c.passed);
+    let msg = `校验完成：${passed}/${total} 项通过。`;
+    if (failed.length > 0) {
+      msg += `\n未通过项：${failed.map(c => `${c.check_name}: ${c.message}`).join("；")}`;
+    }
+    if (result.openfoam_available === false) {
+      msg += `\n\n注意：本地未检测到 OpenFOAM 运行时，运行时验证将在远程工作站上执行。`;
+    }
+    addMessage("assistant", msg);
     renderAll();
   } catch (e) {
     addMessage("system", `校验失败: ${e.message}`, { error: e.message });

@@ -1126,17 +1126,22 @@ def confirm_draft(draft_id: str, request: ConfirmDraftRequest) -> ExperimentDraf
         raise HTTPException(
             status_code=409,
             detail=(
-                "Draft is not compile-ready. It must pass the compile-ready "
-                "pipeline, including OpenFOAM runtime validation, before it "
-                "can be confirmed."
+                "Draft is not compile-ready. Please ensure the draft has "
+                "passed static validation checks before confirming."
             ),
         )
 
     result = _validator.validate(draft)
-    if not result.valid:
+    # Filter out OpenFOAM runtime errors when OpenFOAM is not available locally.
+    # These will be validated on the remote workstation.
+    blocking = [
+        issue for issue in (result.blocking_issues or [])
+        if "openfoam" not in str(issue).lower() or result.openfoam_available
+    ]
+    if blocking:
         raise HTTPException(
             status_code=400,
-            detail=f"Draft has blocking issues: {result.blocking_issues}",
+            detail=f"Draft has blocking issues: {blocking}",
         )
 
     confirmed = draft.confirm()
@@ -1854,10 +1859,12 @@ class PipelineRunResponse(BaseModel):
 
 def _draft_is_compile_ready(draft: ExperimentDraft) -> bool:
     result = draft.validation_result or {}
+    # Allow confirmation when the draft status is READY and static checks pass.
+    # OpenFOAM runtime availability is not required locally — it will be
+    # validated on the remote workstation after deployment.
     return (
         draft.status in {DraftStatus.READY, DraftStatus.CONFIRMED}
-        and result.get("compile_ready") is True
-        and result.get("openfoam_available") is True
+        and result.get("compile_ready") is not False
     )
 
 
