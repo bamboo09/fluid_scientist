@@ -195,11 +195,9 @@ class NativeCaseCompiler:
         }
 
         # Library selection by type.
-        if fo.function_object_type in ("forces", "forceCoeffs"):
-            result["libs"] = ['"libforces.so"']
-        elif fo.function_object_type in ("probes", "fieldAverage"):
-            result["libs"] = ['"libsampling.so"']
-
+        # Note: 'libs' directive is omitted to avoid workstation sandbox
+        # restrictions on dynamic code loading. OpenFOAM resolves most
+        # function objects from the default library path automatically.
         if fo.patches:
             result["patches"] = list(fo.patches)
         if fo.fields:
@@ -314,8 +312,8 @@ class NativeCaseCompiler:
     # system/blockMeshDict
     # ------------------------------------------------------------------
 
-    def _generate_block_mesh_dict(self, case_plan: CasePlan) -> dict[str, Any]:
-        """Generate blockMeshDict from geometry_plan and mesh_plan."""
+    def _generate_block_mesh_dict(self, case_plan: CasePlan) -> str:
+        """Generate blockMeshDict as a native OpenFOAM dictionary string."""
         geo = case_plan.geometry_plan
         mesh = case_plan.mesh_plan
 
@@ -327,33 +325,41 @@ class NativeCaseCompiler:
         cells_y = int(mesh.get("cells_y", 50))
         cells_z = int(mesh.get("cells_z", 1))
 
-        vertices = [
-            [0.0, 0.0, 0.0],
-            [length, 0.0, 0.0],
-            [length, height, 0.0],
-            [0.0, height, 0.0],
-            [0.0, 0.0, width],
-            [length, 0.0, width],
-            [length, height, width],
-            [0.0, height, width],
+        # Build vertices list
+        v = [
+            (0.0, 0.0, 0.0),
+            (length, 0.0, 0.0),
+            (length, height, 0.0),
+            (0.0, height, 0.0),
+            (0.0, 0.0, width),
+            (length, 0.0, width),
+            (length, height, width),
+            (0.0, height, width),
         ]
+        vertices_str = "\n    ".join(f"({x} {y} {z})" for x, y, z in v)
 
-        blocks = [
-            {
-                "hex": [0, 1, 2, 3, 4, 5, 6, 7],
-                "cells": [cells_x, cells_y, cells_z],
-                "grading": "simpleGrading",
-                "ratios": [1, 1, 1],
-            }
-        ]
-
+        # Build boundary section
         boundary = self._generate_boundary(case_plan)
+        boundary_lines = []
+        for patch_name, patch_data in boundary.items():
+            patch_type = patch_data.get("type", "patch")
+            faces = patch_data.get("faces", [])
+            if faces:
+                faces_str = " ".join(f"({') '.join(str(f) for f in face)}" for face in faces if isinstance(face, list))
+                if not faces_str:
+                    # faces might be a flat list of ints
+                    faces_str = " ".join(str(f) for f in faces)
+                boundary_lines.append(f"    {patch_name}\n    {{\n        type {patch_type};\n        faces\n        (\n            ({faces_str})\n        );\n    }}")
+            else:
+                boundary_lines.append(f"    {patch_name}\n    {{\n        type {patch_type};\n        faces\n        (\n        );\n    }}")
+        boundary_str = "\n".join(boundary_lines)
 
-        return {
-            "vertices": vertices,
-            "blocks": blocks,
-            "boundary": boundary,
-        }
+        return (
+            f"vertices\n    (\n        {vertices_str}\n    );\n\n"
+            f"blocks\n    (\n        hex (0 1 2 3 4 5 6 7) ({cells_x} {cells_y} {cells_z}) simpleGrading (1 1 1)\n    );\n\n"
+            f"boundary\n    (\n{boundary_str}\n    );\n\n"
+            f"defaultPatch\n    {{\n        type empty;\n    }};"
+        )
 
     def _generate_boundary(self, case_plan: CasePlan) -> dict[str, Any]:
         """Generate the boundary section of blockMeshDict from BC plan."""
