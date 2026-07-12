@@ -802,8 +802,13 @@ async function compileCase() {
     addMessage("assistant", "正在编译算例...");
     const result = await API.compileCasePlan(state.casePlan.case_plan_id);
     state.compiledCase = result;
+    const fc = result.file_count || 0;
     const fileList = result.files?.length ? `\n生成文件: ${result.files.join(", ")}` : "";
-    addMessage("assistant", `算例编译完成。共 ${result.file_count || 0} 个文件。${fileList}`);
+    if (fc > 0) {
+      addMessage("assistant", `算例编译完成。共 ${fc} 个文件。${fileList}`);
+    } else {
+      addMessage("system", `编译完成但生成了 0 个文件，请检查配置。`);
+    }
     renderAll();
   } catch (e) {
     addMessage("system", `编译失败: ${e.message}`, { error: e.message });
