@@ -255,6 +255,7 @@ class LLMCallRecord(BaseModel):
         "input_routing",
         "study_decomposition",
         "physics_intent",
+        "scientific_intent",
         "clarification_extract",
         "clarification_planning",
         "draft_generation",
@@ -266,6 +267,8 @@ class LLMCallRecord(BaseModel):
         "code_extension_spec",
         "code_generation",
         "code_review",
+        "observable_inference",
+        "case_review",
         "explanation",
     ]
     provider: str = "unknown"
