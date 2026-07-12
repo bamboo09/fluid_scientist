@@ -1704,7 +1704,7 @@ def review_case_plan(case_plan_id: str) -> dict[str, Any]:
     - Missing required parameters
     - Invalid configurations that would cause runtime failures
     """
-    case_plan = _case_plan_store.get(case_plan_id)
+    case_plan = _repo.get_case_plan(case_plan_id)
     if case_plan is None:
         raise HTTPException(status_code=404, detail="Case plan not found")
 
