@@ -322,24 +322,41 @@ class CasePlanGenerator:
 
         Also includes endTime/deltaT from control_parameters if available.
         """
+        steady = "simple" in solver.lower()
         if draft.numerics:
             plan = dict(draft.numerics)
         else:
-            steady = "simple" in solver.lower()
-            if steady:
-                plan = {
-                    "endTime": 1000,
-                    "deltaT": 1.0,
-                    "writeControl": "timeStep",
-                    "writeInterval": 100,
-                }
+            plan = {}
+
+        # Ensure endTime and deltaT are always present — the compiler requires them.
+        # Try to extract from time_control first, then fall back to sensible defaults.
+        time_ctrl = plan.get("time_control", {}) or {}
+        if not isinstance(time_ctrl, dict):
+            time_ctrl = {}
+
+        if "endTime" not in plan:
+            # Try to get from time_control
+            end_time = time_ctrl.get("end_time") or time_ctrl.get("endTime")
+            if end_time is not None:
+                plan["endTime"] = end_time
+            elif steady:
+                plan["endTime"] = 1000
             else:
-                plan = {
-                    "endTime": 1000,
-                    "deltaT": 0.01,
-                    "writeControl": "timeStep",
-                    "writeInterval": 100,
-                }
+                plan["endTime"] = 10.0
+
+        if "deltaT" not in plan:
+            delta_t = time_ctrl.get("delta_t") or time_ctrl.get("deltaT")
+            if delta_t is not None:
+                plan["deltaT"] = delta_t
+            elif steady:
+                plan["deltaT"] = 1.0
+            else:
+                plan["deltaT"] = 0.01
+
+        # Ensure writeControl and writeInterval exist
+        plan.setdefault("writeControl", "timeStep")
+        plan.setdefault("writeInterval", 100 if steady else 50)
+
         # Override with values from control_parameters if present
         for param in draft.control_parameters:
             pid = param.parameter_id.lower()
@@ -348,7 +365,7 @@ class CasePlanGenerator:
             elif pid == "deltat" and param.value is not None:
                 plan["deltaT"] = param.value
         # Record steady flag for the compiler.
-        plan.setdefault("steady", "simple" in solver.lower())
+        plan["steady"] = steady
         return plan
 
     def _generate_measurement_plan(self, draft: ExperimentDraft) -> MeasurementPlanSpec:
