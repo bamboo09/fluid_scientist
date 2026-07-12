@@ -207,6 +207,10 @@ class WorkstationProfileStore:
                 conn.close()
         return [self._load(data, default) for data, default in rows]
 
+    def list_profiles(self) -> list[WorkstationProfile]:
+        """Compatibility alias used by discovery/bootstrap services."""
+        return self.list_all()
+
     def get_default(self) -> WorkstationProfile | None:
         """Return the profile currently marked default, or ``None``."""
         with self._lock:

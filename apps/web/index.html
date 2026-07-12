@@ -104,18 +104,16 @@
 
     <dialog id="workstation-settings" class="settings-dialog">
       <form method="dialog" class="dialog-shell">
-        <header><div><p class="card-kicker">工作站连接</p><h2>配置工作站 SSH</h2></div><button class="icon-button" value="cancel" aria-label="关闭">×</button></header>
-        <label class="field-label" for="ws-input-host">工作站 IP 地址</label>
-        <input id="ws-input-host" type="text" placeholder="如 10.129.177.241" list="ws-host-suggestions">
+        <header><div><p class="card-kicker">工作站连接</p><h2>添加工作站</h2></div><button class="icon-button" value="cancel" aria-label="关闭">×</button></header>
+        <label class="field-label" for="ws-input-name">工作站名称</label>
+        <input id="ws-input-name" type="text" placeholder="OpenFOAM Workstation">
+        <label class="field-label" for="ws-input-host">主机地址或 Host alias</label>
+        <input id="ws-input-host" type="text" placeholder="如 10.129.177.241 或 hpc-login" list="ws-host-suggestions">
         <datalist id="ws-host-suggestions"></datalist>
         <label class="field-label" for="ws-input-user">SSH 用户名</label>
-        <input id="ws-input-user" type="text" placeholder="如 ls">
+        <input id="ws-input-user" type="text" placeholder="SSH 用户名">
         <label class="field-label" for="ws-input-port">SSH 端口</label>
         <input id="ws-input-port" type="number" value="22" min="1" max="65535">
-        <label class="field-label" for="ws-input-key">密钥文件路径</label>
-        <input id="ws-input-key" type="text" placeholder="自动探测">
-        <label class="field-label" for="ws-input-knownhosts">known_hosts 文件路径</label>
-        <input id="ws-input-knownhosts" type="text" placeholder="自动探测">
         <p id="ws-config-state" class="dialog-state" role="status"></p>
         <div class="dialog-actions"><button value="cancel" class="button button-secondary">取消</button><button id="ws-save-config" class="button button-primary" type="button">保存并连接</button></div>
       </form>

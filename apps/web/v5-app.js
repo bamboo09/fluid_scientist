@@ -87,6 +87,8 @@ const API = {
   setDefaultWorkstation: (profileId) => api(`/api/v5/workstations/${profileId}/set-default`, { method: "POST" }),
   deleteWorkstation: (profileId) => api(`/api/v5/workstations/${profileId}`, { method: "DELETE" }),
   getDefaultWorkstation: () => api("/api/v5/workstations/default"),
+  getWorkstationBootstrapStatus: () => api("/api/v5/workstations/bootstrap-status"),
+  bootstrapWorkstation: (cfg) => api("/api/v5/workstations/bootstrap", { method: "POST", body: JSON.stringify(cfg) }),
 };
 
 // ---- State (frontend only caches display state; backend is source of truth) ----
@@ -1012,6 +1014,7 @@ const wsState = {
   probing: new Set(),
   error: null,
   expanded: false,
+  bootstrapStatus: null,
 };
 
 function wsStatusKey(status) {
@@ -1123,10 +1126,36 @@ function renderWorkstationPanel() {
 
   // Empty hint
   if (!wsState.candidates.length && !wsState.profiles.length && !wsState.error) {
-    body.appendChild(el("div", { class: "ws-empty-hint", text: "点击「自动发现」扫描可用工作站，或在已保存列表中管理连接。" }));
+    body.appendChild(renderBootstrapForm());
   }
 
   panel.appendChild(body);
+}
+
+function renderBootstrapForm() {
+  return el("form", {
+    class: "ws-bootstrap-form",
+    onsubmit: (event) => {
+      event.preventDefault();
+      handleBootstrap(new FormData(event.currentTarget));
+    },
+  }, [
+    el("div", { class: "ws-empty-hint", text: "尚未发现已配置的工作站。" }),
+    el("label", { class: "field-label", for: "ws-bootstrap-host", text: "主机地址或 Host alias" }),
+    el("input", { id: "ws-bootstrap-host", name: "host", type: "text", required: true, placeholder: "如 10.129.177.241 或 hpc-login" }),
+    el("label", { class: "field-label", for: "ws-bootstrap-user", text: "用户名" }),
+    el("input", { id: "ws-bootstrap-user", name: "username", type: "text", required: true, placeholder: "SSH 用户名" }),
+    el("label", { class: "field-label", for: "ws-bootstrap-port", text: "端口" }),
+    el("input", { id: "ws-bootstrap-port", name: "port", type: "number", min: "1", max: "65535", value: "22" }),
+    el("label", { class: "field-label", for: "ws-bootstrap-name", text: "工作站名称" }),
+    el("input", { id: "ws-bootstrap-name", name: "display_name", type: "text", placeholder: "OpenFOAM Workstation" }),
+    el("button", {
+      type: "submit",
+      class: "ws-btn ws-btn-primary",
+      text: wsState.probing.has("__bootstrap__") ? "连接中…" : "添加工作站",
+      disabled: wsState.probing.has("__bootstrap__"),
+    }),
+  ]);
 }
 
 function renderCandidateCard(candidate) {
@@ -1231,11 +1260,34 @@ async function loadWorkstationProfiles() {
   try {
     const resp = await API.listWorkstationProfiles();
     wsState.profiles = Array.isArray(resp) ? resp : (resp.profiles || resp.workstations || []);
+    wsState.bootstrapStatus = await API.getWorkstationBootstrapStatus();
   } catch (e) {
     wsState.profiles = [];
     wsState.error = `加载工作站列表失败: ${e.message}`;
   }
   renderWorkstationPanel();
+}
+
+async function handleBootstrap(formData) {
+  wsState.error = null;
+  wsState.probing.add("__bootstrap__");
+  renderWorkstationPanel();
+  try {
+    const payload = {
+      host: String(formData.get("host") || "").trim(),
+      username: String(formData.get("username") || "").trim(),
+      port: Number(formData.get("port") || 22),
+    };
+    const displayName = String(formData.get("display_name") || "").trim();
+    if (displayName) payload.display_name = displayName;
+    await API.bootstrapWorkstation(payload);
+    await loadWorkstationProfiles();
+  } catch (e) {
+    wsState.error = `添加工作站失败: ${e.message}`;
+  } finally {
+    wsState.probing.delete("__bootstrap__");
+    renderWorkstationPanel();
+  }
 }
 
 async function handleDiscover() {
@@ -1395,13 +1447,16 @@ function bindEvents() {
   // Workstation config
   byId("ws-save-config").addEventListener("click", async () => {
     try {
-      await API.configureWorkstation({
-        host: byId("ws-input-host").value, username: byId("ws-input-user").value,
+      const payload = {
+        host: byId("ws-input-host").value,
+        username: byId("ws-input-user").value,
         port: parseInt(byId("ws-input-port").value) || 22,
-        identity_file: byId("ws-input-key").value, known_hosts_file: byId("ws-input-knownhosts").value,
-      });
-      byId("ws-config-state").textContent = "配置成功";
-      setTimeout(() => { byId("workstation-settings").close(); loadWorkstationStatus(); }, 800);
+      };
+      const displayName = byId("ws-input-name") ? byId("ws-input-name").value.trim() : "";
+      if (displayName) payload.display_name = displayName;
+      await API.bootstrapWorkstation(payload);
+      byId("ws-config-state").textContent = "工作站已保存";
+      setTimeout(() => { byId("workstation-settings").close(); loadWorkstationStatus(); loadWorkstationProfiles(); }, 800);
     } catch (e) { byId("ws-config-state").textContent = "配置失败: " + e.message; }
   });
 }

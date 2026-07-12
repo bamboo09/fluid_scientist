@@ -96,6 +96,7 @@ class WorkstationConnectionService:
         """
         host_alias = candidate.host_alias
         candidate_id = candidate.candidate_id
+        self._register_candidate_target(candidate)
 
         def _result(
             *,
@@ -376,6 +377,25 @@ class WorkstationConnectionService:
         except Exception:
             return None
 
+    def _register_candidate_target(self, candidate: WorkstationCandidate) -> None:
+        """Register direct host/user/port metadata with the runner when present.
+
+        This enables minimal bootstrap profiles that are not present in
+        ``~/.ssh/config`` while still using the same system OpenSSH runner.
+        """
+        register = getattr(self._runner, "register_target", None)
+        if not callable(register):
+            return
+        host = getattr(candidate, "resolved_host", "") or candidate.host_alias
+        user = getattr(candidate, "resolved_user", "") or ""
+        port = getattr(candidate, "resolved_port", 22) or 22
+        if not host or not user:
+            return
+        try:
+            register(candidate.host_alias, hostname=host, username=user, port=port)
+        except ValueError:
+            return
+
     @staticmethod
     def _candidate_from_profile(
         profile: WorkstationProfile,
@@ -384,7 +404,7 @@ class WorkstationConnectionService:
         try:
             credential_source = CredentialSource(profile.connection_method)
         except ValueError:
-            credential_source = CredentialSource.SSH_CONFIG
+            credential_source = CredentialSource.SSH_AGENT
         return WorkstationCandidate(
             candidate_id=profile.profile_id,
             host_alias=profile.host_alias,

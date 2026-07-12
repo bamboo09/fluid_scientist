@@ -26,6 +26,10 @@ import sys
 from typing import Any
 
 from fluid_scientist.workstations.connection import WorkstationConnectionService
+from fluid_scientist.workstations.bootstrap import (
+    BootstrapRequest,
+    WorkstationBootstrapService,
+)
 from fluid_scientist.workstations.discovery import WorkstationDiscoveryService
 from fluid_scientist.workstations.models import (
     PlatformStatus,
@@ -46,6 +50,12 @@ _runner = SSHCommandRunner()
 _store = WorkstationProfileStore()
 _discovery = WorkstationDiscoveryService(runner=_runner, profile_store=_store)
 _connection = WorkstationConnectionService(runner=_runner, store=_store)
+_bootstrap = WorkstationBootstrapService(
+    runner=_runner,
+    store=_store,
+    discovery=_discovery,
+    connection=_connection,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -401,6 +411,77 @@ def auto_connect(
     return 0
 
 
+def bootstrap(
+    *,
+    host: str | None = None,
+    username: str | None = None,
+    port: int = 22,
+    name: str | None = None,
+    output_json: bool = False,
+    input_fn=input,
+    output_fn=print,
+) -> int:
+    """Bootstrap a workstation profile from minimal non-secret metadata."""
+    if host is None and not output_json:
+        output_fn("Host address or SSH host alias: ", end="")
+        host = input_fn("").strip()
+    if username is None and not output_json:
+        output_fn("SSH username: ", end="")
+        username = input_fn("").strip()
+    if not port and not output_json:
+        output_fn("SSH port [22]: ", end="")
+        raw = input_fn("").strip()
+        port = int(raw) if raw else 22
+    if name is None and not output_json:
+        output_fn("Workstation name (optional): ", end="")
+        raw_name = input_fn("").strip()
+        name = raw_name or None
+
+    if not host or not username:
+        result = {
+            "status": "FAILED",
+            "error_code": "INVALID_BOOTSTRAP_REQUEST",
+            "error_message": "host and username are required",
+        }
+        if output_json:
+            print(json.dumps(result, indent=2))
+        else:
+            output_fn("Error: host and username are required.")
+        return 1
+
+    try:
+        request = BootstrapRequest(
+            display_name=name,
+            host=host,
+            username=username,
+            port=port,
+        )
+    except Exception as error:
+        result = {
+            "status": "FAILED",
+            "error_code": "INVALID_BOOTSTRAP_REQUEST",
+            "error_message": str(error),
+        }
+        if output_json:
+            print(json.dumps(result, indent=2))
+        else:
+            output_fn(f"Error: {error}")
+        return 1
+
+    result = _bootstrap.bootstrap(request).model_dump()
+    if output_json:
+        print(json.dumps(result, indent=2, default=str))
+    elif result.get("error_code"):
+        output_fn(f"Bootstrap failed: {result['error_code']} - {result.get('error_message') or ''}")
+    else:
+        profile = result.get("profile") or {}
+        output_fn(f"Saved workstation: {profile.get('display_name')}")
+        output_fn(f"  Status: {result.get('status')}")
+        output_fn(f"  Profile ID: {profile.get('profile_id')}")
+        output_fn(f"  OpenFOAM: {profile.get('openfoam_version') or 'not detected'}")
+    return 0 if not result.get("error_code") else 1
+
+
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
@@ -427,11 +508,32 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Output machine-readable JSON instead of human-readable text",
     )
+    bs = subparsers.add_parser(
+        "bootstrap",
+        help="Create a workstation profile from host/user/port only",
+    )
+    bs.add_argument("--host", help="Host address or SSH host alias")
+    bs.add_argument("--username", help="SSH username")
+    bs.add_argument("--port", type=int, default=22, help="SSH port")
+    bs.add_argument("--name", help="Display name")
+    bs.add_argument(
+        "--json",
+        action="store_true",
+        help="Output machine-readable JSON instead of human-readable text",
+    )
 
     args = parser.parse_args(argv)
 
     if args.command == "auto-connect":
         return auto_connect(output_json=args.json)
+    if args.command == "bootstrap":
+        return bootstrap(
+            host=args.host,
+            username=args.username,
+            port=args.port,
+            name=args.name,
+            output_json=args.json,
+        )
 
     parser.print_help()
     return 0

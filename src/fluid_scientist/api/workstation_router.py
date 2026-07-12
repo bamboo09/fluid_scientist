@@ -14,6 +14,10 @@ from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException, status
 
+from fluid_scientist.workstations.bootstrap import (
+    BootstrapRequest,
+    WorkstationBootstrapService,
+)
 from fluid_scientist.workstations.connection import WorkstationConnectionService
 from fluid_scientist.workstations.discovery import WorkstationDiscoveryService
 from fluid_scientist.workstations.models import (
@@ -33,6 +37,12 @@ _runner = SSHCommandRunner()
 _store = WorkstationProfileStore()
 _discovery = WorkstationDiscoveryService(runner=_runner, profile_store=_store)
 _connection = WorkstationConnectionService(runner=_runner, store=_store)
+_bootstrap = WorkstationBootstrapService(
+    runner=_runner,
+    store=_store,
+    discovery=_discovery,
+    connection=_connection,
+)
 
 _SSH_CONFIG_PATH = Path.home() / ".ssh" / "config"
 
@@ -60,6 +70,9 @@ _ERROR_STATUS_MAP: dict[str, int] = {
     WorkstationErrorCode.PROFILE_NOT_FOUND.value: status.HTTP_404_NOT_FOUND,
     WorkstationErrorCode.NO_USABLE_SYSTEM_SSH_IDENTITY.value: (
         status.HTTP_401_UNAUTHORIZED
+    ),
+    WorkstationErrorCode.INVALID_BOOTSTRAP_REQUEST.value: (
+        status.HTTP_422_UNPROCESSABLE_ENTITY
     ),
 }
 
@@ -182,6 +195,26 @@ async def get_default_profile() -> dict:
             },
         )
     return profile.model_dump()
+
+
+@router.get("/bootstrap-status")
+async def bootstrap_status() -> dict:
+    """Return whether a minimal workstation bootstrap is required."""
+    return _bootstrap.status().model_dump()
+
+
+@router.post("/bootstrap")
+async def bootstrap_workstation(request: BootstrapRequest) -> dict:
+    """Bootstrap a profile from host/user/port only.
+
+    The request model forbids secret/path/shell fields. Authentication and
+    probing continue through the system SSH agent/config and existing
+    workstation connection service.
+    """
+    result = _bootstrap.bootstrap(request)
+    if result.error_code:
+        _raise_for_error(result.error_code, result.error_message)
+    return result.model_dump()
 
 
 @router.get("")

@@ -22,6 +22,7 @@ from fluid_scientist.workstations.models import KnownHostStatus
 logger = logging.getLogger(__name__)
 
 _SAFE_HOST_ALIAS = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+_SAFE_USERNAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 
 _DEFAULT_MAX_OUTPUT_CHARS = 10_000
 _DEFAULT_TIMEOUT = 30.0
@@ -108,6 +109,28 @@ class SSHCommandRunner:
         self._default_timeout = default_timeout
         self._max_output_chars = max_output_chars
         self._known_hosts_file = known_hosts_file or (Path.home() / ".ssh" / "known_hosts")
+        self._targets: dict[str, tuple[str, str, int]] = {}
+
+    def register_target(
+        self,
+        alias: str,
+        *,
+        hostname: str,
+        username: str,
+        port: int = 22,
+    ) -> None:
+        """Register non-sensitive connection metadata for a bootstrap host.
+
+        The metadata is process-local and contains no private key, password,
+        passphrase, OpenFOAM path, remote directory, or shell script.
+        """
+        safe_alias = SafeHostAlias(alias)
+        safe_host = SafeHostAlias(hostname)
+        if not _SAFE_USERNAME.fullmatch(username):
+            raise ValueError("username must be a valid OpenSSH user name")
+        if not (1 <= int(port) <= 65535):
+            raise ValueError("port must be in the range 1-65535")
+        self._targets[str(safe_alias)] = (str(safe_host), username, int(port))
 
     # ------------------------------------------------------------------
     # Public API
@@ -132,6 +155,15 @@ class SSHCommandRunner:
         """
         alias = SafeHostAlias(host_alias)
         logger.debug("resolving host parameters for %s", alias)
+        if str(alias) in self._targets:
+            hostname, username, port = self._targets[str(alias)]
+            return {
+                "hostname": hostname,
+                "user": username,
+                "port": port,
+                "proxyjump": None,
+                "identityagent": None,
+            }
         try:
             result = self._run(
                 ("ssh", "-G", str(alias)),
@@ -218,15 +250,7 @@ class SSHCommandRunner:
         """
         alias = SafeHostAlias(host_alias)
         connect_timeout = max(1, int(timeout))
-        argv = (
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            f"ConnectTimeout={connect_timeout}",
-            str(alias),
-            command,
-        )
+        argv = self._ssh_argv(str(alias), connect_timeout) + (command,)
         logger.debug("executing remote command on %s", alias)
         try:
             return self._run(argv, timeout=timeout)
@@ -347,15 +371,9 @@ class SSHCommandRunner:
         """
         alias = SafeHostAlias(host_alias)
         connect_timeout = max(1, int(timeout))
-        argv = (
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            f"ConnectTimeout={connect_timeout}",
+        argv = self._ssh_argv(str(alias), connect_timeout) + (
             "-o",
             "StrictHostKeyChecking=yes",
-            str(alias),
             "true",
         )
         logger.debug("testing authentication for %s", alias)
@@ -391,6 +409,20 @@ class SSHCommandRunner:
             self._truncate(result.stdout),
             self._truncate(result.stderr),
         )
+
+    def _ssh_argv(self, alias: str, connect_timeout: int) -> tuple[str, ...]:
+        target = self._targets.get(alias)
+        base = (
+            "ssh",
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            f"ConnectTimeout={connect_timeout}",
+        )
+        if target is None:
+            return base + (alias,)
+        hostname, username, port = target
+        return base + ("-l", username, "-p", str(port), hostname)
 
     def _truncate(self, text: str) -> str:
         if len(text) <= self._max_output_chars:
