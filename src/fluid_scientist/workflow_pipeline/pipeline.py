@@ -165,6 +165,9 @@ class V5WorkflowPipeline:
 
         # Use pre-extracted intent if provided (e.g., from study_decomposition)
         if pre_extracted:
+            print(f"[DEBUG] pre_extracted keys: {list(pre_extracted.keys())}", flush=True)
+            print(f"[DEBUG] pre_extracted analysis_goals: {pre_extracted.get('analysis_goals')}", flush=True)
+            print(f"[DEBUG] pre_extracted observables: {pre_extracted.get('observables')}", flush=True)
             # Ensure analysis_goals are in the right format (list of dicts)
             raw_goals = pre_extracted.get("analysis_goals", [])
             if raw_goals and isinstance(raw_goals[0], str):
