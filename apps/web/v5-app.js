@@ -1357,10 +1357,15 @@ async function loadWorkstationProfiles() {
 async function handleDiscover() {
   wsState.error = null;
   wsState.probing.add("__discover__");
+  wsState.expanded = true;  // Auto-expand to show progress
   renderWorkstationPanel();
   try {
     const resp = await API.discoverWorkstations();
     wsState.candidates = Array.isArray(resp) ? resp : (resp.candidates || resp.workstations || []);
+    // Keep panel expanded if we found candidates
+    if (wsState.candidates.length > 0) {
+      wsState.expanded = true;
+    }
   } catch (e) {
     wsState.error = `自动发现失败: ${e.message}`;
     wsState.candidates = [];
