@@ -193,7 +193,12 @@ class ExperimentDesignSynthesizer:
     @staticmethod
     def _analysis_goals(study: StudyIntent, text: str) -> list[AnalysisGoal]:
         candidates: list[AnalysisGoal] = []
-        combined = f"{text} {' '.join(study.analysis_goals).lower()}"
+        # Ensure analysis_goals items are strings before joining.
+        goal_strs = [
+            str(g.get("goal", g.get("description", g.get("title", str(g))))) if isinstance(g, dict) else str(g)
+            for g in study.analysis_goals
+        ]
+        combined = f"{text} {' '.join(goal_strs).lower()}"
         mapping = [
             ("wake_deflection", ("wake deflection", "尾迹偏", "尾迹偏斜", "尾迹偏转"), ["wake_center_offset", "wake_deflection_angle"]),
             ("spanwise_reversal", ("spanwise reversal", "展向翻转", "展向反转"), ["sign_change_rate", "phase_difference", "spanwise_correlation"]),

@@ -423,8 +423,15 @@ def _merge_llm_study(study: StudyIntent, llm_study: dict[str, Any]) -> StudyInte
         value = llm_study.get(field)
         current = getattr(study, field)
         if value and (not current or current == {"type": "unknown"}):
+            # analysis_goals is list[str] — extract strings from dicts.
+            if field == "analysis_goals" and isinstance(value, list):
+                value = [
+                    str(item.get("goal", item.get("description", item.get("title", ""))))
+                    if isinstance(item, dict) else str(item)
+                    for item in value
+                ]
             # Validate that list fields contain dicts, not bare strings.
-            if isinstance(value, list):
+            elif isinstance(value, list):
                 value = [
                     item if isinstance(item, dict) else {"type": str(item), "source": "SYSTEM_DERIVED"}
                     for item in value
