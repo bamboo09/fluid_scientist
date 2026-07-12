@@ -391,6 +391,33 @@ class SSHCommandRunner:
         logger.debug("authentication failed for %s (exit %d)", alias, result.returncode)
         return False
 
+    def copy_tree_to_remote(
+        self,
+        host_alias: str,
+        local_dir: Path,
+        remote_dir: str,
+        *,
+        timeout: float = 120.0,
+    ) -> bool:
+        """Copy a local directory tree to a remote directory via ``scp -r``."""
+        alias = SafeHostAlias(host_alias)
+        if not local_dir.is_dir():
+            return False
+        target = self._targets.get(str(alias))
+        local_source = str(local_dir / ".")
+        if target is None:
+            remote = f"{alias}:{remote_dir.rstrip('/')}/"
+            argv = ("scp", "-r", local_source, remote)
+        else:
+            hostname, username, port = target
+            remote = f"{username}@{hostname}:{remote_dir.rstrip('/')}/"
+            argv = ("scp", "-P", str(port), "-r", local_source, remote)
+        try:
+            result = self._run(argv, timeout=timeout)
+        except (OSError, subprocess.TimeoutExpired):
+            return False
+        return result.returncode == 0
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
