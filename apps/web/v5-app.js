@@ -74,6 +74,19 @@ const API = {
   configureWorkstation: (cfg) => api("/api/workstation/configure", { method: "POST", body: JSON.stringify(cfg) }),
   getModelConfig: () => api("/api/v5/model-config"),
   configureModel: (cfg) => api("/api/v5/model-config", { method: "POST", body: JSON.stringify(cfg) }),
+  // ---- Workstation discovery & connection (V5) ----
+  // These endpoints drive the left-panel workstation configuration UI.
+  // No private keys / OpenFOAM paths / remote dirs / passwords are sent from
+  // the client; discovery and probing happen server-side.
+  discoverWorkstations: () => api("/api/v5/workstations/discover"),
+  probeWorkstation: (candidateId) => api(`/api/v5/workstations/${candidateId}/probe`, { method: "POST" }),
+  confirmHostKey: (candidateId) => api(`/api/v5/workstations/${candidateId}/confirm-host-key`, { method: "POST" }),
+  saveWorkstation: (candidateId, displayName) => api(`/api/v5/workstations/${candidateId}/save`, { method: "POST", body: JSON.stringify({ display_name: displayName }) }),
+  listWorkstationProfiles: () => api("/api/v5/workstations"),
+  testWorkstation: (profileId) => api(`/api/v5/workstations/${profileId}/test`, { method: "POST" }),
+  setDefaultWorkstation: (profileId) => api(`/api/v5/workstations/${profileId}/set-default`, { method: "POST" }),
+  deleteWorkstation: (profileId) => api(`/api/v5/workstations/${profileId}`, { method: "DELETE" }),
+  getDefaultWorkstation: () => api("/api/v5/workstations/default"),
 };
 
 // ---- State (frontend only caches display state; backend is source of truth) ----
@@ -986,6 +999,351 @@ async function loadWorkstationStatus() {
   }
 }
 
+// ---- Workstation Configuration Panel ----
+// Auto-discovery, probe, host-key confirmation, save, set-default, delete.
+// Inserted dynamically into the left panel after #workstation-panel-mini so
+// the three-column HTML layout in index.html is left untouched.
+// No input fields for private keys / OpenFOAM paths / remote dirs / passwords;
+// the only user input is an optional display name via prompt() when saving.
+
+const wsState = {
+  candidates: [],
+  profiles: [],
+  probing: new Set(),
+  error: null,
+  expanded: false,
+};
+
+function wsStatusKey(status) {
+  const s = String(status || "").toLowerCase();
+  if (["connected", "ok", "online", "reachable", "active", "ready"].includes(s)) return "ok";
+  if (["disconnected", "error", "failed", "offline", "unreachable", "rejected"].includes(s)) return "error";
+  if (["probing", "pending", "queued", "saving", "testing"].includes(s)) return "pending";
+  return "unknown";
+}
+
+function wsStatusLabel(status) {
+  const map = {
+    connected: "已连接", ok: "已连接", online: "在线", reachable: "可达", active: "活跃", ready: "就绪",
+    disconnected: "未连接", error: "错误", failed: "失败", offline: "离线", unreachable: "不可达", rejected: "已拒绝",
+    pending: "检测中", probing: "检测中", queued: "排队中", saving: "保存中", testing: "测试中",
+    unknown: "未知",
+  };
+  return map[String(status || "").toLowerCase()] || status || "未知";
+}
+
+function wsMetaRow(label, value) {
+  return el("div", { class: "ws-meta-row" }, [
+    el("span", { class: "ws-meta-label", text: label }),
+    el("span", { class: "ws-meta-value", text: value == null ? "—" : String(value) }),
+  ]);
+}
+
+function updateCandidate(candidateId, patch) {
+  const idx = wsState.candidates.findIndex((c) => (c.candidate_id || c.id) === candidateId);
+  if (idx >= 0) {
+    wsState.candidates[idx] = {
+      ...wsState.candidates[idx],
+      ...patch,
+      ...(patch && patch.candidate ? patch.candidate : {}),
+      probe_result: (patch && patch.probe_result) || patch,
+    };
+  }
+}
+
+function updateProfile(profileId, patch) {
+  const idx = wsState.profiles.findIndex((p) => (p.profile_id || p.id) === profileId);
+  if (idx >= 0) {
+    wsState.profiles[idx] = {
+      ...wsState.profiles[idx],
+      ...patch,
+      ...(patch && patch.profile ? patch.profile : {}),
+      probe_result: (patch && patch.probe_result) || patch,
+    };
+  }
+}
+
+function renderWorkstationPanel() {
+  const mini = byId("workstation-panel-mini");
+  if (!mini) return;
+  let panel = byId("ws-config-panel");
+  if (!panel) {
+    panel = el("div", { id: "ws-config-panel", class: "ws-config-panel" });
+    mini.parentNode.insertBefore(panel, mini.nextSibling);
+  }
+  panel.innerHTML = "";
+
+  // Collapsible header (click to toggle)
+  panel.appendChild(el("button", {
+    type: "button",
+    class: "ws-config-header" + (wsState.expanded ? " expanded" : ""),
+    onclick: () => { wsState.expanded = !wsState.expanded; renderWorkstationPanel(); },
+  }, [
+    el("span", { class: "ws-config-title", text: "工作站配置" }),
+    el("span", { class: "ws-config-count-inline", text: `${wsState.profiles.length} 个已保存` }),
+    el("span", { class: "ws-config-toggle", text: wsState.expanded ? "▾" : "▸" }),
+  ]));
+
+  if (!wsState.expanded) return;
+
+  const body = el("div", { class: "ws-config-body" });
+
+  // Toolbar
+  body.appendChild(el("div", { class: "ws-config-toolbar" }, [
+    el("button", {
+      type: "button",
+      class: "ws-btn ws-btn-primary",
+      text: wsState.probing.has("__discover__") ? "发现中…" : "自动发现",
+      disabled: wsState.probing.has("__discover__"),
+      onclick: () => handleDiscover(),
+    }),
+    el("span", { class: "ws-config-count", text: `${wsState.candidates.length} 个候选 · ${wsState.profiles.length} 个已保存` }),
+  ]));
+
+  // Error banner
+  if (wsState.error) {
+    body.appendChild(el("div", { class: "ws-error", text: wsState.error }));
+  }
+
+  // Discovered candidates
+  if (wsState.candidates.length) {
+    body.appendChild(el("div", { class: "ws-section-title", text: "发现的候选工作站" }));
+    const list = el("div", { class: "ws-candidate-list" });
+    for (const c of wsState.candidates) list.appendChild(renderCandidateCard(c));
+    body.appendChild(list);
+  }
+
+  // Saved profiles
+  if (wsState.profiles.length) {
+    body.appendChild(el("div", { class: "ws-section-title", text: "已保存的工作站" }));
+    const list = el("div", { class: "ws-profile-list" });
+    for (const p of wsState.profiles) list.appendChild(renderProfileCard(p));
+    body.appendChild(list);
+  }
+
+  // Empty hint
+  if (!wsState.candidates.length && !wsState.profiles.length && !wsState.error) {
+    body.appendChild(el("div", { class: "ws-empty-hint", text: "点击「自动发现」扫描可用工作站，或在已保存列表中管理连接。" }));
+  }
+
+  panel.appendChild(body);
+}
+
+function renderCandidateCard(candidate) {
+  const cid = candidate.candidate_id || candidate.id;
+  const isBusy = wsState.probing.has(cid);
+  const probe = candidate.probe_result || {};
+  const name = candidate.display_name || candidate.name || candidate.host_alias || cid || "未命名工作站";
+  const hostAlias = candidate.host_alias || candidate.host || probe.host_alias || "—";
+  const status = candidate.connection_status || candidate.status || (probe.connected ? "connected" : "unknown");
+  const ofVersion = candidate.openfoam_version || probe.openfoam_version || "—";
+  const scheduler = candidate.scheduler || probe.scheduler || "—";
+  const fingerprint = candidate.host_key_fingerprint || probe.host_key_fingerprint || candidate.fingerprint || probe.fingerprint;
+
+  return el("div", { class: "ws-candidate-card" }, [
+    el("div", { class: "ws-card-header" }, [
+      el("span", { class: "ws-card-name", text: name }),
+      el("span", { class: `ws-status-badge ws-status-${wsStatusKey(status)}`, text: wsStatusLabel(status) }),
+    ]),
+    el("div", { class: "ws-card-meta" }, [
+      wsMetaRow("Host", hostAlias),
+      wsMetaRow("OpenFOAM", ofVersion),
+      wsMetaRow("调度器", scheduler),
+      fingerprint ? wsMetaRow("指纹", fingerprint) : null,
+    ]),
+    candidate.probe_error ? el("div", { class: "ws-card-error", text: candidate.probe_error }) : null,
+    el("div", { class: "ws-card-actions" }, [
+      el("button", {
+        type: "button",
+        class: "ws-btn",
+        text: isBusy ? "检测中…" : "测试连接",
+        disabled: isBusy,
+        onclick: () => handleProbe(cid),
+      }),
+      el("button", {
+        type: "button",
+        class: "ws-btn",
+        text: "确认指纹",
+        disabled: isBusy,
+        onclick: () => handleConfirmHostKey(cid),
+      }),
+      el("button", {
+        type: "button",
+        class: "ws-btn ws-btn-primary",
+        text: "保存",
+        disabled: isBusy,
+        onclick: () => handleSave(cid),
+      }),
+    ]),
+  ]);
+}
+
+function renderProfileCard(profile) {
+  const pid = profile.profile_id || profile.id;
+  const isBusy = wsState.probing.has(pid);
+  const probe = profile.probe_result || {};
+  const name = profile.display_name || profile.name || profile.host_alias || pid || "未命名工作站";
+  const hostAlias = profile.host_alias || profile.host || probe.host_alias || "—";
+  const status = profile.connection_status || profile.status || (probe.connected ? "connected" : "unknown");
+  const ofVersion = profile.openfoam_version || probe.openfoam_version || "—";
+  const scheduler = profile.scheduler || probe.scheduler || "—";
+  const isDefault = profile.is_default || profile.default;
+
+  return el("div", { class: "ws-profile-card" + (isDefault ? " ws-profile-default" : "") }, [
+    el("div", { class: "ws-card-header" }, [
+      el("span", { class: "ws-card-name", text: name }),
+      isDefault ? el("span", { class: "ws-default-badge", text: "默认" }) : null,
+      el("span", { class: `ws-status-badge ws-status-${wsStatusKey(status)}`, text: wsStatusLabel(status) }),
+    ]),
+    el("div", { class: "ws-card-meta" }, [
+      wsMetaRow("Host", hostAlias),
+      wsMetaRow("OpenFOAM", ofVersion),
+      wsMetaRow("调度器", scheduler),
+    ]),
+    profile.probe_error ? el("div", { class: "ws-card-error", text: profile.probe_error }) : null,
+    el("div", { class: "ws-card-actions" }, [
+      el("button", {
+        type: "button",
+        class: "ws-btn",
+        text: isBusy ? "检测中…" : "重新检测",
+        disabled: isBusy,
+        onclick: () => handleRetest(pid),
+      }),
+      el("button", {
+        type: "button",
+        class: "ws-btn",
+        text: "设为默认",
+        disabled: isBusy || isDefault,
+        onclick: () => handleSetDefault(pid),
+      }),
+      el("button", {
+        type: "button",
+        class: "ws-btn ws-btn-danger",
+        text: "删除",
+        disabled: isBusy,
+        onclick: () => handleDeleteProfile(pid),
+      }),
+    ]),
+  ]);
+}
+
+async function loadWorkstationProfiles() {
+  try {
+    const resp = await API.listWorkstationProfiles();
+    wsState.profiles = Array.isArray(resp) ? resp : (resp.profiles || resp.workstations || []);
+  } catch (e) {
+    wsState.profiles = [];
+    wsState.error = `加载工作站列表失败: ${e.message}`;
+  }
+  renderWorkstationPanel();
+}
+
+async function handleDiscover() {
+  wsState.error = null;
+  wsState.probing.add("__discover__");
+  renderWorkstationPanel();
+  try {
+    const resp = await API.discoverWorkstations();
+    wsState.candidates = Array.isArray(resp) ? resp : (resp.candidates || resp.workstations || []);
+  } catch (e) {
+    wsState.error = `自动发现失败: ${e.message}`;
+    wsState.candidates = [];
+  } finally {
+    wsState.probing.delete("__discover__");
+    renderWorkstationPanel();
+  }
+}
+
+async function handleProbe(candidateId) {
+  wsState.probing.add(candidateId);
+  renderWorkstationPanel();
+  try {
+    const result = await API.probeWorkstation(candidateId);
+    updateCandidate(candidateId, result);
+  } catch (e) {
+    updateCandidate(candidateId, { probe_error: e.message, connection_status: "error" });
+  } finally {
+    wsState.probing.delete(candidateId);
+    renderWorkstationPanel();
+  }
+}
+
+async function handleConfirmHostKey(candidateId) {
+  wsState.probing.add(candidateId);
+  renderWorkstationPanel();
+  try {
+    const result = await API.confirmHostKey(candidateId);
+    updateCandidate(candidateId, result);
+  } catch (e) {
+    wsState.error = `确认指纹失败: ${e.message}`;
+  } finally {
+    wsState.probing.delete(candidateId);
+    renderWorkstationPanel();
+  }
+}
+
+async function handleSave(candidateId) {
+  // The only allowed user input: an optional display name via prompt().
+  const displayName = prompt("请输入工作站显示名称（可选，直接确定可跳过）：", "");
+  if (displayName === null) return; // user cancelled
+  wsState.probing.add(candidateId);
+  renderWorkstationPanel();
+  try {
+    const trimmed = displayName.trim();
+    await API.saveWorkstation(candidateId, trimmed || undefined);
+    await loadWorkstationProfiles();
+  } catch (e) {
+    wsState.error = `保存失败: ${e.message}`;
+  } finally {
+    wsState.probing.delete(candidateId);
+    renderWorkstationPanel();
+  }
+}
+
+async function handleSetDefault(profileId) {
+  wsState.probing.add(profileId);
+  renderWorkstationPanel();
+  try {
+    await API.setDefaultWorkstation(profileId);
+    await loadWorkstationProfiles();
+  } catch (e) {
+    wsState.error = `设为默认失败: ${e.message}`;
+  } finally {
+    wsState.probing.delete(profileId);
+    renderWorkstationPanel();
+  }
+}
+
+async function handleDeleteProfile(profileId) {
+  if (!confirm("确认删除该工作站配置？")) return;
+  wsState.probing.add(profileId);
+  renderWorkstationPanel();
+  try {
+    await API.deleteWorkstation(profileId);
+    await loadWorkstationProfiles();
+  } catch (e) {
+    wsState.error = `删除失败: ${e.message}`;
+  } finally {
+    wsState.probing.delete(profileId);
+    renderWorkstationPanel();
+  }
+}
+
+async function handleRetest(profileId) {
+  wsState.probing.add(profileId);
+  renderWorkstationPanel();
+  try {
+    const result = await API.testWorkstation(profileId);
+    updateProfile(profileId, result);
+  } catch (e) {
+    updateProfile(profileId, { probe_error: e.message });
+    wsState.error = `重新检测失败: ${e.message}`;
+  } finally {
+    wsState.probing.delete(profileId);
+    renderWorkstationPanel();
+  }
+}
+
 // ---- Render all ----
 function renderAll() {
   renderSessionList();
@@ -1056,3 +1414,11 @@ async function init() {
 }
 
 document.addEventListener("DOMContentLoaded", init);
+
+// Auto-load saved workstation profiles and render the configuration panel on
+// page load. This runs alongside init() (separate listener) so existing
+// startup logic is untouched.
+document.addEventListener("DOMContentLoaded", () => {
+  renderWorkstationPanel(); // create collapsed panel header immediately
+  loadWorkstationProfiles(); // populate saved profiles in the background
+});

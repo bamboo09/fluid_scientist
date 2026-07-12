@@ -591,6 +591,8 @@ def create_app(
     # Mount the v5 study-decomposer draft-workflow API
     from fluid_scientist.api.v5_router import router as _v5_router
     application.include_router(_v5_router)
+    from fluid_scientist.api.workstation_router import router as workstation_router
+    application.include_router(workstation_router)
     application.state.execution_targets = configured_targets
     application.state.model_configuration = configured_models
     application.state.planning_operation_service = planning_service
