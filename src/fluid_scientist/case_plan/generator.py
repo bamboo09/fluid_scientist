@@ -294,11 +294,11 @@ class CasePlanGenerator:
 
     def _generate_boundary_condition_plan(self, draft: ExperimentDraft) -> dict:
         """Generate the boundary condition plan from draft.boundary_conditions."""
-        return {k: dict(v) for k, v in draft.boundary_conditions.items()}
+        return {k: (dict(v) if isinstance(v, dict) else v) for k, v in draft.boundary_conditions.items()}
 
     def _generate_initial_condition_plan(self, draft: ExperimentDraft) -> dict:
         """Generate the initial condition plan from draft.initial_conditions."""
-        return {k: dict(v) for k, v in draft.initial_conditions.items()}
+        return {k: (dict(v) if isinstance(v, dict) else v) for k, v in draft.initial_conditions.items()}
 
     def _generate_physical_model_plan(self, draft: ExperimentDraft) -> dict:
         """Generate the physical model plan from draft.physics_models.
