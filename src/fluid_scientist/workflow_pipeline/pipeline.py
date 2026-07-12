@@ -111,6 +111,7 @@ class PipelineState(BaseModel):
     case_manifest: dict[str, Any] = Field(default_factory=dict)
     # VALIDATION output
     validation_report: dict[str, Any] = Field(default_factory=dict)
+    validation_notes: str = ""
     # FAILURE
     failure: dict[str, Any] | None = None
     # Final view
@@ -1455,19 +1456,15 @@ class V5WorkflowPipeline:
                     ).model_dump()
                     state.current_stage = PipelineStatus.FAILED
                     return
-                state.failure = PipelineFailure(
-                    failed_stage=PipelineStatus.VALIDATING_CASE,
-                    failure_category="validation_failed",
-                    message=(
-                        "OpenFOAM runtime was not found; mesh validation, "
-                        "checkMesh and solver dry-run did not run."
-                    ),
-                    internal_details={"checks": [c.model_dump() for c in report.checks]},
-                    can_retry=True,
-                    requires_user_input=False,
-                ).model_dump()
-                state.current_stage = PipelineStatus.FAILED
-                return
+                # OpenFOAM not available locally — skip runtime validation
+                # and continue to draft generation. The case files are
+                # already written to disk; runtime validation can be done
+                # on the remote workstation after deployment.
+                state.validation_notes = (
+                    "OpenFOAM runtime not found locally; static checks passed. "
+                    "Runtime validation (checkMesh, solver dry-run) will be "
+                    "performed on the remote workstation."
+                )
             else:
                 # OpenFOAM was available but some check(s) failed.
                 errors = [c.message for c in report.checks if not c.passed and c.severity == "error"]
