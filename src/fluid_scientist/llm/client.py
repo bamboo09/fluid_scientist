@@ -23,6 +23,7 @@ _ALLOWED_PURPOSES: frozenset[str] = frozenset({
     "input_routing",
     "study_decomposition",
     "physics_intent",
+    "scientific_intent",
     "clarification_extract",
     "clarification_planning",
     "draft_generation",
@@ -34,6 +35,8 @@ _ALLOWED_PURPOSES: frozenset[str] = frozenset({
     "code_extension_spec",
     "code_generation",
     "code_review",
+    "observable_inference",
+    "case_review",
     "explanation",
 })
 _FALLBACK_PURPOSE = "explanation"

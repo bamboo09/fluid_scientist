@@ -59,6 +59,7 @@ const API = {
   generateCasePlan: (sessionId, draftId) => api("/api/v5/case-plans/generate", { method: "POST", body: JSON.stringify({ session_id: sessionId, draft_id: draftId }) }),
   getCasePlan: (id) => api(`/api/v5/case-plans/${id}`),
   compileCasePlan: (id) => api(`/api/v5/case-plans/${id}/compile`, { method: "POST" }),
+  reviewCasePlan: (id) => api(`/api/v5/case-plans/${id}/review`, { method: "POST" }),
   submitCase: (casePlanId) => api(`/api/v5/cases/${casePlanId}/submit`, { method: "POST" }),
   getJobStatus: (jobId) => api(`/api/v5/jobs/${jobId}`),
   cancelJob: (jobId) => api(`/api/v5/jobs/${jobId}/cancel`, { method: "POST" }),
@@ -497,6 +498,7 @@ function updateActionBar() {
           actions.push({ text: "编译算例", class: "button-primary", fn: () => compileCase() });
         } else if (state.compiledCase) {
           if (!state.job) {
+            actions.push({ text: "AI 预检查", class: "button-secondary", fn: () => reviewCase() });
             actions.push({ text: "提交工作站", class: "button-primary", fn: () => submitToWorkstation() });
           } else if (state.job.state === "running" || state.job.state === "queued") {
             actions.push({ text: "刷新状态", class: "button-secondary", fn: () => pollJobStatus() });
@@ -821,6 +823,30 @@ async function compileCase() {
     renderAll();
   } catch (e) {
     addMessage("system", `编译失败: ${e.message}`, { error: e.message });
+  }
+}
+
+async function reviewCase() {
+  if (!state.casePlan) return;
+  try {
+    addMessage("assistant", "正在用 AI 审查算例文件...");
+    const result = await API.reviewCasePlan(state.casePlan.case_plan_id);
+    const issues = result.issues || [];
+    const errors = issues.filter(i => i.severity === "error");
+    const warnings = issues.filter(i => i.severity === "warning");
+
+    if (result.has_issues && errors.length > 0) {
+      const errorList = errors.map(e => `  • [${e.file}] ${e.description}\n    修复建议: ${e.suggestion}`).join("\n");
+      addMessage("system", `AI 预检查发现 ${errors.length} 个错误, ${warnings.length} 个警告:\n${errorList}`, { reviewResult: result });
+    } else if (warnings.length > 0) {
+      const warnList = warnings.map(w => `  • [${w.file}] ${w.description}`).join("\n");
+      addMessage("assistant", `AI 预检查通过, ${warnings.length} 个警告:\n${warnList}`, { reviewResult: result });
+    } else {
+      addMessage("assistant", `AI 预检查通过, 未发现问题。${result.summary || ""}`, { reviewResult: result });
+    }
+    renderAll();
+  } catch (e) {
+    addMessage("system", `AI 预检查失败: ${e.message}`, { error: e.message });
   }
 }
 
