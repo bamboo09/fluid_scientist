@@ -221,6 +221,8 @@ class CapabilityPreChecker:
             supported.append("physical_model_writer:turbulent_les")
 
         for bc in study.boundary_conditions:
+            if not isinstance(bc, dict):
+                bc = {"type": str(bc), "source": "SYSTEM_DERIVED"}
             bc_type = bc.get("type", "")
             if bc_type in self._native.get("boundary_condition_writer", []):
                 supported.append(f"boundary_condition_writer:{bc_type}")

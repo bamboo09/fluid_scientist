@@ -565,12 +565,74 @@ def _decompose_single_study(
     if isinstance(llm_study, dict):
         study = _merge_llm_study(study, llm_study)
 
+    # Normalize study fields to ensure correct types for downstream consumers.
+    study = _normalize_study(study)
+
     ambiguities = _detector.detect(study)
     study.ambiguity_report = ambiguities
     study = _complete_experiment_design(study)
     check_result = _checker.check(study)
     study.readiness_level = check_result.readiness_level
     return study, check_result
+
+
+def _normalize_study(study: StudyIntent) -> StudyIntent:
+    """Ensure all study fields have correct types after LLM merge.
+
+    The LLM may return fields with inconsistent types (strings instead of
+    dicts, dicts instead of objects, etc.). This function normalizes them
+    so downstream consumers can rely on the typed model.
+    """
+    from fluid_scientist.study_decomposition.models import ObservableSpec
+
+    # boundary_conditions and initial_conditions must be list[dict].
+    for attr in ("boundary_conditions", "initial_conditions"):
+        items = getattr(study, attr, [])
+        if items:
+            setattr(study, attr, [
+                item if isinstance(item, dict)
+                else {"type": str(item), "source": "SYSTEM_DERIVED"}
+                for item in items
+            ])
+
+    # observables must be list[ObservableSpec].
+    if study.observables:
+        converted = []
+        for o in study.observables:
+            if isinstance(o, ObservableSpec):
+                converted.append(o)
+            elif isinstance(o, dict):
+                try:
+                    converted.append(ObservableSpec(**o))
+                except Exception:
+                    converted.append(ObservableSpec(
+                        observable_id=str(o.get("observable_id", o.get("id", "unknown"))),
+                        display_name=str(o.get("display_name", o.get("name", "unknown"))),
+                        category=str(o.get("category", "custom")),
+                    ))
+            else:
+                converted.append(ObservableSpec(
+                    observable_id=str(o),
+                    display_name=str(o),
+                    category="custom",
+                ))
+        study.observables = converted
+
+    # analysis_goals must be list[str].
+    if study.analysis_goals:
+        study.analysis_goals = [
+            str(g.get("goal", g.get("description", g.get("title", str(g))))) if isinstance(g, dict)
+            else str(g)
+            for g in study.analysis_goals
+        ]
+
+    # geometry and physical_models must be dict.
+    for attr in ("geometry", "physical_models"):
+        val = getattr(study, attr, {})
+        if val and not isinstance(val, dict):
+            setattr(study, attr, {"type": str(val), "source": "SYSTEM_DERIVED"})
+
+    return study
 
 
 @router.post("/sessions", response_model=SessionResponse, status_code=status.HTTP_201_CREATED)
