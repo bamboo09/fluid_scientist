@@ -345,11 +345,15 @@ class NativeCaseCompiler:
             patch_type = patch_data.get("type", "patch")
             faces = patch_data.get("faces", [])
             if faces:
-                faces_str = " ".join(f"({') '.join(str(f) for f in face)}" for face in faces if isinstance(face, list))
-                if not faces_str:
-                    # faces might be a flat list of ints
-                    faces_str = " ".join(str(f) for f in faces)
-                boundary_lines.append(f"    {patch_name}\n    {{\n        type {patch_type};\n        faces\n        (\n            ({faces_str})\n        );\n    }}")
+                # faces is a list of face definitions, each face is a list of vertex indices
+                face_strs = []
+                for face in faces:
+                    if isinstance(face, list):
+                        face_strs.append("(" + " ".join(str(v) for v in face) + ")")
+                    else:
+                        face_strs.append(str(face))
+                faces_str = "\n            ".join(face_strs)
+                boundary_lines.append(f"    {patch_name}\n    {{\n        type {patch_type};\n        faces\n        (\n            {faces_str}\n        );\n    }}")
             else:
                 boundary_lines.append(f"    {patch_name}\n    {{\n        type {patch_type};\n        faces\n        (\n        );\n    }}")
         boundary_str = "\n".join(boundary_lines)
