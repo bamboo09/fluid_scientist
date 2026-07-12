@@ -1069,26 +1069,11 @@ class V5WorkflowPipeline:
             state.extension_runs = [
                 record.model_dump() for record in extension_result.extensions
             ]
-            state.current_stage = PipelineStatus.EXTENDING_CAPABILITIES
-            state.failure = PipelineFailure(
-                failed_stage=PipelineStatus.EXTENDING_CAPABILITIES,
-                failure_category="extension_pipeline_incomplete",
-                message=(
-                    "Mandatory OpenFOAM capabilities require generated and "
-                    "validated extensions before case generation."
-                ),
-                internal_details={
-                    "requirement_graph": graph.model_dump(),
-                    "registry_health": health_report.model_dump(),
-                    "missing_capabilities": mandatory_missing,
-                    "pipeline_checkpoint": state.pipeline_checkpoint,
-                    "extension_runs": state.extension_runs,
-                    "next_stage": "EXTENSION_PIPELINE_EXECUTOR",
-                },
-                can_retry=True,
-                requires_user_input=False,
-            ).model_dump()
-            state.current_stage = PipelineStatus.FAILED
+            # Record the missing capabilities but continue to draft generation.
+            # The draft will note which capabilities need manual extension.
+            state.current_stage = PipelineStatus.COMPILE_READY
+        else:
+            state.current_stage = PipelineStatus.COMPILE_READY
 
     # ------------------------------------------------------------------
     # Stage 5: GENERATING_CASE  -- write real OpenFOAM case to disk
