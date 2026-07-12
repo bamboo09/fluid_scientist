@@ -207,6 +207,9 @@ class WorkstationProfileStore:
                 conn.close()
         return [self._load(data, default) for data, default in rows]
 
+    # Alias for interface compatibility (discovery.py expects list_profiles)
+    list_profiles = list_all
+
     def get_default(self) -> WorkstationProfile | None:
         """Return the profile currently marked default, or ``None``."""
         with self._lock:
