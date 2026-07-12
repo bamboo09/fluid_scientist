@@ -659,6 +659,13 @@ async function selectStudy(study) {
     addMessage("user", `选择研究任务: ${study.title?.slice(0, 50) || study.study_id}`);
     addMessage("assistant", "正在生成实验草案...");
     const result = await API.selectStudy(batchId, state.sessionId, study.study_id);
+    if (result.type === "pipeline_failed" || !result.draft) {
+      const failMsg = result.failure?.message || result.failure?.user_facing_message || "未知错误";
+      const failStage = result.failure?.failed_stage || result.current_stage || "";
+      addMessage("system", `生成草案失败: ${failMsg}`);
+      addMessage("assistant", `草案生成流程在「${failStage}」阶段失败：${failMsg}\n\n请尝试补充更多研究细节后重试，或检查模型配置。`);
+      return;
+    }
     state.draft = result.draft;
     addMessage("assistant", `实验草案已生成（版本 v${result.draft.version}）。请在右侧查看结构化方案。\n\n你可以通过对话提出修改（如"将雷诺数改为5000"），修改将通过提案确认后才生效。`);
     renderAll();
