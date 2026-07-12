@@ -624,11 +624,15 @@ async function processAction(action) {
       break;
     }
     case "study_decomposed": {
-      if (!state.batch) {
-        state.batch = { batch_id: action.study.batch_id, studies: [action.study] };
-        state.studies = [action.study];
-        addMessage("assistant", `已识别到 1 个研究任务。请选择该任务来生成实验草案。`, { studies: state.studies });
-      }
+      // Always update batch and show the study, even if one already exists.
+      state.batch = { batch_id: action.study.batch_id, studies: [action.study] };
+      state.studies = [action.study];
+      addMessage("assistant", `已识别到 1 个研究任务。请选择该任务来生成实验草案。`, { studies: state.studies });
+      break;
+    }
+    case "clarification_required": {
+      const q = action.question || action.message || "请补充更多信息。";
+      addMessage("assistant", q);
       break;
     }
     case "clarification_questions": {
