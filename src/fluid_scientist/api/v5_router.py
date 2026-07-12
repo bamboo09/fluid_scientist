@@ -1708,16 +1708,17 @@ def review_case_plan(case_plan_id: str) -> dict[str, Any]:
     if case_plan is None:
         raise HTTPException(status_code=404, detail="Case plan not found")
 
-    # Find the compiled case directory
-    case_dir = os.path.join(
-        tempfile.gettempdir(), f"fluid_case_{case_plan_id}"
-    )
-    if not os.path.exists(case_dir):
+    # Find the compiled case directory — search temp dir for matching prefix
+    import glob
+    pattern = os.path.join(tempfile.gettempdir(), f"fluid_case_{case_plan_id}*")
+    matching_dirs = glob.glob(pattern)
+    if not matching_dirs:
         raise HTTPException(
             status_code=409,
             detail="Case has not been compiled yet. Compile first via "
             "POST /api/v5/case-plans/{case_plan_id}/compile",
         )
+    case_dir = matching_dirs[0]  # Use the first match
 
     from fluid_scientist.llm.case_reviewer import review_case_with_llm
 
