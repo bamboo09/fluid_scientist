@@ -37,6 +37,7 @@ _ALLOWED_PURPOSES: frozenset[str] = frozenset({
     "code_review",
     "observable_inference",
     "case_review",
+    "case_fix",
     "explanation",
 })
 _FALLBACK_PURPOSE = "explanation"

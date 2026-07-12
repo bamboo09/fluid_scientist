@@ -339,3 +339,218 @@ def _static_case_review(files: dict[str, str]) -> dict[str, Any]:
         "issues": issues,
         "summary": f"Static review found {len(issues)} issue(s)",
     }
+
+
+# ---------------------------------------------------------------------------
+# Case Auto-Fix
+# ---------------------------------------------------------------------------
+
+def fix_case_with_llm(
+    llm_client: Any,
+    case_dir: str,
+    review_result: dict[str, Any],
+    session_id: str = "",
+) -> dict[str, Any]:
+    """Use an LLM to fix OpenFOAM case files based on review issues.
+
+    Reads all case files, sends them along with the review issues to the LLM,
+    and writes the fixed files back to disk.
+
+    Returns:
+        {
+            "fixed": bool,
+            "fixed_files": list[str],  # files that were modified
+            "remaining_issues": list,  # issues that couldn't be auto-fixed
+            "summary": str,
+        }
+    """
+    case_files = _collect_case_files(case_dir)
+    if not case_files:
+        return {
+            "fixed": False,
+            "fixed_files": [],
+            "remaining_issues": review_result.get("issues", []),
+            "summary": "No case files found to fix",
+        }
+
+    issues = review_result.get("issues", [])
+    if not issues:
+        return {
+            "fixed": False,
+            "fixed_files": [],
+            "remaining_issues": [],
+            "summary": "No issues to fix",
+        }
+
+    if not llm_client:
+        # Fallback: apply static fixes for known patterns
+        return _static_case_fix(case_dir, case_files, issues)
+
+    try:
+        system_prompt = load_prompt("case_fix")
+        user_message = _format_fix_input(issues, case_files)
+
+        output, _record = llm_client.call(
+            purpose="case_fix",
+            prompt_name="case_fix",
+            system_prompt=system_prompt,
+            user_message=user_message,
+            session_id=session_id,
+            output_schema="json",
+        )
+
+        fixed_files = _parse_and_apply_fixes(output, case_dir)
+        if fixed_files:
+            logger.info("LLM fixed %d files: %s", len(fixed_files), fixed_files)
+            return {
+                "fixed": True,
+                "fixed_files": fixed_files,
+                "remaining_issues": [],
+                "summary": f"LLM auto-fixed {len(fixed_files)} file(s): {', '.join(fixed_files)}",
+            }
+
+        logger.warning("LLM returned no fixes, trying static fix")
+        return _static_case_fix(case_dir, case_files, issues)
+
+    except Exception as e:
+        logger.warning("LLM case fix failed (%s), using static fix", e)
+        return _static_case_fix(case_dir, case_files, issues)
+
+
+def _format_fix_input(issues: list[dict[str, Any]], files: dict[str, str]) -> str:
+    """Format issues + file contents for the LLM fix prompt."""
+    import json as _json
+    parts = []
+    parts.append("[ISSUES]")
+    parts.append(_json.dumps({"has_issues": True, "issues": issues}, ensure_ascii=False, indent=2))
+    parts.append("")
+    parts.append("[CURRENT FILES]")
+    for filepath, content in sorted(files.items()):
+        parts.append(f"=== FILE: {filepath} ===")
+        parts.append(content)
+        parts.append("")
+    return "\n".join(parts)
+
+
+def _parse_and_apply_fixes(output: Any, case_dir: str) -> list[str]:
+    """Parse LLM fix output and write fixed files to disk.
+
+    Returns list of file paths that were modified.
+    """
+    if isinstance(output, str):
+        try:
+            output = json.loads(output)
+        except json.JSONDecodeError:
+            # Try to extract JSON from text
+            match = re.search(r'\{.*\}', output, re.DOTALL)
+            if match:
+                try:
+                    output = json.loads(match.group())
+                except json.JSONDecodeError:
+                    return []
+            else:
+                return []
+
+    if not isinstance(output, dict):
+        return []
+
+    fixed_files = []
+    case_path = Path(case_dir)
+    for filepath, content in output.items():
+        if not isinstance(content, str):
+            continue
+        full_path = case_path / filepath
+        if not full_path.exists():
+            # Try to create parent directories
+            full_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            full_path.write_text(content, encoding="utf-8")
+            fixed_files.append(filepath)
+        except Exception as e:
+            logger.warning("Failed to write fixed file %s: %s", filepath, e)
+
+    return fixed_files
+
+
+def _static_case_fix(
+    case_dir: str,
+    files: dict[str, str],
+    issues: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Apply deterministic fixes for known issue patterns."""
+    fixed_files = []
+    remaining_issues = []
+    case_path = Path(case_dir)
+
+    for issue in issues:
+        filepath = issue.get("file", "")
+        severity = issue.get("severity", "")
+        desc = issue.get("description", "").lower()
+        fixed = False
+
+        if not filepath:
+            remaining_issues.append(issue)
+            continue
+
+        full_path = case_path / filepath
+        if not full_path.exists():
+            remaining_issues.append(issue)
+            continue
+
+        content = files.get(filepath, "")
+        new_content = content
+
+        # Fix: controlDict solver should be incompressibleFluid
+        if "controldict" in filepath.lower() and "incompressiblefluid" in desc:
+            new_content = content.replace("application pimpleFoam;", "solver incompressibleFluid;")
+            new_content = new_content.replace("application simpleFoam;", "solver incompressibleFluid;")
+            new_content = new_content.replace("application pisoFoam;", "solver incompressibleFluid;")
+            if new_content != content:
+                fixed = True
+
+        # Fix: remove libs directive
+        if "libs" in desc and "forbidden" in desc:
+            new_content = re.sub(r'\n\s*libs\s*\([^)]*\)\s*;', '', new_content)
+            if new_content != content:
+                fixed = True
+
+        # Fix: remove $ variable references
+        if "$" in desc and "forbidden" in desc:
+            # Replace common patterns like $value with literal values
+            # This is a best-effort static fix
+            new_content = re.sub(r'\$\w+', '1', new_content)
+            if new_content != content:
+                fixed = True
+
+        # Fix: 0/p internalField should be scalar
+        if filepath == "0/p" and "scalar" in desc:
+            new_content = re.sub(
+                r'uniform\s*\([^)]*\)',
+                'uniform 0',
+                new_content
+            )
+            if new_content != content:
+                fixed = True
+
+        # Fix: remove codeStream/codedFixedValue
+        if "codestream" in desc or "codedfixedvalue" in desc:
+            # This is complex — just flag as remaining
+            pass
+
+        if fixed:
+            try:
+                full_path.write_text(new_content, encoding="utf-8")
+                files[filepath] = new_content  # Update in-memory copy
+                fixed_files.append(filepath)
+            except Exception as e:
+                logger.warning("Failed to write static fix for %s: %s", filepath, e)
+                remaining_issues.append(issue)
+        else:
+            remaining_issues.append(issue)
+
+    return {
+        "fixed": len(fixed_files) > 0,
+        "fixed_files": fixed_files,
+        "remaining_issues": remaining_issues,
+        "summary": f"Static fix applied to {len(fixed_files)} file(s)" if fixed_files else "No static fixes could be applied",
+    }

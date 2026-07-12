@@ -269,6 +269,7 @@ class LLMCallRecord(BaseModel):
         "code_review",
         "observable_inference",
         "case_review",
+        "case_fix",
         "explanation",
     ]
     provider: str = "unknown"
