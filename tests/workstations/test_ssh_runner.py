@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -350,3 +351,153 @@ class TestOutputTruncation:
         )
         result = runner.run_remote("my-host", "cat bigfile", timeout=5)
         assert len(result.stdout) <= 500
+
+
+# ---------------------------------------------------------------------------
+# SSHCommandRunner — _detect_identity_files
+# ---------------------------------------------------------------------------
+
+
+class TestDetectIdentityFiles:
+    """Tests for SSH private key auto-detection in ~/.ssh/."""
+
+    def test_detects_standard_key_names(self, tmp_path):
+        """Standard key names (id_rsa, id_ed25519, etc.) are detected."""
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "id_rsa").write_text("dummy")
+        (ssh_dir / "id_ed25519").write_text("dummy")
+        (ssh_dir / "known_hosts").write_text("host ssh-rsa AAAA")
+        runner = SSHCommandRunner(known_hosts_file=ssh_dir / "known_hosts")
+        identities = runner._detect_identity_files()
+        names = [Path(p).name for p in identities]
+        assert "id_rsa" in names
+        assert "id_ed25519" in names
+
+    def test_detects_non_standard_key_name(self, tmp_path):
+        """Non-standard key names like fluid_scientist_ed25519 are detected."""
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "fluid_scientist_ed25519").write_text("dummy")
+        (ssh_dir / "known_hosts").write_text("host ssh-rsa AAAA")
+        runner = SSHCommandRunner(known_hosts_file=ssh_dir / "known_hosts")
+        identities = runner._detect_identity_files()
+        names = [Path(p).name for p in identities]
+        assert "fluid_scientist_ed25519" in names
+
+    def test_excludes_public_keys(self, tmp_path):
+        """Files ending in .pub are excluded."""
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "id_ed25519").write_text("dummy")
+        (ssh_dir / "id_ed25519.pub").write_text("ssh-ed25519 AAAA")
+        (ssh_dir / "fluid_scientist_ed25519").write_text("dummy")
+        (ssh_dir / "fluid_scientist_ed25519.pub").write_text("ssh-ed25519 AAAA")
+        (ssh_dir / "known_hosts").write_text("host ssh-rsa AAAA")
+        runner = SSHCommandRunner(known_hosts_file=ssh_dir / "known_hosts")
+        identities = runner._detect_identity_files()
+        names = [Path(p).name for p in identities]
+        assert "id_ed25519" in names
+        assert "fluid_scientist_ed25519" in names
+        assert not any(n.endswith(".pub") for n in names)
+
+    def test_excludes_scripts_and_config(self, tmp_path):
+        """Scripts and config files are excluded."""
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "id_ed25519").write_text("dummy")
+        (ssh_dir / "fix_key.ps1").write_text("Write-Host hello")
+        (ssh_dir / "deploy.sh").write_text("echo hello")
+        (ssh_dir / "config").write_text("Host *")
+        (ssh_dir / "known_hosts").write_text("host ssh-rsa AAAA")
+        runner = SSHCommandRunner(known_hosts_file=ssh_dir / "known_hosts")
+        identities = runner._detect_identity_files()
+        names = [Path(p).name for p in identities]
+        assert "id_ed25519" in names
+        assert "fix_key.ps1" not in names
+        assert "deploy.sh" not in names
+        assert "config" not in names
+
+    def test_returns_empty_when_ssh_dir_missing(self, tmp_path):
+        """Returns empty list when ~/.ssh/ doesn't exist."""
+        runner = SSHCommandRunner(known_hosts_file=tmp_path / "nonexistent" / "known_hosts")
+        assert runner._detect_identity_files() == []
+
+    def test_returns_empty_when_no_keys(self, tmp_path):
+        """Returns empty list when ~/.ssh/ has no key files."""
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "known_hosts").write_text("host ssh-rsa AAAA")
+        (ssh_dir / "config").write_text("Host *")
+        runner = SSHCommandRunner(known_hosts_file=ssh_dir / "known_hosts")
+        assert runner._detect_identity_files() == []
+
+    def test_caps_at_max_identity_files(self, tmp_path):
+        """Stops after _MAX_IDENTITY_FILES keys."""
+        from fluid_scientist.workstations.ssh_runner import _MAX_IDENTITY_FILES
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        for i in range(_MAX_IDENTITY_FILES + 3):
+            (ssh_dir / f"key_{i}_ed25519").write_text("dummy")
+        (ssh_dir / "known_hosts").write_text("host ssh-rsa AAAA")
+        runner = SSHCommandRunner(known_hosts_file=ssh_dir / "known_hosts")
+        identities = runner._detect_identity_files()
+        assert len(identities) == _MAX_IDENTITY_FILES
+
+    def test_identity_args_returns_i_flag_pairs(self, tmp_path):
+        """_identity_args returns -i path -i path ... tuples."""
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "fluid_scientist_ed25519").write_text("dummy")
+        (ssh_dir / "known_hosts").write_text("host ssh-rsa AAAA")
+        runner = SSHCommandRunner(known_hosts_file=ssh_dir / "known_hosts")
+        args = runner._identity_args()
+        assert len(args) == 2  # -i + path
+        assert args[0] == "-i"
+        assert "fluid_scientist_ed25519" in args[1]
+
+    def test_test_authentication_includes_identity_args(self, tmp_path):
+        """test_authentication passes -i for non-standard keys."""
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "fluid_scientist_ed25519").write_text("dummy")
+        (ssh_dir / "known_hosts").write_text("host ssh-rsa AAAA")
+        captured: list = []
+
+        class CapturingRunner:
+            def run(self, argv, *, timeout, input_text=None):
+                captured.append(argv)
+                return ProcessResult(0, "", "")
+
+        runner = SSHCommandRunner(
+            runner=CapturingRunner(),
+            known_hosts_file=ssh_dir / "known_hosts",
+        )
+        runner.test_authentication("my-host", timeout=10)
+        argv = captured[0]
+        assert "-i" in argv
+        idx = argv.index("-i")
+        assert "fluid_scientist_ed25519" in argv[idx + 1]
+
+    def test_run_remote_includes_identity_args(self, tmp_path):
+        """run_remote passes -i for non-standard keys."""
+        ssh_dir = tmp_path / ".ssh"
+        ssh_dir.mkdir()
+        (ssh_dir / "fluid_scientist_ed25519").write_text("dummy")
+        (ssh_dir / "known_hosts").write_text("host ssh-rsa AAAA")
+        captured: list = []
+
+        class CapturingRunner:
+            def run(self, argv, *, timeout, input_text=None):
+                captured.append(argv)
+                return ProcessResult(0, "ok", "")
+
+        runner = SSHCommandRunner(
+            runner=CapturingRunner(),
+            known_hosts_file=ssh_dir / "known_hosts",
+        )
+        runner.run_remote("my-host", "uname", timeout=10)
+        argv = captured[0]
+        assert "-i" in argv
+        idx = argv.index("-i")
+        assert "fluid_scientist_ed25519" in argv[idx + 1]
