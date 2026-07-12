@@ -167,6 +167,10 @@ class ExperimentDesignSynthesizer:
     def _boundary_conditions(study: StudyIntent, text: str, geometry_type: str) -> dict[str, dict[str, Any]]:
         result: dict[str, dict[str, Any]] = {}
         for bc in study.boundary_conditions:
+            if isinstance(bc, str):
+                bc = {"type": bc, "source": "SYSTEM_DERIVED"}
+            if not isinstance(bc, dict):
+                continue
             location = str(bc.get("location") or bc.get("patch") or bc.get("name") or bc.get("type"))
             result[location] = {**bc, "source": bc.get("source", "USER_SPECIFIED")}
         if "上边界" in text or "top" in text:

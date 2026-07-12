@@ -353,6 +353,15 @@ def _merge_llm_study(study: StudyIntent, llm_study: dict[str, Any]) -> StudyInte
         value = llm_study.get(field)
         current = getattr(study, field)
         if value and (not current or current == {"type": "unknown"}):
+            # Validate that list fields contain dicts, not bare strings.
+            if isinstance(value, list):
+                value = [
+                    item if isinstance(item, dict) else {"type": str(item), "source": "SYSTEM_DERIVED"}
+                    for item in value
+                ]
+            elif field in ("geometry", "physical_models") and not isinstance(value, dict):
+                # Coerce non-dict scalars into a minimal dict.
+                value = {"type": str(value), "source": "SYSTEM_DERIVED"}
             updates[field] = value
     missing = llm_study.get("missing_information") or llm_study.get("missing_info")
     if isinstance(missing, list):
