@@ -423,15 +423,26 @@ class NativeCaseCompiler:
     # ------------------------------------------------------------------
 
     def _generate_transport_properties(self, case_plan: CasePlan) -> dict[str, Any]:
-        """Generate transportProperties from physical_model_plan."""
+        """Generate transportProperties from physical_model_plan.
+
+        Note: nu and rho are stored as dimensioned values. The OpenFOAM
+        formatter handles the 'dimensions' key by outputting it inline:
+        'nu [0 2 -1 0 0 0 0] 1e-06;'
+        """
         physics = case_plan.physical_model_plan
-        nu = physics.get("nu", physics.get("kinematic_viscosity"))
-        rho = physics.get("rho", physics.get("density", 1.0))
+        nu = float(physics.get("nu", physics.get("kinematic_viscosity", 1e-6)))
+        rho = float(physics.get("rho", physics.get("density", 1.0)))
 
         return {
             "transportModel": "Newtonian",
-            "nu": float(nu),
-            "rho": float(rho),
+            "nu": {
+                "dimensions": "[0 2 -1 0 0 0 0]",
+                "value": nu,
+            },
+            "rho": {
+                "dimensions": "[1 -3 0 0 0 0 0]",
+                "value": rho,
+            },
         }
 
     # ------------------------------------------------------------------

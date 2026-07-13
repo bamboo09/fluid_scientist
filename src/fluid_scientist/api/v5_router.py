@@ -1558,6 +1558,28 @@ def compile_case_plan(case_plan_id: str) -> dict[str, Any]:
     case_dir = tempfile.mkdtemp(prefix=f"fluid_case_{case_plan_id}_")
     _write_case_to_disk(compiled, case_dir)
 
+    # Post-write validation: check all files for basic syntax issues
+    from fluid_scientist.llm.case_reviewer import _validate_openfoam_syntax
+    validation_errors: list[str] = []
+    for section_name, section_content in compiled.items():
+        if isinstance(section_content, dict):
+            for filename, _ in section_content.items():
+                filepath = os.path.join(case_dir, section_name, filename)
+                if os.path.exists(filepath):
+                    try:
+                        content = open(filepath, "r", encoding="utf-8").read()
+                        if not _validate_openfoam_syntax(content):
+                            validation_errors.append(f"{section_name}/{filename}")
+                    except Exception:
+                        pass
+    if validation_errors:
+        # Log but don't fail — the review endpoint will catch these
+        import logging
+        logging.getLogger(__name__).warning(
+            "Post-write syntax validation failed for: %s",
+            ", ".join(validation_errors),
+        )
+
     _repo.save_compiled_case(case_plan_id, case_dir, compiled)
 
     _repo.log_audit(
@@ -1614,6 +1636,15 @@ def _format_openfoam_dict(data: Any, indent: int = 0) -> str:
                         lines.append(f"{pad}{key} uniform ({vec});")
                     else:
                         lines.append(f"{pad}{key} uniform {_fmt_num(uv)};")
+                # Check if it's a dimensioned value: {"dimensions": "[...]", "value": X}
+                elif "dimensions" in val and "value" in val:
+                    dims = val["dimensions"]
+                    v = val["value"]
+                    if isinstance(v, list):
+                        vec = " ".join(_fmt_num(x) for x in v)
+                        lines.append(f"{pad}{key} {dims} ({vec});")
+                    else:
+                        lines.append(f"{pad}{key} {dims} {_fmt_num(v)};")
                 else:
                     lines.append(f"{pad}{key}")
                     lines.append(f"{pad}{{")
@@ -1644,11 +1675,18 @@ def _format_openfoam_dict(data: Any, indent: int = 0) -> str:
 
 
 def _fmt_num(v: Any) -> str:
-    """Format a number nicely for OpenFOAM output."""
+    """Format a number nicely for OpenFOAM output.
+
+    OpenFOAM expects integer-looking values without trailing .0
+    (e.g. '0' not '0.0', '1' not '1.0'). Non-integer floats keep
+    their natural representation.
+    """
     if isinstance(v, float):
         if v == int(v) and abs(v) < 1e15:
-            return f"{v:.1f}"
+            return str(int(v))
         return repr(v)
+    if isinstance(v, bool):
+        return "true" if v else "false"
     return str(v)
 
 
