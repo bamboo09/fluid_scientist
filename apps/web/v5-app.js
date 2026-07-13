@@ -496,7 +496,8 @@ function updateActionBar() {
     if (state.draft.status === "confirmed") {
       // Draft is confirmed — show next steps
       if (state.casePlan) {
-        if (state.casePlan.can_compile && !state.compiledCase) {
+        if (!state.compiledCase) {
+          // Always show compile button when not yet compiled
           actions.push({ text: "编译算例", class: "button-primary", fn: () => compileCase() });
         } else if (state.compiledCase) {
           if (!state.job) {
@@ -845,6 +846,10 @@ async function compileCase() {
 
 async function reviewCase() {
   if (!state.casePlan) return;
+  if (!state.compiledCase) {
+    addMessage("system", "请先编译算例，然后再进行 AI 预检查");
+    return;
+  }
   try {
     addMessage("assistant", "正在用 AI 审查算例文件...");
     const result = await API.reviewCasePlan(state.casePlan.case_plan_id);
