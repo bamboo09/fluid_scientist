@@ -501,11 +501,11 @@ function updateActionBar() {
         } else if (state.compiledCase) {
           if (!state.job) {
             // Check if there are review errors to fix
-            const reviewMsg = [...state.messages].reverse().find(m => m.reviewResult);
+            const reviewMsg = [...state.conversations].reverse().find(m => m.reviewResult);
             const hasReviewErrors = reviewMsg?.reviewResult?.has_issues &&
               reviewMsg.reviewResult.issues?.some(i => i.severity === "error");
             // Check if fix was already applied
-            const fixMsg = [...state.messages].reverse().find(m => m.fixResult);
+            const fixMsg = [...state.conversations].reverse().find(m => m.fixResult);
             const alreadyFixed = fixMsg?.fixResult?.fixed;
             if (hasReviewErrors && !alreadyFixed) {
               actions.push({ text: "AI 修复问题", class: "button-primary", fn: () => fixCaseIssues() });
@@ -870,8 +870,8 @@ async function reviewCase() {
 async function fixCaseIssues() {
   if (!state.casePlan) return;
   // Get issues from the last review result in state
-  const reviewMsg = state.messages.findLast?.(m => m.reviewResult) ||
-    [...state.messages].reverse().find(m => m.reviewResult);
+  const reviewMsg = state.conversations.findLast?.(m => m.reviewResult) ||
+    [...state.conversations].reverse().find(m => m.reviewResult);
   const issues = reviewMsg?.reviewResult?.issues || [];
   if (issues.length === 0) {
     addMessage("system", "没有可修复的问题，请先运行 AI 预检查");
