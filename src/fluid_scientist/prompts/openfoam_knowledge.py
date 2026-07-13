@@ -457,10 +457,19 @@ Rules:
 10. Using divSchemes that reference turbulence fields for laminar cases
 11. Using #include directives
 12. Using codeStream or codedFixedValue
+13. Flagging patch NAMES (top, front, back) as invalid BC types — patch names
+    are arbitrary labels, NOT BC types. Only the 'type' field value matters.
+14. Suggesting 'topoSet' as a replacement for a patch name — topoSet is a
+    mesh manipulation tool, not a patch name or BC type.
 
 ----------------------------------------------------------------------
 15. BOUNDARY CONDITION PATCH NAME MAPPING
 ----------------------------------------------------------------------
+IMPORTANT: Patch names (inlet, outlet, top, front, back, walls, etc.) are
+arbitrary labels defined in blockMeshDict. They are NOT BC types. Do NOT
+flag them as errors. Only the 'type' field within each patch entry is a
+BC type that needs validation.
+
 Standard patch names and their typical BC types:
 
 | Patch Name | U (velocity)          | p (pressure)     |
@@ -468,8 +477,12 @@ Standard patch names and their typical BC types:
 | inlet      | fixedValue           | zeroGradient     |
 | outlet     | zeroGradient         | fixedValue (0)   |
 | wall       | noSlip               | zeroGradient     |
+| top        | zeroGradient/symmetry| zeroGradient     |
+| bottom     | noSlip/zeroGradient  | zeroGradient     |
+| front      | empty (2D) / patch   | empty (2D) / zG  |
+| back       | empty (2D) / patch   | empty (2D) / zG  |
+| frontAndBack| empty (2D)          | empty (2D)       |
 | symmetry   | symmetry             | symmetry         |
-| frontAndBack (2D) | empty       | empty            |
 | cyclic     | cyclic               | cyclic           |
 
 For moving walls: movingWallVelocity instead of noSlip

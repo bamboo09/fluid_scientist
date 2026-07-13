@@ -87,6 +87,15 @@ fvSolution
 - "boundaryField" must be present. Every patch must have a "type" entry
   (e.g. "fixedValue", "zeroGradient", "noSlip", "inletOutlet",
   "pressureInletOutletVelocity"). A patch missing a type is a fatal error.
+- IMPORTANT: Patch NAMES (e.g. "inlet", "outlet", "top", "front", "back",
+  "frontAndBack", "walls") are arbitrary labels defined in blockMeshDict.
+  They are NOT BC types. Do NOT flag a patch name as an error just because
+  it is called "top" or "front". Only flag the "type" field value if it
+  is not a valid OpenFOAM BC type.
+  Valid BC types for U: fixedValue, zeroGradient, noSlip, slip, inletOutlet,
+    pressureInletOutletVelocity, movingWallVelocity, empty, cyclic,
+    symmetry, symmetryPlane
+  Do NOT suggest replacing patch names with tool names like "topoSet".
 - For "fixedValue" patches, a "value" entry matching the field dimension
   (vector for U) must be present.
 - Patch names in 0/U must match the patch names defined in blockMeshDict.
@@ -99,6 +108,10 @@ fvSolution
 - "boundaryField" must be present. Every patch must have a "type" entry
   (e.g. "fixedValue", "zeroGradient", "totalPressure",
   "fixedFluxPressure"). A patch missing a type is a fatal error.
+- IMPORTANT: Same as 0/U — patch NAMES are arbitrary labels, not BC types.
+  Do NOT flag patch names like "top", "front", "back" as errors.
+  Valid BC types for p: fixedValue, zeroGradient, totalPressure,
+    fixedFluxPressure, inletOutlet, empty, cyclic, symmetry, symmetryPlane
 - For "fixedValue" or "totalPressure" patches, a "value" or "p" entry must
   be present.
 - Patch names in 0/p must match the patch names defined in blockMeshDict.
