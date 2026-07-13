@@ -216,39 +216,15 @@ class CasePlanGenerator:
     def _auto_select_solver(self, physics: dict) -> str:
         """Auto-select a solver based on physics models.
 
-        Selection logic (in priority order):
-        - buoyancy present        -> buoyantPimpleFoam
-        - turbulent + transient   -> pimpleFoam
-        - turbulent + steady      -> simpleFoam
-        - laminar + transient     -> pisoFoam
-        - laminar + steady        -> simpleFoam
-        - default                 -> pimpleFoam
+        The workstation uses OpenFOAM v2406's unified solver interface
+        (foamRun), so ALL cases use 'incompressibleFluid' regardless of
+        turbulence or temporal mode. The turbulence model is selected
+        separately in turbulenceProperties.
 
-        ``turbulent`` and ``temporal`` must be *explicitly* present in the
-        physics dict for the specific rules to apply.  When either key is
-        absent the system falls back to the default (pimpleFoam).
+        Previous logic selected pimpleFoam/simpleFoam/pisoFoam, but these
+        are NOT compatible with the workstation's foamRun interface.
         """
-        if physics.get("buoyancy", False):
-            return "buoyantPimpleFoam"
-
-        turbulent = physics.get("turbulent")
-        temporal = physics.get("temporal")
-
-        if turbulent is True:
-            if temporal == "transient":
-                return "pimpleFoam"
-            if temporal == "steady":
-                return "simpleFoam"
-            return "pimpleFoam"
-
-        if turbulent is False:
-            if temporal == "transient":
-                return "pisoFoam"
-            if temporal == "steady":
-                return "simpleFoam"
-            return "pimpleFoam"
-
-        return "pimpleFoam"
+        return "incompressibleFluid"
 
     def _determine_dimensions(self, draft: ExperimentDraft) -> str:
         """Determine 2D or 3D from geometry or physics models."""
