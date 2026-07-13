@@ -1,8 +1,9 @@
-"""OpenFOAM v2406 knowledge base for LLM prompts.
+"""OpenFOAM Foundation 13 knowledge base for LLM prompts.
 
-This module provides a comprehensive knowledge base about OpenFOAM v2406
-syntax, workstation security restrictions, and valid parameter values.
-It is injected into LLM prompts to prevent common errors at the source.
+This module provides a comprehensive knowledge base about OpenFOAM
+Foundation 13 syntax, workstation security restrictions, and valid
+parameter values. It is injected into LLM prompts to prevent common
+errors at the source.
 
 Usage:
     from fluid_scientist.prompts.openfoam_knowledge import OPENFOAM_KNOWLEDGE
@@ -11,12 +12,19 @@ Usage:
 
 OPENFOAM_KNOWLEDGE = r"""
 =====================================================================
-OPENFOAM v2406 KNOWLEDGE BASE — READ CAREFULLY BEFORE GENERATING PLANS
+OPENFOAM FOUNDATION 13 KNOWLEDGE BASE — READ CAREFULLY BEFORE GENERATING PLANS
 =====================================================================
 
-This system targets OpenFOAM v2406 running on a secure workstation via
-'foamRun -solver incompressibleFluid'. All plans MUST comply with the
-restrictions below. Violations will cause runtime failures.
+This system targets OpenFOAM Foundation 13 (NOT ESI v2406) running on
+a secure workstation via 'foamRun -solver incompressibleFluid'.
+All plans MUST comply with the restrictions below. Violations will
+cause runtime failures.
+
+NOTE: OpenFOAM Foundation 13 is different from ESI OpenFOAM v2406:
+- Foundation 13 uses 'foamRun -solver incompressibleFluid' (unified solver)
+- Foundation 13 uses 'application' was REMOVED — use 'solver' keyword
+- Foundation 13 uses 'functions {}' in controlDict (not 'functionObjects')
+- Some ESI-specific features (libs, coded) are also forbidden here
 
 ----------------------------------------------------------------------
 1. SOLVER REQUIREMENT (CRITICAL)
@@ -24,7 +32,7 @@ restrictions below. Violations will cause runtime failures.
 - The controlDict MUST contain: solver incompressibleFluid;
 - Do NOT use 'application pimpleFoam;' or any other application name.
 - The workstation runs cases via: foamRun -solver incompressibleFluid
-- This is the OpenFOAM v2406 unified solver interface.
+- This is the OpenFOAM Foundation 13 unified solver interface.
 - Valid solver values: incompressibleFluid, incompressibleFluidDyM
 - For the case plan 'solver' field, always use: incompressibleFluid
 

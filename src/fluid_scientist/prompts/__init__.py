@@ -41,7 +41,7 @@ def load_prompt_with_knowledge(name: str) -> str:
 
     For prompts that generate OpenFOAM-related plans (case plans, drafts,
     observables, reviews, fixes), this automatically appends the comprehensive
-    OpenFOAM v2406 knowledge base to the system prompt. This prevents the LLM
+    OpenFOAM Foundation 13 knowledge base to the system prompt. This prevents the LLM
     from generating invalid parameters at the source.
 
     Args:

@@ -15,7 +15,7 @@ Return a JSON object with EXACTLY these fields:
   "cylinder_flow", "lid_driven_cavity", "custom_openfoam".
 - solver: string
   ALWAYS use "incompressibleFluid". The workstation runs all cases via
-  'foamRun -solver incompressibleFluid' (OpenFOAM v2406 unified solver).
+  'foamRun -solver incompressibleFluid' (OpenFOAM Foundation 13 unified solver).
   Do NOT use "pimpleFoam", "simpleFoam", "icoFoam" or any other solver name.
 - dimensions: integer
   2 or 3. Based on the draft's geometry and physics.
