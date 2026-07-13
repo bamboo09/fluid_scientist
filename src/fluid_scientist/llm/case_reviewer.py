@@ -24,7 +24,7 @@ import re
 from pathlib import Path
 from typing import Any
 
-from fluid_scientist.prompts import load_prompt
+from fluid_scientist.prompts import load_prompt_with_knowledge
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +52,7 @@ def infer_observables_with_llm(
         return _default_observables(research_goal)
 
     try:
-        system_prompt = load_prompt("observable_inference")
+        system_prompt = load_prompt_with_knowledge("observable_inference")
         user_message = f"Research goal: {research_goal}"
 
         output, _record = llm_client.call(
@@ -191,7 +191,7 @@ def review_case_with_llm(
         return _static_case_review(case_files)
 
     try:
-        system_prompt = load_prompt("case_review")
+        system_prompt = load_prompt_with_knowledge("case_review")
         user_message = _format_case_files_for_review(case_files)
 
         output, _record = llm_client.call(

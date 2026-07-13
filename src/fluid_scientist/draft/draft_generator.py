@@ -210,11 +210,13 @@ class DraftGenerator:
         are caught - the deterministic draft must always be returned.
         """
         try:
+            from fluid_scientist.prompts import load_prompt_with_knowledge
+            system_prompt = load_prompt_with_knowledge("draft_generation_prompt")
             with contextlib.suppress(Exception):
                 output, _record = self._llm_client.call(
                     purpose="draft_generation",
                     prompt_name="draft_generation",
-                    system_prompt="",
+                    system_prompt=system_prompt,
                     user_message=(
                         f"Study: {study.title}\n"
                         f"Objective: {study.research_objective}"
