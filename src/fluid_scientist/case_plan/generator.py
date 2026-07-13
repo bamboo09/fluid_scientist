@@ -216,7 +216,7 @@ class CasePlanGenerator:
     def _auto_select_solver(self, physics: dict) -> str:
         """Auto-select a solver based on physics models.
 
-        The workstation uses OpenFOAM v2406's unified solver interface
+        The workstation uses OpenFOAM Foundation 13's unified solver interface
         (foamRun), so ALL cases use 'incompressibleFluid' regardless of
         turbulence or temporal mode. The turbulence model is selected
         separately in turbulenceProperties.
