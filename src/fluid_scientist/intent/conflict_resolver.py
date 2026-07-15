@@ -383,6 +383,36 @@ class LLMCandidateExtractor:
                         confidence=0.8,
                     ))
 
+            elif obj_type in ("unknown_obstacle", "trapezoid", "obstacle", "block"):
+                # Unknown/unrecognized obstacle — record as candidate so it
+                # is not silently dropped.  It will surface as a blocking
+                # issue in conflict resolution.
+                candidates.append(ExtractionCandidate(
+                    field_path="obstacle.type",
+                    value=obj_type,
+                    source=CandidateSource.LLM,
+                    source_span=_find_in_text(user_text, ["障碍物", "obstacle", "block", "梯形", "trapezoid"]),
+                    confidence=0.7,
+                    reasoning_summary=f"LLM identified {obj_type}, needs shape clarification",
+                ))
+                # Dimensions (if any)
+                h = obj.get("height", {}).get("value") if isinstance(obj.get("height"), dict) else None
+                w = obj.get("width", {}).get("value") if isinstance(obj.get("width"), dict) else None
+                if h and float(h) > 0:
+                    candidates.append(ExtractionCandidate(
+                        field_path=f"{obj_type}.height",
+                        value=float(h),
+                        source=CandidateSource.LLM,
+                        confidence=0.7,
+                    ))
+                if w and float(w) > 0:
+                    candidates.append(ExtractionCandidate(
+                        field_path=f"{obj_type}.width",
+                        value=float(w),
+                        source=CandidateSource.LLM,
+                        confidence=0.7,
+                    ))
+
         # Physics
         physics = llm_parsed.get("physics", {})
         if physics.get("inlet_velocity", {}).get("value"):
