@@ -58,6 +58,7 @@ from fluid_scientist.intent.conflict_resolver import (
     RegexCandidateExtractor,
 )
 from fluid_scientist.skills.skill_resolver import SkillResolver
+from fluid_scientist.analysis.llm_report import LLMReportGenerator, PhysicsValidator
 
 router = APIRouter(prefix="/api/v5/cylinder-flow", tags=["cylinder-flow-2d"])
 
@@ -648,6 +649,18 @@ class AnalysisReportResponse(BaseModel):
     success: bool
     job_id: str
     report: dict[str, Any] | None = None
+    error: str | None = None
+
+
+class ScientificReportResponse(BaseModel):
+    """LLM-generated scientific report with physics validation."""
+
+    success: bool
+    job_id: str
+    report: dict[str, Any] | None = None
+    physics_validation: dict[str, Any] | None = None
+    result_summary: dict[str, Any] | None = None
+    report_source: str = "rule_based"
     error: str | None = None
 
 
@@ -4160,9 +4173,74 @@ async def get_report(job_id: str) -> AnalysisReportResponse:
     )
 
 
-# ---------------------------------------------------------------------------
-# Static file serving for generated plots
-# ---------------------------------------------------------------------------
+@router.get("/jobs/{job_id}/scientific-report", response_model=ScientificReportResponse)
+async def get_scientific_report(job_id: str) -> ScientificReportResponse:
+    """Get an LLM-generated scientific report with physics validation.
+
+    Uses ResultSummaryBuilder to extract Cd/Cl/St from simulation outputs,
+    PhysicsValidator to compare against empirical correlations, and
+    LLMReportGenerator to produce a structured scientific report.
+    Falls back to rule-based report if LLM is unavailable.
+    """
+    # Locate execution data
+    spec_id = _find_session_for_job(job_id)
+    execution: dict[str, Any] | None = None
+
+    if spec_id is not None:
+        session = _session_store.load(spec_id) or {}
+        exec_data = session.get("execution") or {}
+        if exec_data:
+            execution = {
+                "status": exec_data.get("status", "UNKNOWN"),
+                "run_report": exec_data.get("run_report"),
+                "mesh_report": (session.get("compilation") or {}).get("mesh_report"),
+                "smoke_test_report": (session.get("compilation") or {}).get("smoke_test_report"),
+            }
+
+    if execution is None:
+        execution = _execution_store.get(job_id)
+
+    if execution is None:
+        return ScientificReportResponse(
+            success=False,
+            job_id=job_id,
+            error=f"Job not found: {job_id}",
+        )
+
+    spec = _load_spec(spec_id) if spec_id else None
+
+    # Build the report using LLMReportGenerator
+    llm_client = _get_llm_client()
+    generator = LLMReportGenerator(llm_client=llm_client)
+
+    report = generator.generate_report(
+        execution_result=execution,
+        mesh_report=execution.get("mesh_report"),
+        smoke_report=execution.get("smoke_test_report"),
+        sim_report=execution.get("run_report") or execution.get("simulation_report"),
+        spec=spec,
+        plot_paths=_list_plot_paths(job_id),
+    )
+
+    return ScientificReportResponse(
+        success=True,
+        job_id=job_id,
+        report=report,
+        physics_validation=report.get("physics_validation"),
+        result_summary=report.get("result_summary"),
+        report_source=report.get("report_source", "rule_based"),
+    )
+
+
+def _list_plot_paths(job_id: str) -> list[str]:
+    """List plot file paths for a job."""
+    results_dir = os.path.join("d:\\desktop\\AI FOR SCIENCE\\results", job_id)
+    plots: list[str] = []
+    if os.path.isdir(results_dir):
+        for fname in os.listdir(results_dir):
+            if fname.endswith((".png", ".gif", ".mp4")):
+                plots.append(os.path.join(results_dir, fname))
+    return plots
 
 RESULTS_DIR = "d:\\desktop\\AI FOR SCIENCE\\results"
 
