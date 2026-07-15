@@ -252,11 +252,12 @@ class RegexCandidateExtractor:
 
         # Observables
         for obs in spec.observables:
+            obs_type = obs.type.value if hasattr(obs.type, 'value') else str(obs.type)
             candidates.append(ExtractionCandidate(
-                field_path=f"observable.{obs.observable_type.value}",
-                value=obs.observable_type.value,
+                field_path=f"observable.{obs_type}",
+                value=obs_type,
                 source=CandidateSource.REGEX,
-                source_span=_find_in_text(user_text, _observable_keywords(obs.observable_type.value)),
+                source_span=_find_in_text(user_text, _observable_keywords(obs_type)),
                 confidence=0.85,
             ))
 

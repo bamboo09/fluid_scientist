@@ -46,7 +46,10 @@ def _collect_source_hash(repo_root: str) -> str:
     for py_file in sorted(src_dir.rglob("*.py")):
         rel = py_file.relative_to(src_dir)
         h.update(str(rel).encode())
-        h.update(py_file.read_bytes())
+        try:
+            h.update(py_file.read_bytes())
+        except (FileNotFoundError, OSError):
+            h.update(b"<missing>")
     return h.hexdigest()[:16]
 
 
