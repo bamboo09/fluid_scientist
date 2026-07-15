@@ -1919,6 +1919,21 @@ async def create_draft(request: DraftRequest) -> DraftResponse:
         input_data={"spec": spec},
     )
 
+    # Run capability resolution — check if spec requires unsupported capabilities
+    from fluid_scientist.capabilities.capability_resolver import CapabilityResolver
+    _cap_resolver = CapabilityResolver()
+    _cap_result = _cap_resolver.check(spec)
+    if not _cap_result.all_supported:
+        # Add unsupported capabilities as blocking issues
+        for cap in _cap_result.unsupported:
+            spec.blocking_issues.append({
+                "code": "UNSUPPORTED_CAPABILITY",
+                "message": f"不支持的能力: {cap}",
+                "category": "CAPABILITY",
+                "capability": cap,
+                "extendable": cap in _cap_result.extendable,
+            })
+
     # Run full ambiguity and conflict audit with 5-category classification
     # This replaces the old simple _detect_position_conflicts
     from fluid_scientist.cylinder_flow_2d.physics_dependency import (
