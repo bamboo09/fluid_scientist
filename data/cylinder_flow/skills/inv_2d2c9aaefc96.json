@@ -1,0 +1,125 @@
+{
+  "invocation_id": "inv_2d2c9aaefc96",
+  "skill_id": "fluid.intent_to_spec",
+  "skill_version": "1.0",
+  "entrypoint": "<lambda>",
+  "input": {
+    "user_text": "在一个管道中，长150米，宽5米，圆柱半径0.1m，圆柱位于流场中央，来流速度1.0m/s，Re=200。下游距离第一个上出口2m，下游74m，高为5m的障碍物，位于圆柱正下方。左为速度入口，右为压力出口，上自由滑移，下壁面无滑移。观测圆柱后流场旋涡结构，升阻力系数和旋涡脱落频率。"
+  },
+  "output": {
+    "scene": {
+      "dimension": "2D",
+      "flow_type": "internal_flow",
+      "confidence": 0.9
+    },
+    "geometry": {
+      "domain": {
+        "length": {
+          "value": 150,
+          "unit": "m"
+        },
+        "height": {
+          "value": 5,
+          "unit": "m"
+        }
+      },
+      "objects": [
+        {
+          "id": "cylinder_1",
+          "type": "cylinder",
+          "radius": {
+            "value": 0.1,
+            "unit": "m"
+          },
+          "center": {
+            "x": {
+              "value": 75,
+              "unit": "m"
+            },
+            "y": {
+              "value": 2.5,
+              "unit": "m"
+            }
+          }
+        },
+        {
+          "id": "obstacle_1",
+          "type": "unknown_obstacle",
+          "center": {
+            "x": {
+              "value": 75,
+              "unit": "m"
+            },
+            "y": {
+              "value": 0,
+              "unit": "m"
+            }
+          }
+        }
+      ]
+    },
+    "physics": {
+      "fluid_model": "incompressible_newtonian",
+      "density": {
+        "value": 1000,
+        "unit": "kg/m3",
+        "source": "USER_EXPLICIT"
+      },
+      "kinematic_viscosity": {
+        "value": 1.4285714285714284e-06,
+        "unit": "m2/s"
+      },
+      "reynolds_number": {
+        "value": 200
+      },
+      "inlet_velocity": {
+        "value": 1.0,
+        "unit": "m/s"
+      }
+    },
+    "boundaries": [
+      {
+        "name": "left",
+        "type": "velocity_inlet",
+        "details": {}
+      },
+      {
+        "name": "right",
+        "type": "pressure_outlet",
+        "details": {}
+      },
+      {
+        "name": "top",
+        "type": "slip_wall",
+        "details": {}
+      },
+      {
+        "name": "bottom",
+        "type": "no_slip_wall",
+        "details": {}
+      }
+    ],
+    "research_goals": [
+      "研究圆柱后流场旋涡结构"
+    ],
+    "requested_metrics": [
+      "lift_coefficient",
+      "drag_coefficient",
+      "shedding_frequency"
+    ],
+    "missing_fields": [
+      "missing_fields"
+    ],
+    "ambiguities": [
+      "上游边界条件未明确，建议选择速度入口或压力入口"
+    ],
+    "unsupported_capabilities": [
+      "不支持cosine_bell和trapezoid等几何形状"
+    ]
+  },
+  "status": "PASSED",
+  "evidence": [],
+  "started_at": "2026-07-15T11:51:40.170157+00:00",
+  "finished_at": "2026-07-15T11:52:18.206854+00:00",
+  "error": null
+}

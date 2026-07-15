@@ -1,0 +1,107 @@
+{
+  "invocation_id": "inv_49488b4ac42f",
+  "skill_id": "fluid.intent_to_spec",
+  "skill_version": "1.0",
+  "entrypoint": "<lambda>",
+  "input": {
+    "user_text": "????,?150??8?,????0.1m???????,????1.0m/s,Re=200,??????,??????,?????,??????,??????????????????????"
+  },
+  "output": {
+    "scene": {
+      "dimension": "3D",
+      "flow_type": "external_flow",
+      "confidence": 0.0
+    },
+    "geometry": {
+      "domain": {
+        "length": {
+          "value": 15,
+          "unit": "m"
+        },
+        "height": {
+          "value": 8,
+          "unit": "m"
+        }
+      },
+      "objects": [
+        {
+          "id": "cylinder_1",
+          "type": "cylinder",
+          "radius": {
+            "value": 0.1,
+            "unit": "m"
+          },
+          "center": {
+            "x": {
+              "value": 0,
+              "unit": "m"
+            },
+            "y": {
+              "value": 0,
+              "unit": "m"
+            }
+          }
+        }
+      ]
+    },
+    "physics": {
+      "fluid_model": "incompressible_newtonian",
+      "density": {
+        "value": 0,
+        "unit": "kg/m3",
+        "source": "UNKNOWN"
+      },
+      "kinematic_viscosity": {
+        "value": 0,
+        "unit": "m2/s"
+      },
+      "reynolds_number": {
+        "value": 200
+      },
+      "inlet_velocity": {
+        "value": 1.0,
+        "unit": "m/s"
+      }
+    },
+    "boundaries": [
+      {
+        "name": "left",
+        "type": "velocity_inlet",
+        "details": {}
+      },
+      {
+        "name": "right",
+        "type": "pressure_outlet",
+        "details": {}
+      },
+      {
+        "name": "top",
+        "type": "unknown",
+        "details": {}
+      },
+      {
+        "name": "bottom",
+        "type": "no_slip_wall",
+        "details": {}
+      }
+    ],
+    "research_goals": [],
+    "requested_metrics": [],
+    "missing_fields": [
+      "density",
+      "kinematic_viscosity",
+      "research_goals",
+      "requested_metrics"
+    ],
+    "ambiguities": [
+      "top boundary condition",
+      "bottom boundary condition"
+    ],
+    "unsupported_capabilities": []
+  },
+  "status": "PASSED",
+  "evidence": [],
+  "started_at": "2026-07-15T11:39:00.868861+00:00",
+  "finished_at": "2026-07-15T11:39:28.055963+00:00",
+  "error": null
+}

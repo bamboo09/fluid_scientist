@@ -1,0 +1,1753 @@
+
+下面这份方案的重点是：
+
+> **不再按具体名词增加模板，而是建立通用、组合式、开放世界的研究语义模型。**
+
+---
+
+# 完整改造任务
+
+## Fluid Scientist 开放世界需求理解与通用能力改造方案
+
+## 一、任务目标
+
+本轮必须解决以下根本问题：
+
+1. 用户提出当前 Schema 中没有的新几何时，不能忽略；
+2. 用户改变流体、材料属性、边界条件、初始条件、物理模型、观测指标时，不能依赖逐个新增模板；
+3. 大模型必须完整保存用户显式表达，不得只把内容映射到现有枚举；
+4. 已有能力可以继续使用确定性 Compiler；
+5. 新需求能够被转换为通用表达时，不得生成新代码；
+6. 当前确实无法表达或编译时，必须进入能力缺口流程；
+7. 所有无法处理的内容必须展示给用户，绝不允许静默丢失；
+8. Skill、Prompt、能力检查和未知能力扩展必须进入真实生产主链。
+
+本轮严禁只增加：
+
+```text
+TrapezoidSpec
+TrapezoidCompiler
+trapezoid_template
+_extract_trapezoid()
+if shape == "trapezoid"
+```
+
+梯形案例必须主要通过**通用多边形能力**解决，而不是专门模板。
+
+---
+
+# 二、当前问题的准确判断
+
+截图中的用户输入明确包含：
+
+```text
+上底2m
+下底4m
+高3m
+梯形凸起
+位于圆柱正下方
+贴附下壁面
+```
+
+但是右侧正式参数中：
+
+* 只有圆柱；
+* 没有第二个几何实体；
+* 没有梯形参数；
+* 没有 unsupported capability；
+* 没有提示“系统无法表达梯形”；
+* 系统只针对上边界提出澄清。
+
+这至少暴露五个问题。
+
+## 2.1 Schema是封闭枚举，而不是开放实体列表
+
+当前结构接近：
+
+```python
+class CylinderFlowSpec:
+    cylinder: CylinderSpec
+    rectangle: RectangleSpec
+    triangle: TriangleSpec
+    bottom_profile: BottomProfileSpec
+```
+
+这意味着只有预先定义好的槽位才能进入 Spec。
+
+梯形没有槽位，就可能直接消失。
+
+正确结构应该是：
+
+```python
+class ResearchSpec:
+    geometry_entities: list[GeometryEntity]
+```
+
+新几何先进入实体列表，再判断如何表达和编译。
+
+## 2.2 语义识别和能力支持被混成一件事
+
+错误逻辑：
+
+```text
+系统不支持梯形
+→ 所以不识别梯形
+```
+
+正确逻辑：
+
+```text
+用户明确提出梯形
+→ 必须识别并保存梯形
+→ 再检查系统是否支持编译
+```
+
+理解层必须忠实于用户，不能因为编译器不支持就篡改或删除用户需求。
+
+## 2.3 缺少“输入覆盖率检查”
+
+系统没有检查：
+
+```text
+用户显式提到的每一个实体、参数、边界、指标
+是否都进入了正式Spec
+```
+
+因此即使丢掉整个梯形，流程仍然继续。
+
+## 2.4 大模型被迫做模板分类
+
+当前模型主要在判断：
+
+```text
+这是 cylinder？
+rectangle？
+triangle？
+cosine_bell？
+```
+
+而不是先回答：
+
+```text
+用户描述了哪些物理实体？
+这些实体具有什么几何参数和空间关系？
+它们可以用何种通用数学表示？
+```
+
+## 2.5 参数工作台直接依赖固定Schema
+
+后端丢掉梯形后，前端自然无法动态展示。
+
+所以问题不只是前端，也不只是提示词，而是：
+
+```text
+意图理解
+→ 中间表示
+→ 能力检查
+→ 动态Schema
+```
+
+整条链都需要调整。
+
+---
+
+# 三、目标架构
+
+改造后采用以下链路：
+
+```text
+用户原文
+  ↓
+Mention Inventory：显式信息清点
+  ↓
+Open-World Intent Extractor：开放世界实体抽取
+  ↓
+Semantic Representation Planner：通用数学表达
+  ↓
+Semantic Critic：遗漏、替换、重复、冲突检查
+  ↓
+Clarification Planner：只询问真正阻塞项
+  ↓
+Canonical Research IR
+  ↓
+Dynamic Schema Builder：动态参数工作台
+  ↓
+Capability Planner
+  ├─ 已有通用能力可完成
+  │    ↓
+  │  Generic Compiler
+  │
+  └─ 当前能力无法完成
+       ↓
+     Missing Capability
+       ↓
+     Config Extension / Compiler Extension
+  ↓
+用户确认
+  ↓
+Case生成和OpenFOAM验证
+```
+
+关键原则：
+
+```text
+语义表示不等于Compiler支持情况
+用户需求不等于模板名称
+新名词不一定需要新代码
+未知内容不能被忽略
+```
+
+---
+
+# 四、建立开放世界 Research IR
+
+新增一个上游统一语义层，不要立即删除原有 Spec。
+
+建议目录：
+
+```text
+src/fluid_scientist/research_ir/
+    models.py
+    builder.py
+    coverage.py
+    critic.py
+    lowering.py
+```
+
+## 4.1 ResearchIR
+
+```python
+class OpenWorldResearchIR(BaseModel):
+    study_type: str | None
+    dimensionality: Literal["2D", "3D", "axisymmetric", "unknown"]
+
+    domain: DomainIntent
+    geometry_entities: list[GeometryEntity]
+    materials: list[MaterialIntent]
+    boundaries: list[BoundaryIntent]
+    initial_conditions: list[InitialConditionIntent]
+    physics_models: list[PhysicsModelIntent]
+    observables: list[ObservableIntent]
+    spatial_relations: list[SpatialRelation]
+
+    unresolved_mentions: list[UnresolvedMention]
+    ambiguities: list[SemanticAmbiguity]
+    assumptions: list[Assumption]
+    source_coverage: SourceCoverage
+```
+
+---
+
+## 4.2 通用 GeometryEntity
+
+不再以每一种形状创建一个顶层字段。
+
+```python
+class GeometryEntity(BaseModel):
+    entity_id: str
+    role: Literal[
+        "domain",
+        "immersed_obstacle",
+        "wall_attached_obstacle",
+        "solid_body",
+        "porous_region",
+        "inlet_geometry",
+        "outlet_geometry",
+        "unknown"
+    ]
+
+    raw_name: str
+    semantic_shape: str
+
+    representation: GeometryRepresentation
+
+    parameters: dict[str, ParameterValue]
+    relations: list[str]
+
+    source_spans: list[str]
+    confidence: float
+
+    representation_status: Literal[
+        "resolved",
+        "needs_clarification",
+        "unsupported"
+    ]
+```
+
+## 4.3 通用几何表示
+
+```python
+class GeometryRepresentation(BaseModel):
+    type: Literal[
+        "circle",
+        "ellipse",
+        "parametric_polygon",
+        "explicit_polygon",
+        "profile_function",
+        "csg",
+        "imported_mesh",
+        "implicit_surface",
+        "unknown"
+    ]
+
+    subtype: str | None
+    definition: dict
+```
+
+### 梯形不需要专用Compiler
+
+梯形可表示为：
+
+```json
+{
+  "type": "parametric_polygon",
+  "subtype": "trapezoid",
+  "definition": {
+    "top_width": 2.0,
+    "bottom_width": 4.0,
+    "height": 3.0,
+    "attachment": "bottom_wall",
+    "horizontal_alignment": "centered_under:cylinder_1"
+  }
+}
+```
+
+在当前案例中，圆柱横坐标为 75m，可进一步确定顶点：
+
+```text
+(73, 0)
+(77, 0)
+(76, 3)
+(74, 3)
+```
+
+然后交给通用 Polygon Compiler。
+
+## 4.4 同一个编译能力覆盖多种形状
+
+建立以下通用几何编译器：
+
+```text
+CircleGeometryCompiler
+PolygonGeometryCompiler
+ProfileFunctionCompiler
+ImportedMeshCompiler
+CSGGeometryCompiler
+```
+
+其中：
+
+```text
+triangle
+rectangle
+trapezoid
+parallelogram
+pentagon
+user-provided polygon
+```
+
+全部交给：
+
+```text
+PolygonGeometryCompiler
+```
+
+而不是分别增加六个模板。
+
+### 强制验收
+
+梯形功能完成后，代码中不得新增：
+
+```text
+TrapezoidCompiler
+TrapezoidTemplate
+_compile_trapezoid_case
+```
+
+允许存在语义归一化或参数转顶点函数，但最终编译必须走通用 polygon 路径。
+
+---
+
+# 五、材料与流体也必须开放化
+
+不要只解决几何。
+
+新增：
+
+```python
+class MaterialIntent(BaseModel):
+    material_id: str
+    raw_name: str
+    phase: Literal["gas", "liquid", "solid", "multiphase", "unknown"]
+
+    model: Literal[
+        "incompressible_newtonian",
+        "compressible_newtonian",
+        "non_newtonian",
+        "multiphase",
+        "custom",
+        "unknown"
+    ]
+
+    properties: dict[str, ParameterValue]
+    source_spans: list[str]
+
+    missing_required_properties: list[str]
+    capability_status: str
+```
+
+例如用户说：
+
+```text
+使用运动黏度为3e-5 m²/s、密度850 kg/m³的自定义油品
+```
+
+系统必须生成：
+
+```json
+{
+  "raw_name": "自定义油品",
+  "model": "incompressible_newtonian",
+  "properties": {
+    "density": 850,
+    "kinematic_viscosity": 0.00003
+  }
+}
+```
+
+不能因为材料库里没有这种油，就退回空气或水。
+
+材料解析优先级：
+
+```text
+用户明确属性
+> 用户明确Re、U和特征长度推导
+> 版本化材料数据库
+> 模型建议并要求确认
+> unknown_required
+```
+
+禁止：
+
+```text
+未识别流体 → 默认空气
+```
+
+---
+
+# 六、边界条件必须使用语义模型
+
+当前不能把边界理解成固定的左、右、上、下模板。
+
+新增：
+
+```python
+class BoundaryIntent(BaseModel):
+    boundary_id: str
+    target: BoundarySelector
+    physical_role: Literal[
+        "velocity_inlet",
+        "mass_flow_inlet",
+        "pressure_inlet",
+        "pressure_outlet",
+        "open_boundary",
+        "no_slip_wall",
+        "slip_wall",
+        "moving_wall",
+        "symmetry",
+        "periodic",
+        "shear_stress",
+        "heat_flux",
+        "convective_outlet",
+        "custom",
+        "unknown"
+    ]
+
+    quantities: dict[str, ParameterValue]
+    raw_text: str
+    source_span: str
+
+    semantic_status: str
+    capability_status: str
+```
+
+然后再由 OpenFOAM v13 Boundary Lowering 负责：
+
+```text
+velocity_inlet
+→ U fixedValue
+→ p zeroGradient
+
+pressure_outlet
+→ p fixedValue
+→ U zeroGradient
+```
+
+边界的物理语义和 OpenFOAM patchField 类型不能在意图层混为一谈。
+
+遇到新边界时：
+
+```text
+先保存 physical_role
+→ 检查 Foundation v13 是否有配置映射
+→ 有则生成
+→ 无则进入MissingCapability
+```
+
+不能忽略，也不能直接改成最相近的边界。
+
+---
+
+# 七、观测目标与测量计划开放化
+
+```python
+class ObservableIntent(BaseModel):
+    observable_id: str
+    raw_name: str
+    physical_quantity: str
+    target_entity: str | None
+    spatial_scope: dict | None
+    temporal_scope: dict | None
+    statistic: str | None
+    source_span: str
+```
+
+再建立：
+
+```text
+ObservableIntent
+→ MetricPlan
+→ MeasurementPlan
+→ OpenFOAM functionObjects
+→ Postprocess
+```
+
+例如：
+
+```text
+升阻力系数
+→ forceCoeffs
+
+涡脱落频率
+→ Cl time series
+→ 去除初始段
+→ FFT/PSD
+→ St
+
+指定截面平均流速
+→ sampledSurface
+→ surfaceFieldValue
+```
+
+新指标不能被简单忽略。无法采集时必须阻断编译。
+
+---
+
+# 八、增加“显式信息覆盖率”硬门
+
+新增：
+
+```text
+SourceCoverageGuard
+```
+
+## 8.1 Mention Inventory
+
+模型和规则首先列出用户显式提到的所有信息：
+
+```json
+{
+  "mentions": [
+    {
+      "mention_id": "m1",
+      "text": "长150米、宽8米",
+      "category": "domain_dimension"
+    },
+    {
+      "mention_id": "m2",
+      "text": "圆柱半径0.1m",
+      "category": "geometry"
+    },
+    {
+      "mention_id": "m3",
+      "text": "上底2m、下底4m、高3m的梯形凸起",
+      "category": "geometry"
+    },
+    {
+      "mention_id": "m4",
+      "text": "位于圆柱正下方",
+      "category": "spatial_relation"
+    }
+  ]
+}
+```
+
+## 8.2 每一项必须有归宿
+
+每个 mention 只能进入以下状态之一：
+
+```text
+mapped
+derived
+ambiguous
+unsupported
+needs_clarification
+```
+
+绝不能是：
+
+```text
+ignored
+dropped
+not_processed
+```
+
+## 8.3 编译前硬检查
+
+```python
+if coverage.unaccounted_mentions:
+    raise SemanticCoverageError
+```
+
+前端显示：
+
+```text
+尚未处理的用户需求：
+- “上底2m、下底4m、高3m的梯形凸起”
+```
+
+不能继续确认实验方案。
+
+## 8.4 验收标准
+
+所有测试必须达到：
+
+```text
+显式信息覆盖率 = 100%
+```
+
+这里的100%不是所有需求都已支持，而是：
+
+> 用户说的每一件事，都被保存、解释、澄清或标记为不支持。
+
+---
+
+# 九、大模型工作流重新设计
+
+当前不能只调用一次 GLM-4-Flash，然后把结果塞入固定字段。
+
+至少拆成以下角色。
+
+```text
+Intent Extractor
+Representation Planner
+Semantic Critic
+Clarification Planner
+Capability Planner
+```
+
+简单已知案例可以减少调用；出现新名词、冲突或未知能力时必须执行完整流程。
+
+## 9.1 模型路由
+
+配置：
+
+```yaml
+llm_roles:
+  intent_extractor:
+    provider: glm
+    model: configurable_fast_model
+
+  semantic_reasoner:
+    provider: glm
+    model: configurable_reasoning_model
+
+  code_extension:
+    provider: configurable
+    model: configurable_code_model
+```
+
+不能把模型名硬编码在业务函数里。
+
+GLM-4-Flash可以保留做低成本基础抽取，但以下情况必须升级到语义推理模型：
+
+```text
+出现未知形状
+出现多个几何实体
+出现复杂空间关系
+规则与模型冲突
+出现新边界条件
+出现新材料模型
+出现新指标
+```
+
+---
+
+# 十、Prompt必须从文件真实加载
+
+审计显示大量 Prompt 文件没有真正加载，而是继续使用 Python 内联字符串。
+
+本轮必须新增统一：
+
+```text
+PromptRegistry
+```
+
+所有生产 Prompt 从文件加载：
+
+```text
+prompts/open_world_intent_extractor.md
+prompts/geometry_representation_planner.md
+prompts/semantic_critic.md
+prompts/clarification_planner.md
+prompts/capability_planner.md
+prompts/draft_change_proposal.md
+prompts/code_extension_generator.md
+prompts/openfoam_error_diagnoser.md
+```
+
+每次调用记录：
+
+```text
+prompt_name
+prompt_version
+prompt_hash
+model
+raw_output
+parsed_output
+```
+
+禁止 Prompt 文件存在但生产代码仍使用旧内联文本。
+
+---
+
+# 十一、Prompt 1：开放世界需求抽取
+
+文件：
+
+```text
+prompts/open_world_intent_extractor.md
+```
+
+内容直接使用：
+
+```text
+你是 Fluid Scientist 的开放世界 CFD 研究需求解析器。
+
+你的任务不是把用户输入分类到已有模板，也不是猜测系统当前支持哪些能力。
+你的唯一目标是忠实、完整地提取用户明确表达的研究需求。
+
+【最高优先级规则】
+
+1. 不得忽略用户明确提到的任何实体、尺寸、材料、属性、边界、初始条件、空间关系、物理模型、观测量和研究目标。
+2. 不得因为某个概念不在已有枚举中，就删除、替换或近似映射。
+3. 不得把未知形状替换为 rectangle、triangle、cosine_bell、cylinder 或其他已知形状。
+4. 不得把同一个实体重复识别为多个实体。
+5. 所有提取项必须返回原文 source_span。
+6. 未知名词必须保留 raw_name，并将 canonical_type 标记为 unknown。
+7. 不得填充默认值。
+8. 不得在本阶段计算派生参数。
+9. 不得根据系统能力修改用户需求。
+10. 输出必须覆盖用户输入中的全部有效研究信息。
+
+【几何抽取规则】
+
+几何实体应分别提取，不受当前模板限制。
+
+例如：
+- 圆柱、圆形颗粒 → 独立几何实体
+- 三角形、矩形、梯形、五边形 → 独立几何实体
+- 正弦凸起、余弦凸起 → 壁面轮廓实体
+- 用户给出的任意顶点 → 显式多边形实体
+- 无法理解的形状 → unknown geometry，不得删除
+
+“高、宽、上底、下底、半径、直径”等参数应绑定到最近且语义匹配的几何实体。
+
+【空间关系规则】
+
+必须提取：
+- 位于……正下方
+- 与……同心
+- 距壁面……
+- 位于流场中央
+- 贴附壁面
+- 与某边界相交
+- 周期对应关系
+
+不得在本阶段擅自把空间关系转换成坐标，除非用户明确给出坐标。
+
+【边界条件规则】
+
+分别保存：
+- 目标边界
+- 物理作用
+- 数值或函数
+- 单位
+- 原文
+
+“自由出流”“开放边界”“压力出口”“对流出口”不得无依据视为同一种边界。
+
+【材料和物理属性规则】
+
+保存用户明确给出的：
+- 流体名称
+- 密度
+- 动力黏度
+- 运动黏度
+- 温度
+- 可压缩性
+- 牛顿/非牛顿
+- 相态
+- Re、Ma、Pr等无量纲数
+
+未给出的属性保持unknown。
+
+【观测目标规则】
+
+保存用户要求的所有观测量，并标记其作用对象和空间/时间范围。
+
+【输出格式】
+
+必须输出严格JSON：
+
+{
+  "mention_inventory": [
+    {
+      "mention_id": "m1",
+      "text": "原文片段",
+      "category": "domain|geometry|material|boundary|initial_condition|physics|observable|spatial_relation|numerics|unknown"
+    }
+  ],
+  "domain": {
+    "dimensionality": null,
+    "dimensions": [],
+    "source_spans": []
+  },
+  "geometry_entities": [
+    {
+      "entity_id": "geometry_1",
+      "role": "immersed_obstacle|wall_attached_obstacle|solid_body|domain_feature|unknown",
+      "raw_name": "用户原始名称",
+      "canonical_type": "可确定则填写，否则unknown",
+      "parameters": [
+        {
+          "name": "参数语义名称",
+          "value": null,
+          "unit": null,
+          "source_span": "原文片段"
+        }
+      ],
+      "relations": [],
+      "source_spans": []
+    }
+  ],
+  "materials": [],
+  "boundaries": [],
+  "initial_conditions": [],
+  "physics": [],
+  "observables": [],
+  "spatial_relations": [],
+  "unknown_mentions": [],
+  "coverage": {
+    "mapped_mention_ids": [],
+    "unmapped_mention_ids": []
+  }
+}
+
+输出前自行检查：
+
+- 用户是否提到了多个几何实体？
+- 每个实体是否都保留？
+- 是否有任何词语因为不在模板中而被删除？
+- 是否将同一个凸起重复识别成矩形和轮廓？
+- mention_inventory中的每一项是否均有归宿？
+```
+
+---
+
+# 十二、Prompt 2：几何通用表示规划
+
+文件：
+
+```text
+prompts/geometry_representation_planner.md
+```
+
+内容：
+
+```text
+你是 CFD 几何语义与数学表示规划器。
+
+输入包括：
+1. 用户原文；
+2. 已抽取的几何实体；
+3. 已抽取的空间关系；
+4. 当前通用几何表示能力。
+
+你的任务不是选择具体OpenFOAM模板，而是为每个几何实体选择忠实、最通用的数学表示。
+
+可用表示：
+
+- circle
+- ellipse
+- parametric_polygon
+- explicit_polygon
+- profile_function
+- constructive_solid_geometry
+- imported_mesh
+- implicit_surface
+- unknown
+
+【核心规则】
+
+1. 优先使用已有通用表示，而不是创建具体形状模板。
+2. triangle、rectangle、trapezoid、parallelogram、regular_polygon等优先表示为polygon。
+3. 正弦、余弦、分段函数型壁面优先表示为profile_function。
+4. 用户提供顶点时使用explicit_polygon。
+5. 用户提供CAD/STL时使用imported_mesh。
+6. 无法由现有参数唯一确定时，标记needs_clarification。
+7. 不得为了可编译而修改用户几何。
+8. 不得丢弃实体。
+9. 不得把未知形状转换为最相近形状。
+10. 仅当数学含义确定时，才能计算顶点。
+
+【梯形示例】
+
+输入：
+上底2m、下底4m、高3m的梯形凸起，贴附下壁面，位于圆柱正下方。
+
+正确输出：
+{
+  "representation": {
+    "type": "parametric_polygon",
+    "subtype": "trapezoid",
+    "definition": {
+      "top_width": 2.0,
+      "bottom_width": 4.0,
+      "height": 3.0,
+      "attachment": "bottom_wall",
+      "horizontal_alignment": "centered_under:cylinder_1"
+    }
+  }
+}
+
+错误输出：
+- 忽略梯形
+- 转换成rectangle
+- 转换成cosine_bell
+- 要求增加trapezoid模板
+
+【输出格式】
+
+{
+  "entities": [
+    {
+      "entity_id": "...",
+      "representation": {
+        "type": "...",
+        "subtype": "...",
+        "definition": {}
+      },
+      "required_parameters": [],
+      "missing_parameters": [],
+      "status": "resolved|needs_clarification|unsupported",
+      "reason": "简洁说明"
+    }
+  ]
+}
+```
+
+---
+
+# 十三、Prompt 3：语义批判与遗漏检查
+
+文件：
+
+```text
+prompts/semantic_critic.md
+```
+
+内容：
+
+```text
+你是 Fluid Scientist 的语义忠实性审查器。
+
+你必须比较：
+1. 用户原文；
+2. mention inventory；
+3. 当前Research IR；
+4. 当前动态参数方案。
+
+你的任务不是生成新实验方案，而是发现理解过程中的错误。
+
+重点检查：
+
+A. 遗漏
+- 用户明确提到的实体是否缺失？
+- 参数是否没有绑定到对应实体？
+- 边界或观测量是否消失？
+
+B. 错误替换
+- 梯形是否被替换成矩形？
+- 三角形是否被替换成cosine_bell？
+- 自定义流体是否被替换成空气或水？
+- 未知边界是否被替换成默认边界？
+
+C. 重复
+- 同一个正弦凸起是否同时创建为rectangle和profile？
+- 同一个圆柱是否重复创建？
+
+D. 空间关系
+- “正下方”“贴附壁面”“距壁面”等关系是否保留？
+- 是否出现相互矛盾的坐标？
+
+E. 参数归属
+- 上底、下底和高度是否属于梯形？
+- 半径是否属于圆柱？
+- 速度是否属于正确入口？
+
+F. 能力污染
+- 系统是否因为不支持某项能力而删除了用户需求？
+
+【阻断规则】
+
+以下任何情况必须 blocking：
+- 用户显式几何实体缺失；
+- 用户显式边界缺失；
+- 用户要求的观测量缺失；
+- 未知能力被静默替换；
+- mention未被accounted；
+- 同一实体出现互斥重复表示。
+
+【输出】
+
+{
+  "passed": false,
+  "blocking_issues": [
+    {
+      "issue_type": "omission|substitution|duplication|conflict|unaccounted_mention",
+      "source_span": "用户原文",
+      "current_value": null,
+      "expected_semantics": "说明",
+      "recommended_action": "restore|clarify|capability_check"
+    }
+  ],
+  "warnings": [],
+  "coverage_ratio": 1.0
+}
+```
+
+---
+
+# 十四、Prompt 4：澄清问题规划
+
+文件：
+
+```text
+prompts/clarification_planner.md
+```
+
+内容：
+
+```text
+你是 CFD 研究需求澄清规划器。
+
+只允许询问会阻止实验语义确定、几何生成、边界设置或结果测量的问题。
+
+不得询问：
+- 可以由明确公式推导的参数；
+- 可以由空间关系唯一确定的坐标；
+- 低风险数值设置；
+- 用户已经明确说明的信息；
+- 系统能力是否支持的问题。
+
+应询问：
+- 几何参数不足以唯一确定形状；
+- 两条用户陈述相互矛盾；
+- 边界物理含义存在多个明显不同解释；
+- 观测位置不明确且会改变测量结果；
+- 材料模型缺少不可推导的关键属性。
+
+每个问题必须说明：
+- 为什么需要问；
+- 不回答会影响什么；
+- 推荐解释；
+- 可选答案。
+
+输出：
+
+{
+  "questions": [
+    {
+      "question_id": "...",
+      "blocking": true,
+      "question": "...",
+      "reason": "...",
+      "recommended_answer": "...",
+      "options": []
+    }
+  ]
+}
+```
+
+---
+
+# 十五、Prompt 5：能力规划
+
+文件：
+
+```text
+prompts/capability_planner.md
+```
+
+内容：
+
+```text
+你是 Fluid Scientist 的能力规划器。
+
+输入是已经通过语义审查的Research IR。
+
+你必须逐项判断：
+- 语义是否已确定；
+- 是否可以由通用现有能力完成；
+- 是否需要配置扩展；
+- 是否需要Compiler扩展；
+- 是否需要用户提供外部几何文件；
+- 是否当前无法支持。
+
+【原则】
+
+1. 根据数学表示判断能力，不根据用户使用的形状名称判断。
+2. 梯形如果已表示为polygon，应使用通用PolygonGeometryCompiler。
+3. 新材料如果满足已有物理模型且属性完整，不需要新模板。
+4. 新边界如果能映射到OpenFOAM Foundation v13已有条件，使用配置能力。
+5. 新指标如果能由已有采样和后处理组合完成，不需要新代码。
+6. 只有现有通用能力无法表达时，才创建MissingCapability。
+7. 绝不允许删除需求后宣称支持。
+
+输出：
+
+{
+  "requirements": [
+    {
+      "requirement_id": "...",
+      "category": "geometry|material|boundary|physics|measurement|postprocess",
+      "required_capability": "...",
+      "resolution": "existing|config_extension|compiler_extension|external_input|required_clarification|unsupported",
+      "selected_component": null,
+      "reason": "..."
+    }
+  ],
+  "blocking_missing_capabilities": []
+}
+```
+
+---
+
+# 十六、多轮修改Prompt也必须开放化
+
+文件：
+
+```text
+prompts/draft_change_proposal.md
+```
+
+内容：
+
+```text
+你是 Research IR 修改提案生成器。
+
+输入包括：
+- 当前完整Research IR；
+- 当前版本；
+- 用户本轮修改要求；
+- 对话历史；
+- 已确认的用户选择。
+
+你只能生成ChangeProposal，不得直接修改当前版本。
+
+【规则】
+
+1. 用户说“增加一个梯形凸起”，必须新增GeometryEntity，不得因为当前Schema没有梯形字段而忽略。
+2. 用户说“把矩形改成梯形”，必须删除原矩形实体并新增或转换对应polygon实体。
+3. 用户说“流体改为水”，必须修改MaterialIntent，不得创建新工作流。
+4. 用户说“上边界改为切向应力”，必须修改对应BoundaryIntent。
+5. 用户说“再分析壁面剪切”，必须新增ObservableIntent和MeasurementRequirement。
+6. 保留未被用户修改的所有已确认字段。
+7. 输出字段级diff。
+8. 用户确认前不得应用修改。
+
+输出：
+
+{
+  "base_version": 1,
+  "operations": [
+    {
+      "operation": "add|remove|replace",
+      "target_path": "...",
+      "old_value": null,
+      "new_value": {},
+      "source_span": "用户本轮输入",
+      "reason": "..."
+    }
+  ],
+  "semantic_effects": [],
+  "new_capability_requirements": [],
+  "requires_clarification": false,
+  "clarification_questions": []
+}
+```
+
+---
+
+# 十七、Dynamic Schema Builder
+
+前端参数工作台不能继续只遍历固定字段。
+
+新增：
+
+```text
+DynamicSchemaBuilder.build(research_ir)
+```
+
+它根据实体动态生成参数卡片。
+
+截图中的案例正确展示应为：
+
+```text
+计算域
+- 长度：150m
+- 高度：8m
+
+几何实体1：圆柱
+- 半径：0.1m
+- 圆心X：75m
+- 圆心Y：4m
+
+几何实体2：贴壁梯形凸起
+- 上底：2m
+- 下底：4m
+- 高度：3m
+- 贴附边界：下壁面
+- 横向位置：圆柱正下方
+- 通用表示：Parametric Polygon
+- 能力状态：Polygon Compiler已支持
+```
+
+不能只在自然语言摘要中出现梯形，而正式参数中消失。
+
+---
+
+# 十八、Skill改造：不要按形状堆Skill
+
+Skill应按**通用能力**设计。
+
+建议至少有：
+
+```text
+fluid.intent.open_world_extraction
+fluid.semantic.coverage_guard
+fluid.geometry.representation_planning
+fluid.geometry.parametric_polygon
+fluid.geometry.profile_function
+fluid.geometry.imported_mesh
+fluid.material.property_resolution
+fluid.boundary.semantic_lowering
+fluid.measurement.metric_planning
+openfoam.foundation13.case_compiler
+openfoam.foundation13.error_diagnosis
+```
+
+不建议：
+
+```text
+fluid.geometry.trapezoid
+fluid.geometry.pentagon
+fluid.geometry.hexagon
+```
+
+每个Skill必须真实包含：
+
+```text
+prompt fragment
+schema contribution
+validator
+compiler hook
+test cases
+capability declaration
+```
+
+并真实影响：
+
+```text
+Prompt
+Research IR
+CapabilityPlan
+Compiler
+Validation
+```
+
+不能再只是SkillExecutor包装一遍原函数。
+
+---
+
+# 十九、未知能力的处理层级
+
+新情况出现时，必须按以下优先级处理。
+
+## Level 1：现有通用表示
+
+例如：
+
+```text
+梯形 → polygon
+五边形 → polygon
+任意给定顶点 → polygon
+正弦凸起 → profile_function
+```
+
+不生成代码。
+
+## Level 2：配置组合
+
+例如：
+
+```text
+已有OpenFOAM边界条件的新参数组合
+已有functionObject的新采样位置
+```
+
+只生成配置。
+
+## Level 3：通用组件扩展
+
+例如当前没有 ellipse compiler，但可以增加：
+
+```text
+EllipseGeometryCompiler
+```
+
+此时新增的是一类数学表示，不是每个实验一个模板。
+
+## Level 4：外部几何输入
+
+非常复杂形状要求用户上传：
+
+```text
+STL
+OBJ
+polyMesh
+CAD转换文件
+```
+
+## Level 5：代码扩展
+
+只有前四级无法完成时进入 ExtensionOrchestrator。
+
+---
+
+# 二十、代码扩展Prompt
+
+文件：
+
+```text
+prompts/code_extension_generator.md
+```
+
+内容：
+
+```text
+你是 Fluid Scientist 的受控能力扩展代码生成器。
+
+目标环境：
+OpenFOAM Foundation 13。
+
+你只能实现给定的最小MissingCapability，禁止重写现有工作流、Compiler或Schema。
+
+输入包括：
+- MissingCapability
+- 当前通用接口
+- 可修改文件白名单
+- 现有相近实现
+- 必须通过的测试
+- OpenFOAM v13约束
+
+【规则】
+
+1. 优先增加通用能力，不得为单一用户句子硬编码。
+2. 如果需求可以由现有polygon、profile、material或boundary能力组合实现，拒绝生成代码。
+3. 输出必须是unified diff。
+4. 不得修改无关文件。
+5. 不得删除现有验证。
+6. 不得新增静默fallback。
+7. 不得将unsupported改写为supported而没有执行证据。
+8. 必须同时生成单元测试和验收测试。
+9. OpenFOAM相关扩展必须经过真实Foundation 13验证。
+10. 失败时返回明确失败原因，不得伪造成功。
+
+输出：
+
+{
+  "extension_type": "...",
+  "generic_capability": "...",
+  "files_to_modify": [],
+  "patch": "unified diff",
+  "tests": [],
+  "openfoam_validation_commands": [],
+  "risks": []
+}
+```
+
+---
+
+# 二十一、错误闭环Prompt
+
+文件：
+
+```text
+prompts/openfoam_error_diagnoser.md
+```
+
+内容：
+
+```text
+你是 OpenFOAM Foundation 13 错误诊断器。
+
+你只能根据提供的：
+- 已确认Research IR
+- CasePlan
+- 相关Case文件
+- 当前执行阶段
+- 完整错误日志
+- 已通过的阶段
+- 允许修改文件
+
+进行诊断。
+
+【规则】
+
+1. 不得在没有证据时猜测。
+2. 不得重新生成整个Case。
+3. 已通过的阶段默认冻结。
+4. 必须先分类错误，再提出最小修复。
+5. 每次修复必须产生真实diff。
+6. 相同Case无修改重复执行属于无效重试。
+7. smoke失败必须阻止full run。
+8. OpenFOAM.com版本语法不得混入Foundation 13。
+9. 若无法受控修复，返回requires_extension或requires_user_action。
+
+输出：
+
+{
+  "error_type": "...",
+  "root_cause": "...",
+  "evidence": [],
+  "affected_stage": "...",
+  "allowed_repair_scope": [],
+  "repair_actions": [
+    {
+      "file": "...",
+      "operation": "replace_field|add_field|remove_field|regenerate_component",
+      "target": "...",
+      "value": null,
+      "reason": "..."
+    }
+  ],
+  "requires_extension": false,
+  "requires_user_action": false
+}
+```
+
+---
+
+# 二十二、语义层和编译层必须分离
+
+必须建立明确分层：
+
+```text
+Research IR
+    用户真正想研究什么
+
+CasePlan
+    如何将研究问题转成CFD方案
+
+CapabilityPlan
+    当前系统是否能完成
+
+OpenFOAM Case IR
+    如何在Foundation 13中表达
+
+Generated Case
+    具体字典与网格文件
+```
+
+禁止：
+
+```text
+用户输入
+→ 直接选择ObstacleFlowCompiler
+```
+
+也禁止：
+
+```text
+系统没有梯形模板
+→ Research IR中没有梯形
+```
+
+---
+
+# 二十三、测试矩阵
+
+不能只测试新梯形。
+
+## 23.1 几何开放性
+
+测试：
+
+```text
+圆柱
+矩形
+三角形
+梯形
+平行四边形
+五边形顶点
+椭圆
+正弦轮廓
+用户上传STL
+无法识别的自定义形状
+```
+
+验收：
+
+* 能用通用表示的，不新增专用模板；
+* 无法表示的，必须保留并阻断；
+* 不能忽略。
+
+## 23.2 材料变化
+
+测试：
+
+```text
+空气
+水
+用户明确给定ρ和ν的自定义液体
+非牛顿流体
+未给关键属性的新材料
+```
+
+验收：
+
+* 已知模型正确映射；
+* 缺属性时澄清；
+* 不默认成空气。
+
+## 23.3 边界变化
+
+测试：
+
+```text
+速度入口
+质量流量入口
+压力出口
+周期边界
+移动壁面
+切向应力
+开放边界
+对流出口
+未知自定义边界
+```
+
+验收：
+
+* 语义先保存；
+* 支持能力再判断；
+* 不静默替换。
+
+## 23.4 指标变化
+
+测试：
+
+```text
+Cd
+Cl
+St
+压力降
+壁面剪切
+截面平均速度
+点压力时间序列
+涡量
+未知自定义指标
+```
+
+## 23.5 多轮修改
+
+测试：
+
+```text
+圆柱
+→ 增加矩形
+→ 改成梯形
+→ 流体改为水
+→ 上边界改为切向应力
+→ 增加壁面剪切指标
+```
+
+必须始终使用同一 session 和递增版本。
+
+---
+
+# 二十四、当前梯形案例的强制验收
+
+输入截图中的完整文本。
+
+必须得到：
+
+```json
+{
+  "geometry_entities": [
+    {
+      "entity_id": "cylinder_1",
+      "semantic_shape": "cylinder"
+    },
+    {
+      "entity_id": "obstacle_1",
+      "raw_name": "梯形凸起",
+      "role": "wall_attached_obstacle",
+      "representation": {
+        "type": "parametric_polygon",
+        "subtype": "trapezoid",
+        "definition": {
+          "top_width": 2.0,
+          "bottom_width": 4.0,
+          "height": 3.0,
+          "attachment": "bottom_wall",
+          "horizontal_alignment": "centered_under:cylinder_1"
+        }
+      }
+    }
+  ]
+}
+```
+
+同时必须满足：
+
+* 右侧参数工作台显示梯形；
+* mention coverage为100%；
+* 不出现rectangle；
+* 不出现cosine_bell；
+* 不新增TrapezoidCompiler；
+* 使用PolygonGeometryCompiler；
+* 生成的STL或polygon顶点正确；
+* checkMesh通过；
+* 生成文件与纯圆柱Case存在真实差异；
+* 不能只修改摘要文本。
+
+---
+
+# 二十五、反治标检查
+
+完成后执行代码搜索。
+
+不得出现：
+
+```text
+if "梯形" in user_text
+TrapezoidSpec
+TrapezoidCaseTemplate
+trapezoid_case.json
+用户输入等于测试句子时返回固定结果
+```
+
+新测试：
+
+```text
+用户描述“上底1.6m、下底3.8m、高1.2m的梯形障碍”
+```
+
+无需代码修改，也必须正常处理。
+
+再测试：
+
+```text
+用户提供五边形五个顶点
+```
+
+无需增加PentagonCompiler，也必须正常处理。
+
+只有做到这一步，才能证明不是为截图案例硬编码。
+
+---
+
+# 二十六、实施顺序
+
+严格按顺序提交。
+
+```text
+Commit 1
+冻结当前运行基线和Prompt hash
+
+Commit 2
+新增OpenWorldResearchIR和MentionInventory
+
+Commit 3
+新增开放世界Intent Extractor，保留未知实体
+
+Commit 4
+新增Representation Planner和通用Polygon表示
+
+Commit 5
+新增Semantic Critic和SourceCoverageGuard
+
+Commit 6
+修复Dynamic Schema Builder，展示任意实体
+
+Commit 7
+接入通用PolygonGeometryCompiler
+
+Commit 8
+开放化MaterialIntent和BoundaryIntent
+
+Commit 9
+重构Skill为真实Prompt/Validator/Compiler能力包
+
+Commit 10
+接入CapabilityPlanner和MissingCapability
+
+Commit 11
+接入ExtensionOrchestrator生产主链
+
+Commit 12
+接入OpenFOAM错误诊断与修复闭环
+
+Commit 13
+完成几何、材料、边界、指标、多轮修改E2E
+```
+
+禁止先写梯形模板再慢慢重构。
+
+---
+
+# 二十七、完成标准
+
+只有同时满足以下条件才能结束：
+
+1. 截图中的梯形不再消失；
+2. 用户新增任意实体时，必须进入Research IR；
+3. 所有显式信息覆盖率为100%；
+4. 不支持的需求明确显示，不静默忽略；
+5. 梯形、三角形、矩形和五边形共用通用Polygon Compiler；
+6. 更换流体时不需要增加场景模板；
+7. 更换边界时先进行语义表达和能力检查；
+8. 更换指标时能动态生成MeasurementPlan；
+9. Prompt从文件真实加载并有hash；
+10. Skill真实影响Prompt、Validator或Compiler；
+11. ExtensionOrchestrator生产可达；
+12. smoke失败不再继续full run；
+13. 真实GLM和真实OpenFOAM E2E通过；
+14. 不存在按测试句子硬编码；
+15. 输出完整证据报告。
+
+最终目标不是“支持更多固定案例”，而是：
+
+> **用户提出新的形状、材料、边界、初始条件、物理模型或指标时，系统都能先忠实理解并保存，再通过通用表示、能力组合或受控扩展解决；即使暂时无法完成，也绝不忽略和伪装。**
