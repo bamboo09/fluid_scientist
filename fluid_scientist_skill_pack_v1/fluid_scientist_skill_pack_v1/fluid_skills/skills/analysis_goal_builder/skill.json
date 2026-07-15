@@ -1,0 +1,13 @@
+{
+  "skill_id": "analysis_goal.builder",
+  "version": "1.0.0",
+  "category": "analysis",
+  "summary": "依据几何、观测量和时间模式生成分析目标。",
+  "entrypoint": "fluid_skills.runtime.observables:build_analysis_goals",
+  "deterministic": true,
+  "dependencies": [
+    "observable.extractor"
+  ],
+  "platform": null,
+  "validation_status": "CANDIDATE"
+}

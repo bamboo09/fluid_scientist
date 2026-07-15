@@ -1,0 +1,1706 @@
+# Fluid Scientist 主链智能化闭环改造实施方案
+
+## 0. 任务定位
+
+本轮不是重新设计项目，也不是推翻现有 Schema、模板编译器、三阶段确认交互和 OpenFOAM 远程执行体系。
+
+本轮目标是：
+
+> 在尽量少改动现有架构的前提下，把大模型、Skill、错误诊断修复、未知能力扩展真正接入当前 cylinder-flow 生产主链，使系统从“一次 LLM JSON 补全＋规则模板执行”升级为“可审计意图理解＋确定性编译＋真实执行反馈＋受控修复＋未知能力扩展”的闭环系统。
+
+必须保留：
+
+* `CylinderFlow2DExperimentSpecV1`
+* `ObstacleFlowExperimentSpecV1`
+* `SpecAdapter`
+* `ObstacleFlowCompiler`
+* 当前三阶段确认流程
+* SSH/SCP 工作站执行
+* OpenFOAM Foundation v13
+* 当前前端总体布局和右侧面板
+* 已实现的矩形、三角形、圆柱、底部轮廓编译能力
+
+禁止通过以下方式完成任务：
+
+* 删除 Schema，改成让模型直接输出完整 OpenFOAM Case；
+* 让模型每次从零生成所有 OpenFOAM 文件；
+* 新增更多静态模板掩盖意图理解问题；
+* 使用 mock LLM 代替真实 GLM；
+* 使用 mock OpenFOAM、固定日志或旧结果；
+* 只新增类和接口但不接入生产路由；
+* 只让单元测试通过，不运行真实端到端链路；
+* 把 Skill 包装器执行成功当作 Skill 已生效；
+* 仿真失败后重复运行同一份 Case；
+* smoke test 失败后继续 full run；
+* 静默使用 regex fallback；
+* 将未知几何映射到“最接近”的已有几何；
+* 为通过测试硬编码测试输入。
+
+---
+
+# 1. 当前问题基线
+
+当前已确认：
+
+1. GLM-4-Flash 仅在 `/api/v5/cylinder-flow/draft` 中调用一次；
+2. GLM 只输出结构化 JSON，不生成当前主链中的 OpenFOAM 文件；
+3. regex 抽取结果优先级高于 GLM，GLM 只能补空，无法纠正错误 regex；
+4. 歧义检测、物理推导、模板选择、Case 生成、报告均是规则或确定性代码；
+5. 4 个 Skill 只是函数调用包装器和审计记录器，不进入 Prompt，不修改 Spec，不改变 Compiler；
+6. `ExtensionOrchestrator` 已有实现，但未接入生产主链；
+7. OpenFOAM 执行失败后无模型诊断、无 Case 修改、无重试；
+8. smoke test 失败仍会继续 full run；
+9. Test D 中“正弦凸起”被同时识别为 rectangle 和 half_sine profile；
+10. V5 核心状态使用内存字典，服务重启后流程丢失；
+11. 当前运行代码存在大量未提交修改，不具备可靠复现基线；
+12. 当前所有测试使用 mock LLM，真实模型路径缺少自动化测试。
+
+本轮所有修改均围绕这些问题，不允许无关重构。
+
+---
+
+# 2. 总体目标架构
+
+改造后的生产主链必须为：
+
+```text
+用户输入
+  ↓
+原始输入和会话持久化
+  ↓
+显式事实抽取器 Regex Extractor
+  ↓
+LLM Structured Interpreter
+  ↓
+Candidate Merger / Conflict Resolver
+  ↓
+Semantic Fidelity Guard
+  ↓
+Ambiguity & Requirement Critic
+  ↓
+用户澄清
+  ↓
+Canonical Experiment Spec
+  ↓
+Skill Resolver
+  ↓
+Capability Check
+  ├─ 已支持
+  │    ↓
+  │  Deterministic Compiler
+  │
+  └─ 未支持
+       ↓
+     ExtensionOrchestrator
+       ↓
+     生成最小扩展
+       ↓
+     测试 + OpenFOAM v13 验证
+       ↓
+     注册 VERIFIED
+       ↓
+     恢复原任务
+  ↓
+用户确认实验方案
+  ↓
+编译
+  ↓
+静态验证
+  ↓
+网格验证
+  ↓
+Smoke Run
+  ├─ 成功 → 等待用户确认正式运行
+  └─ 失败 → Error Classifier → LLM Diagnosis → Controlled Repair → Retry
+  ↓
+Full Run
+  ├─ 成功 → 后处理与物理验证
+  └─ 失败 → Error Classifier → LLM Diagnosis → Controlled Repair → Retry
+  ↓
+结果分析
+  ↓
+LLM 科学报告 + 规则指标
+  ↓
+持久化展示
+```
+
+核心原则：
+
+> LLM 负责理解、仲裁、诊断和提出修改；Schema 负责契约；Compiler 负责确定性生成；Validator 和真实 OpenFOAM 负责判定正确性。
+
+---
+
+# 3. 第一阶段：冻结可复现基线
+
+## 3.1 建立独立改造分支
+
+从当前真实运行状态创建分支：
+
+```bash
+git checkout -b trae/v5-intelligent-closed-loop
+```
+
+必须先保存全部未提交修改：
+
+```bash
+git status --short
+git diff > docs/audits/pre_refactor_worktree.diff
+git diff --staged > docs/audits/pre_refactor_staged.diff
+git ls-files --others --exclude-standard > docs/audits/pre_refactor_untracked.txt
+```
+
+将当前实际运行状态整理成基线提交，不允许在脏工作区继续大规模修改。
+
+建议提交：
+
+```text
+chore(audit): freeze current production baseline
+```
+
+## 3.2 增加运行版本指纹
+
+服务启动时必须打印并通过只读接口暴露：
+
+```json
+{
+  "repo_root": "...",
+  "branch": "...",
+  "commit": "...",
+  "dirty": false,
+  "source_hash": "...",
+  "prompt_hash": "...",
+  "compiler_version": "...",
+  "openfoam_distribution": "foundation",
+  "openfoam_version": "13"
+}
+```
+
+新增：
+
+```text
+GET /api/v5/runtime-info
+```
+
+每个：
+
+* session
+* spec
+* compiled case
+* job
+* report
+
+必须保存：
+
+```text
+source_commit
+source_hash
+prompt_hash
+compiler_version
+model_name
+model_provider
+```
+
+## 3.3 清理运行进程
+
+停止所有旧进程，确保只有一个后端服务：
+
+```text
+工作目录：
+D:\desktop\AI FOR SCIENCE\src\fluid_scientist
+
+分支：
+trae/v5-intelligent-closed-loop
+
+端口：
+8000
+```
+
+页面必须显示当前 commit 的短 hash，避免再次运行错代码。
+
+---
+
+# 4. 第二阶段：意图理解与候选仲裁
+
+这是本轮最高优先级。
+
+不要删除 regex，也不要让 GLM 完全覆盖 regex。
+
+必须把当前“regex 优先、GLM 补空”改成“多候选提取＋字段级仲裁”。
+
+## 4.1 保留两份独立结果
+
+当前不能直接将 regex 和 LLM 修改到同一个 Spec。
+
+新增：
+
+```python
+class ExtractionCandidate:
+    field_path: str
+    value: Any
+    source: Literal["regex", "llm", "user", "formula", "default"]
+    source_span: str | None
+    confidence: float
+    reasoning_summary: str | None
+```
+
+新增：
+
+```python
+class IntentCandidateSet:
+    regex_candidates: list[ExtractionCandidate]
+    llm_candidates: list[ExtractionCandidate]
+    conflicts: list[CandidateConflict]
+    unresolved: list[str]
+```
+
+流程：
+
+```text
+user_text
+→ regex_extract_candidates()
+→ llm_extract_candidates()
+→ resolve_candidates()
+→ canonical spec
+```
+
+禁止 regex 和 LLM 在候选阶段直接互相覆盖。
+
+## 4.2 字段来源必须可追踪
+
+所有关键字段必须保存：
+
+```json
+{
+  "value": "triangle",
+  "raw_value": "三角小障碍物",
+  "source_span": "下壁面贴附一个高0.05m、宽0.1m的三角小障碍物",
+  "source": "user_explicit",
+  "regex_candidate": "triangle",
+  "llm_candidate": "triangle",
+  "resolution": "agreement",
+  "confidence": 1.0,
+  "confirmed": true
+}
+```
+
+至少覆盖：
+
+* domain length/height
+* geometry type
+* geometry dimensions
+* geometry positions
+* spatial relationships
+* fluid
+* Re
+* inlet velocity
+* viscosity
+* boundaries
+* initial conditions
+* observables
+* research goals
+
+## 4.3 候选冲突分类
+
+新增 `CandidateConflict`：
+
+```python
+class CandidateConflict:
+    field_path: str
+    regex_value: Any
+    llm_value: Any
+    raw_text: str
+    conflict_type: Literal[
+        "semantic_type_conflict",
+        "duplicate_entity",
+        "value_conflict",
+        "spatial_conflict",
+        "boundary_conflict",
+        "unsupported_capability",
+        "missing_required_field"
+    ]
+    severity: Literal["blocking", "warning"]
+    resolution: str | None
+```
+
+仲裁规则：
+
+### 情况 A：候选一致
+
+```text
+regex = triangle
+llm = triangle
+→ 直接接受
+```
+
+### 情况 B：regex 漏掉，LLM有明确来源
+
+```text
+regex = none
+llm = triangle
+source_span = “三角小障碍物”
+→ 可接受，但经过语义忠实校验
+```
+
+### 情况 C：regex 和 LLM 冲突
+
+```text
+regex = rectangle
+llm = half_sine_profile
+```
+
+不能固定 regex 胜出，也不能固定 LLM 胜出。
+
+必须进入 `ConflictResolver`。
+
+### 情况 D：同一句话被识别成两个实体
+
+例如：
+
+```text
+正弦凸起，高5m、宽20m
+→ rectangle
+→ bottom_profile
+```
+
+应判断尺寸属于正弦凸起，而不是第二个矩形实体。
+
+输出：
+
+```json
+{
+  "conflict_type": "duplicate_entity",
+  "resolution": "keep_bottom_profile_remove_rectangle"
+}
+```
+
+### 情况 E：无法自动仲裁
+
+生成用户澄清问题，不得静默选择。
+
+## 4.4 LLM Prompt 改造
+
+将现有 `_LLM_PARSE_SYSTEM_PROMPT` 拆成两个生产 Prompt。
+
+### Prompt A：事实和实体提取
+
+只允许提取用户明确表达的内容：
+
+```text
+不得补默认值。
+不得计算派生参数。
+不得将未知几何映射成近似几何。
+不得将三角形映射为cosine_bell。
+不得把正弦凸起同时创建为矩形实体。
+必须为每个字段返回source_span。
+无法确定时返回unknown。
+```
+
+输出严格 JSON Schema：
+
+```json
+{
+  "entities": [],
+  "boundaries": [],
+  "physics": {},
+  "observables": [],
+  "spatial_relations": [],
+  "unknown_terms": []
+}
+```
+
+### Prompt B：冲突仲裁
+
+输入：
+
+* 用户原文；
+* regex candidates；
+* LLM candidates；
+* 当前 Schema；
+* 支持能力清单；
+* 几何和边界冲突规则。
+
+输出：
+
+```json
+{
+  "resolved_fields": [],
+  "blocking_conflicts": [],
+  "clarification_questions": []
+}
+```
+
+Prompt B 只能在存在冲突时调用，避免无意义增加成本。
+
+## 4.5 模型调用参数
+
+意图抽取使用真实 GLM，显式配置：
+
+```text
+temperature = 0
+response_format = JSON
+timeout
+retry
+model name
+provider
+```
+
+不得使用默认随机参数。
+
+开发环境和生产环境都必须显式指定 provider，禁止：
+
+```python
+LLMClient()
+```
+
+默认为 mock。
+
+生产环境发现 provider=mock 时直接启动失败：
+
+```text
+PRODUCTION_LLM_PROVIDER_INVALID
+```
+
+## 4.6 LLM失败行为
+
+当前静默 fallback 必须删除。
+
+LLM失败后：
+
+* 保存错误；
+* 标记 `llm_status=FAILED`；
+* 前端显示“模型理解服务暂时失败”；
+* 允许用户选择“仅使用规则草案继续”；
+* 不得用户无感知地自动降级。
+
+只有用户明确选择规则模式，才继续。
+
+---
+
+# 5. 第三阶段：Semantic Fidelity Guard
+
+新增生产模块：
+
+```text
+src/fluid_scientist/intent/semantic_fidelity_guard.py
+```
+
+必须在：
+
+```text
+候选仲裁完成后
+Spec落库前
+编译前
+```
+
+分别执行。
+
+## 5.1 几何忠实性
+
+建立显式同义词表：
+
+```python
+GEOMETRY_SYNONYMS = {
+    "triangle": ["三角", "三角形", "三角障碍", "triangular"],
+    "rectangle": ["矩形", "长方形", "rectangular"],
+    "cosine_bell": ["余弦凸起", "余弦形凸起", "cosine bell"],
+    "half_sine": ["正弦凸起", "半正弦凸起", "sinusoidal bump"]
+}
+```
+
+规则：
+
+* 用户明确写三角，不允许输出 cosine_bell；
+* 用户明确写正弦凸起，不允许额外创建 rectangle；
+* 用户明确写矩形，不允许输出 triangle；
+* 未知几何不能映射到默认类型。
+
+## 5.2 空间关系
+
+支持并验证：
+
+* attached_to
+* below
+* above
+* centered_under
+* centered_in_x
+* distance_from_wall
+* inside_domain
+* non_intersection
+
+例如：
+
+```text
+障碍物位于圆柱正下方
+→ obstacle.center_x = cylinder.center_x
+```
+
+圆柱“正中央”和“距下壁2m”冲突时，不可静默解释。
+
+## 5.3 几何相交检查
+
+在编译前检查：
+
+* 圆柱与壁面相交；
+* 圆柱与障碍物相交；
+* 障碍物超出流场；
+* 三角形高度和宽度非正；
+* 矩形和底部轮廓重复；
+* 多个实体占据同一区域。
+
+失败返回：
+
+```text
+SEMANTIC_GEOMETRY_INVALID
+```
+
+## 5.4 边界语义检查
+
+验证：
+
+* 左右入口出口是否合理；
+* 周期边界是否成对；
+* 2D front/back 是否一致；
+* 上自由出流不会被错误生成成 no-slip；
+* inlet/outlet patch 名称和 0/ 文件一致；
+* 用户表达与最终 BoundaryConfig 一致。
+
+---
+
+# 6. 第四阶段：将 Skill 改成真实能力包
+
+保留 `SkillExecutor` 的审计功能，但新增真正的 Skill 定义和运行时作用。
+
+## 6.1 Skill Manifest
+
+每个 Skill 至少包含：
+
+```yaml
+id: fluid.geometry.triangle
+version: 1.0.0
+category: geometry
+supported_phrases:
+  - 三角形
+  - 三角障碍
+  - triangular obstacle
+schema_targets:
+  - TriangleSpec
+prompt_fragments:
+  - triangle_geometry_rules.md
+validators:
+  - validate_triangle_geometry
+compiler_hooks:
+  - compile_triangle_stl
+openfoam:
+  distribution: foundation
+  versions:
+    - "13"
+tests:
+  - test_triangle_intent
+  - test_triangle_compile
+  - test_triangle_checkmesh
+```
+
+## 6.2 Skill选择
+
+新增：
+
+```text
+SkillResolver.resolve(canonical_spec, conflicts, capabilities)
+```
+
+返回：
+
+```json
+{
+  "selected_skills": [],
+  "selection_reason": {},
+  "missing_skills": []
+}
+```
+
+选择后必须有真实作用。
+
+## 6.3 Skill影响链
+
+每个 Skill 必须至少影响一项：
+
+* Prompt 注入；
+* Schema 校验；
+* Semantic Guard；
+* Compiler hook；
+* 观测量生成；
+* 错误修复策略；
+* OpenFOAM验证。
+
+状态必须细分：
+
+```text
+REGISTERED
+SELECTED
+PROMPT_INJECTED
+VALIDATOR_EXECUTED
+COMPILER_HOOK_USED
+OPENFOAM_VALIDATED
+BUSINESS_OUTPUT_CHANGED
+```
+
+不能再只返回 `PASSED`。
+
+## 6.4 Prompt注入证据
+
+模型 trace 中保存：
+
+```json
+{
+  "selected_skills": ["fluid.geometry.triangle"],
+  "injected_fragments": ["triangle_geometry_rules.md"],
+  "prompt_hash": "..."
+}
+```
+
+## 6.5 初始Skill范围
+
+本轮至少实现或改造：
+
+1. `fluid.intent_to_spec`
+2. `fluid.geometry.cylinder`
+3. `fluid.geometry.rectangle`
+4. `fluid.geometry.triangle`
+5. `fluid.geometry.bottom_profile`
+6. `fluid.boundary.basic_2d`
+7. `fluid.metrics.force_coefficients`
+8. `fluid.metrics.vortex_shedding`
+9. `openfoam.foundation13.compiler`
+10. `openfoam.foundation13.error_diagnosis`
+
+---
+
+# 7. 第五阶段：能力检查与未知能力接入
+
+## 7.1 编译前能力检查
+
+新增统一入口：
+
+```python
+capability_report = CapabilityResolver.resolve(canonical_spec)
+```
+
+输出：
+
+```json
+{
+  "supported": [],
+  "missing": [],
+  "unverified": [],
+  "required_extensions": []
+}
+```
+
+不得再由单一 Compiler 默默决定是否支持。
+
+## 7.2 未支持能力行为
+
+遇到未知几何、边界、求解器或观测量：
+
+```text
+CAPABILITY_EXTENSION_REQUIRED
+```
+
+不得：
+
+* 删除该字段；
+* 使用默认值；
+* 映射到近似类型；
+* 跳过观测量；
+* 继续编译错误Case。
+
+## 7.3 接入 ExtensionOrchestrator
+
+把现有 `extensions/orchestrator.py` 接入 cylinder-flow 主链。
+
+生产路径：
+
+```text
+confirm-plan
+→ capability check
+→ missing capability
+→ create extension checkpoint
+→ ExtensionOrchestrator.execute(checkpoint)
+→ validation
+→ VERIFIED
+→ resume original spec
+```
+
+## 7.4 Extension类型
+
+优先顺序：
+
+1. `CONFIG_EXTENSION`
+2. `COMPILER_HOOK_EXTENSION`
+3. `VALIDATOR_EXTENSION`
+4. `POSTPROCESS_EXTENSION`
+5. `CODE_EXTENSION`
+
+能够用配置解决时禁止生成代码。
+
+## 7.5 模型生成范围
+
+未知能力代码生成只能生成最小 Patch。
+
+输入必须包括：
+
+* 当前仓库代码；
+* 目标接口；
+* 可修改文件白名单；
+* OpenFOAM Foundation v13；
+* 最近已验证实现；
+* 必须通过的测试；
+* 禁止修改项。
+
+输出必须是：
+
+```text
+unified diff
+```
+
+禁止输出完整仓库或重写整个 Compiler。
+
+## 7.6 扩展验证
+
+必须执行：
+
+```text
+静态安全检查
+Python导入检查
+类型检查
+单元测试
+相关回归测试
+生成Case
+OpenFOAM字典检查
+blockMesh/snappyHexMesh
+checkMesh
+smoke run
+```
+
+全部成功后才能注册：
+
+```text
+VERIFIED
+```
+
+失败时保存：
+
+* patch；
+* 测试日志；
+* OpenFOAM日志；
+* 模型调用；
+* evidence manifest。
+
+不能伪注册。
+
+---
+
+# 8. 第六阶段：OpenFOAM错误诊断与受控修复闭环
+
+新增：
+
+```text
+src/fluid_scientist/repair/
+```
+
+至少包括：
+
+```text
+error_classifier.py
+repair_context_builder.py
+llm_diagnoser.py
+repair_planner.py
+controlled_repair_executor.py
+repair_policy.py
+```
+
+## 8.1 错误分类
+
+至少支持：
+
+```text
+FOAM_DICTIONARY_SYNTAX
+MISSING_FILE
+PATCH_MISMATCH
+DIMENSION_MISMATCH
+UNKNOWN_KEYWORD
+OPENFOAM_VERSION_MISMATCH
+BLOCKMESH_FAILURE
+SNAPPY_FAILURE
+CHECKMESH_FAILURE
+CODED_BOUNDARY_COMPILE_FAILURE
+SOLVER_STARTUP_FAILURE
+NUMERICAL_DIVERGENCE
+COURANT_TOO_HIGH
+POSTPROCESS_MISSING_DATA
+UNKNOWN
+```
+
+分类应先由规则完成，再让 LLM辅助解释。
+
+## 8.2 修复上下文
+
+不得把整个仓库和所有日志直接丢给模型。
+
+根据错误类型收集：
+
+```text
+用户原始需求
+Canonical Spec
+OpenFOAM v13
+当前阶段
+相关文件
+错误日志完整片段
+前一轮修改
+已通过阶段
+允许修改的文件
+```
+
+例如 patch mismatch 只提供：
+
+* `constant/polyMesh/boundary`
+* `0/U`
+* `0/p`
+* `0/k`
+* `0/omega`
+* 当前错误日志
+
+## 8.3 修复策略分级
+
+### Level 1：确定性修复
+
+不调用模型或模型只提供分类：
+
+* patch名称同步；
+* 缺失边界补齐；
+* `forceCoeffs` patch修正；
+* 文件缺失；
+* known Foundation v13关键字修正；
+* endTime/deltaT修正；
+* Courant阈值修正；
+* Cl列解析修复。
+
+### Level 2：受控配置修复
+
+模型输出：
+
+```json
+{
+  "error_type": "...",
+  "root_cause": "...",
+  "repair_actions": [
+    {
+      "file": "system/controlDict",
+      "operation": "replace_field",
+      "path": "functions.forceCoeffs1.patches",
+      "value": ["cylinder"]
+    }
+  ]
+}
+```
+
+由程序执行，不允许模型直接写整个文件。
+
+### Level 3：最小代码Patch
+
+仅在配置无法修复时进入 ExtensionOrchestrator。
+
+## 8.4 阶段冻结
+
+已通过阶段默认不可修改。
+
+例如：
+
+```text
+blockMesh PASSED
+snappyHexMesh PASSED
+checkMesh PASSED
+solver startup FAILED
+```
+
+修复器默认不得修改几何和网格。
+
+如需回退，模型必须明确说明原因，并由 RepairPolicy允许。
+
+## 8.5 重试上限
+
+每个阶段最多：
+
+```text
+3轮自动修复
+```
+
+防止无限循环。
+
+每轮必须产生真实 diff。
+
+若 diff 为空：
+
+```text
+RETRY_WITHOUT_REPAIR
+```
+
+禁止继续重试。
+
+## 8.6 Smoke失败处理
+
+立即修改当前逻辑：
+
+```text
+smoke FAILED
+→ 禁止 full run
+→ 进入错误诊断
+```
+
+只有 smoke 成功后才显示 Gate 3。
+
+## 8.7 Full run失败
+
+```text
+full run FAILED
+→ 收集日志
+→ 错误分类
+→ 修复
+→ 重新从受影响阶段运行
+```
+
+不得只返回 FAILED。
+
+---
+
+# 9. 第七阶段：模型科学分析和报告
+
+规则计算 Cd、Cl、St 应保留，因为它们是确定性指标。
+
+新增模型分析层，但模型不能编造数据。
+
+## 9.1 结构化结果摘要
+
+先生成：
+
+```json
+{
+  "job_id": "...",
+  "mesh_quality": {},
+  "time_range": {},
+  "Cd": {},
+  "Cl": {},
+  "St": {},
+  "force_signal_quality": {},
+  "vortex_shedding": {},
+  "warnings": [],
+  "missing_data": []
+}
+```
+
+## 9.2 LLM报告输入
+
+模型只能读取：
+
+* 用户研究目标；
+* 已确认 Spec；
+* 真实 OpenFOAM摘要；
+* 真实指标；
+* 图片和数据文件索引；
+* 物理验证结果；
+* 警告。
+
+不得让模型自行猜测不存在的场。
+
+## 9.3 报告输出
+
+至少包含：
+
+* 实验配置摘要；
+* 网格和数值设置；
+* 运行状态；
+* Cd/Cl统计；
+* 涡脱落频率与St；
+* 尾迹形态分析；
+* 初始过渡段说明；
+* 数据质量和可信度；
+* 未完成或缺失项；
+* 是否足以支持研究目标。
+
+## 9.4 物理验证
+
+增加基础规则：
+
+* Cd/Cl是否有限；
+* 信号是否有足够样本；
+* FFT是否有足够频率分辨率；
+* St是否来自去除初始过渡后的Cl；
+* 质量守恒或残差；
+* 网格质量；
+* Courant数；
+* 是否达到周期稳定。
+
+不通过时报告必须显示：
+
+```text
+RESULT_NOT_PHYSICALLY_VERIFIED
+```
+
+不能只因为求解器完成就写“实验成功”。
+
+---
+
+# 10. 第八阶段：持久化改造
+
+当前 V5 内存字典必须迁移到 SQLite 或现有持久化层。
+
+至少持久化：
+
+```text
+sessions
+messages
+specs
+spec_versions
+clarifications
+confirmations
+compiled_cases
+jobs
+job_events
+llm_traces
+skill_traces
+repair_attempts
+results
+reports
+extension_checkpoints
+extension_evidence
+```
+
+## 10.1 会话
+
+一会话一个当前草案：
+
+```text
+session_id
+current_spec_id
+current_spec_version
+```
+
+用户修改时更新同一个流程，不新建无关联流程。
+
+## 10.2 Spec版本
+
+每次修改保存：
+
+```text
+version
+parent_version
+change_summary
+changed_fields
+source_message_id
+created_at
+```
+
+## 10.3 重启恢复
+
+服务重启后必须能恢复：
+
+* 当前会话；
+* 当前草案；
+* 已确认方案；
+* 编译结果；
+* job状态；
+* 结果；
+* 报告；
+* repair history。
+
+---
+
+# 11. 第九阶段：前端交互改造
+
+保持当前整体UI，不进行大规模重写。
+
+## 11.1 草案区域
+
+必须显示：
+
+* 用户原始输入；
+* 模型是否成功调用；
+* 使用模型名称；
+* 规则和模型是否存在冲突；
+* 已采用的解释；
+* 待确认字段；
+* 选中的Skills；
+* 缺失能力。
+
+## 11.2 修改交互
+
+用户通过对话修改：
+
+```text
+将矩形改成三角形
+```
+
+系统必须：
+
+1. 读取当前 session 和 current spec；
+2. 生成字段级 diff；
+3. 显示修改摘要；
+4. 用户确认；
+5. 创建新spec版本；
+6. 从Canonical Spec重新编译完整Case；
+7. 不继承旧几何残留。
+
+## 11.3 编译与错误展示
+
+显示分阶段状态：
+
+```text
+Spec Validation
+Capability Check
+Case Generation
+blockMesh
+snappyHexMesh
+checkMesh
+Smoke Run
+Full Run
+Postprocess
+Physics Validation
+```
+
+失败时显示：
+
+* 错误类型；
+* 根因；
+* 模型诊断；
+* 修改内容；
+* 第几轮修复；
+* 是否需要用户干预。
+
+## 11.4 结果与方案可逆切换
+
+必须支持：
+
+```text
+方案 → 编译 → 运行日志 → 结果 → 报告
+```
+
+任意切换，关闭弹窗后结果不丢失。
+
+---
+
+# 12. 第十阶段：安全与配置整改
+
+## 12.1 API Key
+
+移除：
+
+```text
+data/llm_config.json
+```
+
+中的明文Key。
+
+改为：
+
+```text
+环境变量
+或本地安全配置
+```
+
+任何日志不得输出 Key。
+
+## 12.2 AppMode
+
+生产环境禁止：
+
+```text
+AppMode.FAKE
+```
+
+启动时发现生产环境为 FAKE：
+
+```text
+直接失败
+```
+
+旧链路若保留，页面和API必须明确标注 demo，不得混入生产主链。
+
+## 12.3 LLM provider
+
+生产环境默认值不能是 mock。
+
+所有生产创建必须显式传入 provider。
+
+---
+
+# 13. 测试体系
+
+## 13.1 单元测试
+
+至少补充：
+
+* regex候选抽取；
+* LLM候选解析；
+* 候选冲突；
+* triangle语义忠实；
+* bump和rectangle互斥；
+* spatial relation；
+* capability resolver；
+* skill selection；
+* skill prompt injection；
+* error classifier；
+* controlled repair；
+* repair retry policy；
+* smoke failure blocking；
+* spec version persistence；
+* Cl列索引统一。
+
+## 13.2 真实模型测试
+
+测试分两类。
+
+### CI默认
+
+使用固定录制响应，验证稳定逻辑。
+
+### 手动集成测试
+
+使用真实 GLM API。
+
+必须记录：
+
+* model；
+* latency；
+* raw response；
+* parsed result；
+* token/cost；
+* accuracy。
+
+不能再声称 mock 测试证明真实 LLM 可用。
+
+## 13.3 真实OpenFOAM测试
+
+至少使用工作站 OpenFOAM Foundation v13。
+
+每次生成独立目录，禁止旧结果复用。
+
+---
+
+# 14. 强制端到端测试集
+
+必须完成以下测试，全部通过后才能结束。
+
+## Test A：标准圆柱绕流
+
+输入：
+
+```text
+二维圆柱绕流，圆柱半径0.1m，来流速度1m/s，Re=200，分析Cd、Cl和涡脱落频率。
+```
+
+验证：
+
+* 正确CylinderSpec；
+* forceCoeffs配置；
+* Cd、Cl、St；
+* 用户三阶段确认；
+* smoke通过；
+* full run通过；
+* 报告读取真实指标。
+
+## Test B：圆柱＋矩形障碍
+
+验证：
+
+* rectangle仅一个；
+* geometry diff；
+* STL或网格变化；
+* 结果目录独立。
+
+## Test C：圆柱＋三角障碍
+
+使用完整案例：
+
+```text
+在二维流场中，长10米，宽5米，圆柱半径0.1m，圆心距下壁面2m，位于流场正中央，来流速度1.0m/s，Re=200。下壁面贴附一个高0.05m、宽0.1m的三角小障碍物，位于圆柱正下方。左为速度入口，右为压力出口，上自由出流，下壁面无滑移。观测圆柱尾迹涡街形态、升阻力系数及涡脱落频率。
+```
+
+验证：
+
+* triangle正确；
+* cosine_bell禁用；
+* source span正确；
+* obstacle.center_x与cylinder一致；
+* “正中央”和距下壁2m产生合理澄清；
+* Compiler生成三角几何；
+* checkMesh通过。
+
+## Test D：正弦凸起
+
+输入：
+
+```text
+二维长方形水流场，长300m、高25m，上边界施加向右切向应力，两侧周期，下壁无滑移；下壁中央有正弦凸起，高5m、宽20m；分析指定截面平均流速。
+```
+
+验证：
+
+* half_sine profile启用；
+* rectangle禁用；
+* 无圆柱；
+* 周期边界成对；
+* 截面平均速度采集配置存在；
+* 不进入圆柱专属逻辑。
+
+## Test E：多轮修改
+
+流程：
+
+1. 创建圆柱；
+2. 增加矩形；
+3. 矩形改成三角形；
+4. 增加Cd/Cl/St；
+5. 修改入口速度；
+6. 确认并编译。
+
+验证：
+
+* 同一个session；
+* spec版本递增；
+* 旧rectangle完全消失；
+* 不新建无关联流程；
+* 每轮有change summary。
+
+## Test F：可控patch错误
+
+故意制造：
+
+```text
+0/U patch name与网格不一致
+```
+
+验证：
+
+* smoke失败；
+* full run不启动；
+* 错误分类为PATCH_MISMATCH；
+* LLM收到相关日志和文件；
+* 受控修复更新patch；
+* 再次smoke成功；
+* 有真实diff；
+* 不是重复运行同一Case。
+
+## Test G：数值发散
+
+制造较大deltaT。
+
+验证：
+
+* 分类为COURANT_TOO_HIGH或NUMERICAL_DIVERGENCE；
+* 修复策略修改deltaT；
+* 不修改几何；
+* 重新运行成功。
+
+## Test H：未知能力
+
+输入一个当前不支持、但可安全实现的简单边界或观测量。
+
+验证：
+
+```text
+CapabilityResolver
+→ ExtensionOrchestrator
+→ 最小Patch
+→ 测试
+→ OpenFOAM验证
+→ VERIFIED
+→ 恢复原任务
+```
+
+不允许人工提前硬编码该测试能力。
+
+## Test I：重启恢复
+
+在草案、编译后、运行后分别重启服务。
+
+验证所有状态可恢复。
+
+---
+
+# 15. 反偷懒测试
+
+## 15.1 输入与产物差异
+
+对A、B、C、D保存并比较：
+
+* canonical spec hash；
+* compiler input hash；
+* case archive hash；
+* blockMeshDict diff；
+* snappyHexMeshDict diff；
+* STL hash；
+* boundary文件；
+  -远程目录；
+  -结果文件hash。
+
+只比较Spec hash不算完成。
+
+## 15.2 模型真实性
+
+每次模型调用必须有：
+
+```text
+trace_id
+stage
+model
+provider
+latency
+prompt_hash
+raw_output_hash
+parsed_output_hash
+success
+fallback
+```
+
+## 15.3 Skill真实性
+
+Skill必须有业务影响证据：
+
+```text
+selected
+prompt injected
+validator executed
+compiler hook used
+output affected
+```
+
+## 15.4 Repair真实性
+
+每次修复必须存在：
+
+```text
+错误日志
+分类
+诊断
+repair plan
+文件diff
+重试命令
+新结果
+```
+
+无diff不得计为修复。
+
+## 15.5 OpenFOAM真实性
+
+必须保存：
+
+* SSH命令；
+* OpenFOAM环境；
+* blockMesh日志；
+* checkMesh日志；
+* foamRun时间步；
+* 当前job结果；
+* 文件时间戳。
+
+---
+
+# 16. 推荐提交顺序
+
+每个阶段独立提交，禁止最后一次性提交大量无法审查的修改。
+
+建议：
+
+```text
+chore(runtime): freeze reproducible production baseline
+feat(intent): preserve regex and llm candidates
+feat(intent): add conflict resolver and fidelity guard
+fix(intent): prevent bump rectangle duplication
+feat(skills): add real skill manifests and runtime effects
+feat(capabilities): connect capability resolver to cylinder workflow
+feat(extensions): connect extension orchestrator to production
+feat(repair): classify OpenFOAM failures
+feat(repair): add controlled repair loop
+fix(execution): block full run after smoke failure
+feat(report): add llm-assisted scientific report
+feat(persistence): persist v5 workflow and repair history
+fix(metrics): unify forceCoeffs parsing
+test(e2e): add real glm and OpenFOAM closed-loop tests
+docs(audit): document final architecture and evidence
+```
+
+每个提交后运行相关测试。
+
+---
+
+# 17. 不得无关重构的区域
+
+除非测试证明必要，不要大规模修改：
+
+* `ObstacleFlowCompiler`整体结构；
+* 前端页面布局；
+* SSH传输协议；
+* 当前OpenFOAM工作站配置；
+* 已运行通过的矩形和三角STL生成；
+* 当前确认Gate的基本顺序；
+* 当前 Cd/Cl/St 确定性计算公式。
+
+优先新增适配层、Resolver、Guard和Repair模块，而不是重写全部系统。
+
+---
+
+# 18. 验收标准
+
+只有同时满足以下条件才能结束：
+
+## 意图理解
+
+* Regex和LLM结果独立保存；
+* 冲突能够被发现；
+* GLM能够纠正错误regex或触发澄清；
+* triangle不会变成cosine_bell；
+* 正弦凸起不会重复生成rectangle；
+* source span可追踪。
+
+## Skill
+
+* Skill真实进入Prompt或执行Validator/Compiler hook；
+* 至少一个测试证明禁用Skill后结果不同；
+* 不再只是包装器审计。
+
+## 未知能力
+
+* ExtensionOrchestrator生产可达；
+* 使用真实模型和真实OpenFOAM验证；
+* 能从checkpoint恢复原任务。
+
+## 错误闭环
+
+* smoke失败不再full run；
+* OpenFOAM错误能够分类；
+* 模型能够看到错误上下文；
+* 修复产生真实diff；
+* 至少两个错误案例自动修复成功；
+* 不存在RETRY_WITHOUT_REPAIR。
+
+## 持久化
+
+* 服务重启后草案、编译、job、结果可恢复；
+* 会话修改不会新建无关联流程。
+
+## 结果
+
+* Cd、Cl解析一致；
+* St使用真实Cl时间序列；
+* 报告只基于真实数据；
+* 有基础物理验证。
+
+## 端到端
+
+* Test A到I全部执行；
+* 不使用mock OpenFOAM；
+* 真实模型测试有trace；
+* 每个Case使用新目录；
+* 所有结论有证据。
+
+---
+
+# 19. 最终交付物
+
+必须提交：
+
+```text
+docs/refactor/v5_intelligent_closed_loop_architecture.md
+docs/refactor/intent_conflict_resolution.md
+docs/refactor/skill_runtime_design.md
+docs/refactor/openfoam_repair_loop.md
+docs/refactor/extension_orchestrator_integration.md
+docs/refactor/persistence_migration.md
+docs/tests/v5_closed_loop_e2e_report.md
+docs/tests/real_glm_evaluation.md
+docs/tests/openfoam_repair_evidence.md
+```
+
+最终报告必须包含：
+
+1. 改造前后流程对比；
+2. 实际模型调用矩阵；
+3. Skill业务影响矩阵；
+4. ExtensionOrchestrator生产调用证据；
+5. 每轮错误修复diff；
+6. Test A到I结果；
+7. 失败测试和未解决问题；
+8. 所有提交列表；
+9. 当前运行commit；
+10. 已知风险。
+
+---
+
+# 20. 工作循环与停止规则
+
+Trae必须按照以下循环工作：
+
+```text
+阅读真实代码
+→ 定位生产调用
+→ 做最小修改
+→ 运行单元测试
+→ 运行集成测试
+→ 启动真实服务
+→ 运行真实GLM请求
+→ 运行真实OpenFOAM
+→ 检查生成文件和结果
+→ 发现问题
+→ 定位根因
+→ 修复
+→ 回归测试
+```
+
+如果测试失败，不允许：
+
+* 只改测试期望；
+* 加硬编码；
+* 降低断言；
+* 使用mock替代；
+* 跳过失败步骤；
+* 声称“环境原因”后直接结束；
+* 仅写TODO；
+* 只提交设计文档。
+
+必须继续定位，直到：
+
+* 成功；
+* 或获得明确且无法由代码解决的外部环境阻塞证据。
+
+环境阻塞必须包含：
+
+* 失败命令；
+* 完整错误；
+* 已尝试措施；
+* 为什么不是代码问题；
+* 恢复执行所需的最小外部条件。
+
+不得在“代码已经写完但没有跑通”的状态下宣布完成。
+
+---
+
+# 21. 本轮最高优先级
+
+若工作量过大，严格按以下顺序完成，不能倒序：
+
+```text
+P0 可复现基线
+P1 意图候选与冲突仲裁
+P2 Semantic Fidelity Guard
+P3 smoke失败阻断与错误分类
+P4 受控错误修复闭环
+P5 Skill真实生效
+P6 ExtensionOrchestrator接入
+P7 持久化
+P8 LLM科学报告和物理验证
+```
+
+P0到P6未完成前，不要新增更多CFD场景或美化UI。
+
+最终目标不是“功能数量更多”，而是：
+
+> 对每一个用户输入，系统能够说明自己如何理解、使用了哪些Skill、生成了什么Case、为什么运行失败、如何修复、结果是否可信，并提供完整可复现证据。

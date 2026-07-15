@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "SkillResultV1",
+  "type": "object",
+  "required": [
+    "skill_id",
+    "status",
+    "data",
+    "issues",
+    "evidence"
+  ],
+  "properties": {
+    "skill_id": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "SUCCESS",
+        "PARTIAL",
+        "FAILED",
+        "ENVIRONMENT_BLOCKED"
+      ]
+    },
+    "data": {
+      "type": "object"
+    },
+    "issues": {
+      "type": "array"
+    },
+    "evidence": {
+      "type": "array"
+    }
+  }
+}

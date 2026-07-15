@@ -27,12 +27,15 @@ from pydantic import BaseModel, Field
 
 
 def _foam_header(class_name: str, object_name: str, location: str = "") -> str:
-    """Return a standard OpenFOAM FoamFile header block."""
+    """Return a standard OpenFOAM Foundation 13 FoamFile header block.
+
+    Foundation 13 does NOT use the ``version`` field in the FoamFile header.
+    The header only contains: format, class, location, object.
+    """
     loc_str = f'location "{location}";' if location else 'location "";'
     return (
         "FoamFile\n"
         "{\n"
-        "    version     2.0;\n"
         "    format      ascii;\n"
         "    class       " + class_name + ";\n"
         "    " + loc_str + "\n"
@@ -470,22 +473,4 @@ class OpenFOAMCaseWriter:
         for bname, bdata in content.get("boundary", {}).items():
             lines.append(f"    {bname}")
             lines.append("    {")
-            lines.append(f"        type  {bdata.get('type', 'patch')};")
-            faces = bdata.get("faces", [])
-            lines.append("        faces")
-            lines.append("        (")
-            for face in faces:
-                lines.append(f"            ( {' '.join(str(f) for f in face)} )")
-            lines.append("        );")
-            lines.append("    }")
-        lines.append(");")
-        lines.append("")
-        # mergePatchPairs
-        lines.append("mergePatchPairs")
-        lines.append("(")
-        lines.append(");")
-        lines.append("")
-        return "\n".join(lines)
-
-
-__all__ = ["CaseManifest", "OpenFOAMCaseWriter"]
+            lines.append(f"        type  {bdata.get('type',

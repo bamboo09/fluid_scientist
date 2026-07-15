@@ -438,13 +438,4 @@ class TestCompileReadinessValidatorStatic:
         v = CompileReadinessValidator()
         report = v.validate(str(case_dir), run_openfoam=False)
 
-        fo = next(c for c in report.checks if c.check_name == "function_objects")
-        assert fo.passed
-
-    def test_generated_files_listed(self, tmp_path: Path):
-        case_dir = tmp_path / "case"
-        _minimal_case(case_dir)
-        v = CompileReadinessValidator()
-        report = v.validate(str(case_dir), run_openfoam=False)
-        assert "system/controlDict" in report.generated_files
-        assert "0/U" in report.generated_files
+        

@@ -1041,27 +1041,4 @@ class SQLWorkflowRepository:
         if (
             row.kind != record.kind.value
             or row.project_id != record.project_id
-            or row.input_digest != record.input_digest
-        ):
-            raise OperationConflict(
-                f"operation {record.operation_id} already exists with different identity"
-            )
-        if not self._is_canonical_operation_create(row, record):
-            raise OperationConflict(
-                f"operation {record.operation_id} replay is not a canonical create payload"
-            )
-        return self._stored_operation(row)
-
-    @staticmethod
-    def _is_canonical_operation_create(row: OperationRow, record: OperationRecord) -> bool:
-        return (
-            record.state is OperationState.QUEUED
-            and record.stage is OperationStage.QUEUED
-            and record.message == OperationRecord.model_fields["message"].default
-            and record.result_ref is None
-            and record.safe_error is None
-            and not record.cancel_requested
-            and record.attempt == 1
-            and record.created_at.isoformat() == row.created_at
-            and record.updated_at == record.created_at
-        )
+            or row.inp

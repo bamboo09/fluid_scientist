@@ -1,0 +1,148 @@
+{
+  "registry_version": "1.0",
+  "platform": {
+    "distribution": "OpenFOAMFoundation",
+    "version": "13",
+    "application": "foamRun",
+    "solver_module": "incompressibleFluid"
+  },
+  "skills": [
+    {
+      "id": "cylinder_flow_2d.router",
+      "folder": "cylinder_flow_2d_router",
+      "category": "router",
+      "summary": "识别二维圆柱绕流实验族并阻止旧流程回退。",
+      "entrypoint": "fluid_skills.runtime.router:route",
+      "deterministic": true,
+      "dependencies": []
+    },
+    {
+      "id": "geometry.cylinder.normalizer",
+      "folder": "geometry_cylinder_normalizer",
+      "category": "geometry",
+      "summary": "归一化圆柱语义，保留用户输入。",
+      "entrypoint": "fluid_skills.runtime.geometry:normalize_cylinder_geometry",
+      "deterministic": true,
+      "dependencies": []
+    },
+    {
+      "id": "geometry.derived_dimensions",
+      "folder": "geometry_derived_dimensions",
+      "category": "geometry",
+      "summary": "根据半径/直径确定性派生圆柱特征尺度。",
+      "entrypoint": "fluid_skills.runtime.geometry:normalize_cylinder_geometry",
+      "deterministic": true,
+      "dependencies": [
+        "geometry.cylinder.normalizer"
+      ]
+    },
+    {
+      "id": "fluid.flow_topology.classifier",
+      "folder": "fluid_flow_topology_classifier",
+      "category": "fluid_mechanics",
+      "summary": "从边界和驱动方式判断入口出口、周期强迫、开放域等拓扑。",
+      "entrypoint": "fluid_skills.runtime.topology:classify_flow_topology",
+      "deterministic": true,
+      "dependencies": []
+    },
+    {
+      "id": "boundary.topology_2d",
+      "folder": "boundary_topology_2d",
+      "category": "boundary",
+      "summary": "强制二维前后面为 empty，并检查周期边界成对。",
+      "entrypoint": "fluid_skills.runtime.topology:enforce_2d_boundary_topology",
+      "deterministic": true,
+      "dependencies": []
+    },
+    {
+      "id": "observable.extractor",
+      "folder": "observable_extractor",
+      "category": "observable",
+      "summary": "从中文自然语言提取点速度、截面平均速度、升阻力和频率。",
+      "entrypoint": "fluid_skills.runtime.observables:extract_observables",
+      "deterministic": false,
+      "dependencies": []
+    },
+    {
+      "id": "observable.recommender",
+      "folder": "observable_recommender",
+      "category": "observable",
+      "summary": "用户未指定观测量时提供圆柱绕流默认观测建议。",
+      "entrypoint": "fluid_skills.runtime.observables:recommend_observables",
+      "deterministic": true,
+      "dependencies": []
+    },
+    {
+      "id": "analysis_goal.builder",
+      "folder": "analysis_goal_builder",
+      "category": "analysis",
+      "summary": "依据几何、观测量和时间模式生成分析目标。",
+      "entrypoint": "fluid_skills.runtime.observables:build_analysis_goals",
+      "deterministic": true,
+      "dependencies": [
+        "observable.extractor"
+      ]
+    },
+    {
+      "id": "openfoam13.platform.discovery",
+      "folder": "openfoam13_platform_discovery",
+      "category": "openfoam",
+      "summary": "在真实工作站探测 Foundation 13、求解模块、边界和后处理能力。",
+      "entrypoint": "fluid_skills.runtime.openfoam13:platform_discovery",
+      "deterministic": true,
+      "dependencies": []
+    },
+    {
+      "id": "openfoam13.case.static_validator",
+      "folder": "openfoam13_case_static_validator",
+      "category": "validation",
+      "summary": "检查 Foundation 13 文件结构、solver module 和安全关键字。",
+      "entrypoint": "fluid_skills.runtime.openfoam13:static_validate_case",
+      "deterministic": true,
+      "dependencies": [
+        "openfoam13.platform.discovery"
+      ]
+    },
+    {
+      "id": "validation.smoke_test",
+      "folder": "validation_smoke_test",
+      "category": "validation",
+      "summary": "生成真实字典、网格、串行和并行 Smoke Test 计划。",
+      "entrypoint": "fluid_skills.runtime.openfoam13:smoke_test_plan",
+      "deterministic": true,
+      "dependencies": [
+        "openfoam13.case.static_validator"
+      ]
+    },
+    {
+      "id": "postprocess.flow_visualization",
+      "folder": "postprocess_flow_visualization",
+      "category": "postprocess",
+      "summary": "生成白名单 PlotSpec，绑定 run_id 和 spec_version。",
+      "entrypoint": "fluid_skills.runtime.visualization:build_plot_spec",
+      "deterministic": true,
+      "dependencies": []
+    },
+    {
+      "id": "cylinder_flow_2d.e2e_loop",
+      "folder": "cylinder_flow_2d_e2e_loop",
+      "category": "orchestrator",
+      "summary": "从草案到工作站验证、正式运行、可视化回传的有界闭环。",
+      "entrypoint": "fluid_skills.runtime.orchestrator:CylinderFlow2DSkillOrchestrator",
+      "deterministic": false,
+      "dependencies": [
+        "cylinder_flow_2d.router",
+        "geometry.cylinder.normalizer",
+        "geometry.derived_dimensions",
+        "fluid.flow_topology.classifier",
+        "boundary.topology_2d",
+        "observable.extractor",
+        "observable.recommender",
+        "analysis_goal.builder",
+        "openfoam13.case.static_validator",
+        "validation.smoke_test",
+        "postprocess.flow_visualization"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,16 @@
+{
+  "skill_id": "validation.smoke_test",
+  "version": "1.0.0",
+  "category": "validation",
+  "summary": "生成真实字典、网格、串行和并行 Smoke Test 计划。",
+  "entrypoint": "fluid_skills.runtime.openfoam13:smoke_test_plan",
+  "deterministic": true,
+  "dependencies": [
+    "openfoam13.case.static_validator"
+  ],
+  "platform": {
+    "distribution": "OpenFOAMFoundation",
+    "version": "13"
+  },
+  "validation_status": "CANDIDATE"
+}

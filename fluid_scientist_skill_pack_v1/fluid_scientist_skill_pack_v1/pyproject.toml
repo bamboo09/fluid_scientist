@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fluid-scientist-skills"
+version = "0.1.0"
+description = "Project-local fluid mechanics and OpenFOAM Foundation 13 skills for Fluid Scientist"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

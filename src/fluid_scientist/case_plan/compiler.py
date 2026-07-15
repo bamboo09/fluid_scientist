@@ -62,7 +62,7 @@ class NativeCaseCompiler:
 
         {
             "system": {"controlDict": ..., "fvSchemes": ..., ...},
-            "constant": {"transportProperties": ..., ...},
+            "constant": {"physicalProperties": ..., ...},
             "0": {"U": ..., "p": ...},
         }
 
@@ -96,10 +96,10 @@ class NativeCaseCompiler:
                 "blockMeshDict": self._generate_block_mesh_dict(case_plan),
             },
             "constant": {
-                "transportProperties": self._generate_transport_properties(
+                "physicalProperties": self._generate_physical_properties(
                     case_plan
                 ),
-                "turbulenceProperties": self._generate_turbulence_properties(
+                "momentumTransport": self._generate_turbulence_properties(
                     case_plan
                 ),
             },
@@ -147,7 +147,8 @@ class NativeCaseCompiler:
         measurement = case_plan.measurement_plan
 
         control_dict: dict[str, Any] = {
-            "application": case_plan.solver,
+            # Foundation 13: foamRun -solver <module>; no application field
+            "solver": case_plan.solver,
             "startFrom": "latestTime",
             "startTime": 0,
             "stopAt": "endTime",
@@ -380,27 +381,30 @@ class NativeCaseCompiler:
         return boundary
 
     # ------------------------------------------------------------------
-    # constant/transportProperties
+    # constant/physicalProperties
     # ------------------------------------------------------------------
 
-    def _generate_transport_properties(self, case_plan: CasePlan) -> dict[str, Any]:
-        """Generate transportProperties from physical_model_plan."""
+    def _generate_physical_properties(self, case_plan: CasePlan) -> dict[str, Any]:
+        """Generate physicalProperties from physical_model_plan.
+
+        Foundation 13 uses ``viscosityModel constant`` instead of the
+        legacy ``transportModel Newtonian``.  The ``nu`` entry carries
+        its dimensional header ``[0 2 -1 0 0 0 0]`` inline.
+        """
         physics = case_plan.physical_model_plan
         nu = physics.get("nu", physics.get("kinematic_viscosity"))
-        rho = physics.get("rho", physics.get("density", 1.0))
 
         return {
-            "transportModel": "Newtonian",
-            "nu": float(nu),
-            "rho": float(rho),
+            "viscosityModel": "constant",
+            "nu": f"[0 2 -1 0 0 0 0] {float(nu)}",
         }
 
     # ------------------------------------------------------------------
-    # constant/turbulenceProperties
+    # constant/momentumTransport
     # ------------------------------------------------------------------
 
     def _generate_turbulence_properties(self, case_plan: CasePlan) -> dict[str, Any]:
-        """Generate turbulenceProperties from physical_model_plan."""
+        """Generate momentumTransport from physical_model_plan."""
         physics = case_plan.physical_model_plan
         turbulent = physics.get("turbulent", False)
         turbulence_model = physics.get("turbulence_model", "")

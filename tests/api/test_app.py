@@ -722,14 +722,4 @@ def test_custom_openfoam_case_can_be_validated_before_submission() -> None:
             payload = text.encode()
             info = tarfile.TarInfo(name)
             info.size = len(payload)
-            bundle.addfile(info, io.BytesIO(payload))
-
-    response = client().post(
-        "/api/custom-cases/validate",
-        content=output.getvalue(),
-        headers={"Content-Type": "application/gzip"},
-    )
-
-    assert response.status_code == 200
-    assert response.json()["solver"] == "incompressibleFluid"
-    assert response.json()["needs_block_mesh"] is True
+            bundle.addfile(info, io.BytesIO(pay

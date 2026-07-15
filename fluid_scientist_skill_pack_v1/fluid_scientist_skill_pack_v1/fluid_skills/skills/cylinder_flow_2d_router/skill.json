@@ -1,0 +1,11 @@
+{
+  "skill_id": "cylinder_flow_2d.router",
+  "version": "1.0.0",
+  "category": "router",
+  "summary": "识别二维圆柱绕流实验族并阻止旧流程回退。",
+  "entrypoint": "fluid_skills.runtime.router:route",
+  "deterministic": true,
+  "dependencies": [],
+  "platform": null,
+  "validation_status": "CANDIDATE"
+}

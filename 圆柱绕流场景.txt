@@ -1,0 +1,2677 @@
+# Fluid Scientist 二维可配置障碍物流动实验族完整实施方案
+
+## OpenFOAM Foundation 13 仿真、工作站 Python 后处理与对话结果回传
+
+---
+
+# 1. 本轮任务定位
+
+当前暂不继续扩大到任意流体科研问题、任意物理场和任意动态能力。
+
+本轮先完整实现一个具有代表性、配置范围足够广、能够真实运行和返回结果的实验族：
+
+> 二维长方形流场中，可选底部凸起和一个圆柱；入口、出口、顶部、底部和圆柱边界均可在允许范围内配置；支持恒速流、变速流、空间非均匀入口、压力差驱动、周期压力梯度驱动和顶壁驱动；系统完成自然语言解析、参数确认、OpenFOAM Foundation 13 编译、工作站验证、正式计算、Python 后处理和图片回传。
+
+场景名称统一为：
+
+```text
+ConfigurableObstacleFlow2D
+```
+
+专用实验规格统一为：
+
+```text
+ObstacleFlowExperimentSpecV1
+```
+
+本轮最终闭环：
+
+```text
+用户自然语言
+→ 场景识别
+→ 参数和边界提取
+→ 物理拓扑判断
+→ 必要澄清
+→ 用户确认实验规格
+→ 几何和网格生成
+→ OpenFOAM 13确定性编译
+→ 工作站Smoke Test
+→ 正式计算
+→ 工作站Python后处理
+→ 生成流场图和指标
+→ 图片和结果回传原对话框
+```
+
+本轮成功标准不是“生成了 OpenFOAM 文件”，而是：
+
+```text
+自然语言输入
+→ 真实工作站计算完成
+→ 生成速度/压力/涡量等流场图
+→ 用户在对话中直接看到图和观测结果
+```
+
+---
+
+# 2. 第一版场景范围
+
+## 2.1 几何范围
+
+第一版支持：
+
+* 二维长方形计算域；
+* 平底通道；
+* 可选底部凸起；
+* 可选一个圆柱；
+* 圆柱可位于凸起上方、前方、后方或其他合法位置；
+* 凸起和圆柱参数均可配置；
+* OpenFOAM 中使用单层薄三维网格实现二维计算；
+* front/back 固定为 `empty`。
+
+支持的组合：
+
+```text
+平底 + 无圆柱
+平底 + 一个圆柱
+凸起 + 无圆柱
+凸起 + 一个圆柱
+```
+
+数据结构使用：
+
+```text
+cylinders[]
+```
+
+但 V1 运行时限制最多一个圆柱，为后续多圆柱保留兼容性。
+
+---
+
+## 2.2 物理范围
+
+第一版支持：
+
+* 单相；
+* 不可压缩；
+* 牛顿流体；
+* 等温；
+* 层流；
+* 稳态 RANS；
+* 瞬态层流；
+* 瞬态 URANS；
+* 水；
+* 用户自定义牛顿流体。
+
+第一版暂不支持：
+
+* 多相流；
+* 自由液面；
+* 热传递；
+* 可压缩流；
+* 非牛顿流体；
+* 多孔介质；
+* 流固耦合；
+* 圆柱振动；
+* 动态变形网格；
+* 三维尾迹；
+* 用户自定义 OpenFOAM 代码。
+
+不支持的请求返回：
+
+```text
+UNSUPPORTED_IN_OBSTACLE_FLOW_V1
+```
+
+不得静默忽略。
+
+---
+
+# 3. 支持的流动拓扑
+
+系统不能默认左右一定是周期边界。
+
+必须首先识别流动拓扑：
+
+```text
+INLET_OUTLET
+PERIODIC_FORCED
+PRESSURE_DIFFERENCE
+OPEN_DOMAIN
+WALL_DRIVEN
+COMBINED_DRIVING
+```
+
+---
+
+## 3.1 INLET_OUTLET：入口—出口模式
+
+典型输入：
+
+> 左侧以2 m/s恒定速度流入，右侧压力出口。
+
+合法组合：
+
+```text
+left = velocity / mass-flow inlet
+right = pressure / open / advective outlet
+top = wall / slip / symmetry / freestream / open
+bottom = wall
+```
+
+主要驱动来自入口速度或流量。
+
+---
+
+## 3.2 PERIODIC_FORCED：周期强迫模式
+
+典型输入：
+
+> 左右为周期边界，施加从左到右的压力梯度。
+
+合法组合：
+
+```text
+left/right = periodic pair
+forcing = mean pressure gradient 或 body force
+top = wall / moving wall / shear stress / slip
+bottom = wall
+```
+
+左右周期时，不能再分别设置入口和出口。
+
+---
+
+## 3.3 PRESSURE_DIFFERENCE：压力差模式
+
+典型输入：
+
+> 左侧压力较高，右侧压力较低。
+
+结构化为：
+
+```text
+left = pressure boundary
+right = pressure boundary
+pressure_left > pressure_right
+```
+
+系统根据：
+
+```text
+Δp / L
+```
+
+推导平均压力梯度。
+
+不能同时设置左右周期。
+
+---
+
+## 3.4 OPEN_DOMAIN：开放域模式
+
+典型输入：
+
+> 左侧恒速来流，右侧自由流出，上方为自由流边界。
+
+合法组合：
+
+```text
+left = velocity inlet
+right = pressure/open/advective outlet
+top = freestream/open boundary
+bottom = wall
+```
+
+系统必须检查：
+
+* 顶部距离圆柱和凸起是否足够；
+* 出口距离是否足够；
+* 是否可能出现回流；
+* 开放边界是否使用已验证映射。
+
+---
+
+## 3.5 WALL_DRIVEN：壁面驱动模式
+
+典型输入：
+
+> 顶部壁面向右运动。
+
+或：
+
+> 顶部施加向右剪切应力。
+
+驱动来自：
+
+```text
+moving wall
+或
+shear stress
+```
+
+可以配合周期边界，也可以配合入口—出口模式。
+
+---
+
+## 3.6 COMBINED_DRIVING：组合驱动模式
+
+例如：
+
+```text
+周期压力梯度
++
+顶部运动壁面
+```
+
+或者：
+
+```text
+恒速入口
++
+顶部剪切应力
+```
+
+组合驱动必须显式记录，系统不得因为存在速度入口就自动删除压力梯度，也不得自动叠加用户未要求的驱动力。
+
+---
+
+# 4. 入口能力
+
+入口需要分别表达时间变化和空间分布。
+
+## 4.1 时间类型
+
+第一版支持：
+
+```text
+constant
+ramp
+sinusoidal
+piecewise_linear
+tabulated
+```
+
+### constant
+
+```text
+U(t) = U0
+```
+
+### ramp
+
+支持：
+
+```text
+start_velocity
+end_velocity
+start_time
+end_time
+```
+
+### sinusoidal
+
+支持：
+
+```text
+mean_velocity
+amplitude
+frequency
+phase
+```
+
+### piecewise_linear
+
+支持一组：
+
+```text
+(time, velocity)
+```
+
+### tabulated
+
+用户上传结构化时序数据，不允许传任意代码。
+
+---
+
+## 4.2 空间类型
+
+第一版支持：
+
+```text
+uniform
+parabolic
+power_law
+linear_shear
+tabulated_profile
+```
+
+### uniform
+
+整个入口速度一致。
+
+### parabolic
+
+适合层流充分发展通道入口。
+
+### power_law
+
+适合经验边界层入口。
+
+### linear_shear
+
+例如：
+
+```text
+U(y) = U0 + S y
+```
+
+### tabulated_profile
+
+用户提供高度—速度数据表。
+
+---
+
+## 4.3 时间和空间组合
+
+入口定义为：
+
+```text
+temporal profile × spatial profile
+```
+
+例如：
+
+```text
+constant × uniform
+ramp × uniform
+sinusoidal × uniform
+constant × parabolic
+ramp × parabolic
+tabulated × tabulated
+```
+
+V1 不必实现全部组合，但必须在 Schema 中表示支持范围，Validator 必须拒绝未实现组合。
+
+---
+
+# 5. 出口和开放边界能力
+
+## 5.1 pressure_outlet
+
+用户指定参考压力。
+
+适合常规入口—出口流动。
+
+---
+
+## 5.2 open_outlet
+
+表示允许流体自然离开，但其 OpenFOAM 映射必须来自已验证 Boundary Capability。
+
+---
+
+## 5.3 advective_outlet
+
+用于希望扰动以对流形式离开的场景。
+
+---
+
+## 5.4 non_reflecting_outlet
+
+用于尽量降低扰动反射。
+
+如果当前没有 Foundation 13 已验证实现，则不得仅凭名称生成配置，应返回：
+
+```text
+CAPABILITY_NOT_VERIFIED
+```
+
+---
+
+## 5.5 “自由流出口”的处理
+
+用户说：
+
+```text
+自由流出
+```
+
+不能直接映射。
+
+生成候选：
+
+```text
+pressure_outlet
+open_outlet
+advective_outlet
+non_reflecting_outlet
+```
+
+系统结合：
+
+* 是否可能回流；
+* 是否关注尾迹扰动；
+* 出口距离；
+* 当前 Registry 能力；
+
+决定是否自动推荐或询问用户。
+
+---
+
+# 6. 顶部边界能力
+
+第一版支持：
+
+```text
+no_slip_wall
+slip_wall
+moving_wall
+shear_stress
+symmetry
+freestream
+open_boundary
+pressure_boundary
+```
+
+## 6.1 no_slip_wall
+
+顶部为固定固壁。
+
+## 6.2 slip_wall
+
+法向速度为零，切向不施加无滑移约束。
+
+## 6.3 moving_wall
+
+参数：
+
+```text
+velocity_vector
+```
+
+## 6.4 shear_stress
+
+参数：
+
+```text
+direction
+magnitude
+unit = Pa
+```
+
+需要通过流体物性转换为 OpenFOAM 13 可执行边界。
+
+## 6.5 symmetry
+
+顶部作为对称面。
+
+## 6.6 freestream
+
+需要：
+
+```text
+freestream_velocity
+```
+
+用于外部来流边界。
+
+## 6.7 open_boundary
+
+允许顶部发生流入或流出，必须使用回流兼容的已验证边界组合。
+
+---
+
+# 7. 底部和凸起边界
+
+底部平壁和凸起表面分别配置：
+
+```text
+bottom_flat
+bump_surface
+```
+
+支持：
+
+```text
+no_slip_wall
+slip_wall
+moving_wall
+shear_stress
+```
+
+默认：
+
+```text
+bottom_flat = no_slip
+bump_surface = no_slip
+```
+
+---
+
+# 8. 圆柱能力
+
+## 8.1 几何参数
+
+```text
+id
+center_x
+center_y
+diameter
+```
+
+## 8.2 边界类型
+
+P0 支持：
+
+```text
+no_slip_wall
+rotating_wall
+slip_wall
+```
+
+参数：
+
+```text
+angular_velocity
+rotation_direction
+```
+
+`moving_cylinder` 预留到后续动态网格版本。
+
+---
+
+## 8.3 几何合法性检查
+
+新增：
+
+```text
+GeometryFeasibilityValidator
+```
+
+检查：
+
+* 圆柱不得与凸起重叠；
+* 圆柱不得与顶部相交；
+* 圆柱不得跨越左右边界；
+* 圆柱与壁面间隙不能小于最小网格要求；
+* 圆柱不能覆盖观测点；
+* 圆柱阻塞比不能超过设定阈值；
+* 圆柱与开放边界距离必须足够。
+
+错误示例：
+
+```json
+{
+  "code": "CYLINDER_INTERSECTS_BUMP",
+  "message": "圆柱与凸起发生几何重叠。",
+  "suggested_changes": [
+    "提高圆柱中心高度",
+    "减小圆柱直径",
+    "调整凸起位置"
+  ]
+}
+```
+
+---
+
+# 9. 凸起能力
+
+第一版支持：
+
+```text
+cosine_bell
+half_sine
+gaussian
+piecewise_points
+```
+
+参数：
+
+```text
+enabled
+profile_type
+center_x
+width
+height
+parameters
+```
+
+---
+
+## 9.1 cosine_bell
+
+推荐默认形式，保证两端平滑连接。
+
+## 9.2 half_sine
+
+适用于半正弦凸起。
+
+## 9.3 gaussian
+
+参数：
+
+```text
+center_x
+height
+standard_deviation
+cutoff_width
+```
+
+## 9.4 piecewise_points
+
+用户通过二维点定义底部轮廓。
+
+系统必须验证：
+
+* x坐标单调；
+* 轮廓不自交；
+* 凸起不超出计算域；
+* 轮廓可闭合；
+* 不存在无法网格化的极端尖角。
+
+V1 禁止直接传入 Python 函数或任意表达式。
+
+---
+
+# 10. 压力梯度和体力
+
+## 10.1 压力梯度参数
+
+```text
+enabled
+direction
+magnitude
+unit
+```
+
+允许单位：
+
+```text
+Pa/m
+m/s²
+```
+
+## 10.2 单位转换
+
+物理压力梯度：
+
+```text
+dp/dx [Pa/m]
+```
+
+转为等效加速度：
+
+```text
+a = -(1/ρ) dp/dx
+```
+
+如果用户给的是运动学压力梯度：
+
+```text
+m/s²
+```
+
+则直接作为等效加速度。
+
+## 10.3 方向约定
+
+向右驱动：
+
+```text
+pressure decreases along +x
+dp/dx < 0
+equivalent acceleration points to +x
+```
+
+## 10.4 周期压力驱动
+
+左右周期时，必须使用工作站真实验证过的 Foundation 13 实现，例如：
+
+```text
+fvModels source
+或
+verified equivalent body force
+```
+
+不得仅凭模型记忆生成。
+
+---
+
+# 11. 边界组合验证
+
+新增：
+
+```text
+BoundaryTopologyResolver
+BoundaryCombinationValidator
+```
+
+## 11.1 合法组合示例
+
+### 恒速入口
+
+```text
+left = uniform velocity inlet
+right = pressure outlet
+top = slip
+bottom = no-slip
+```
+
+### 变速入口
+
+```text
+left = sinusoidal velocity inlet
+right = open outlet
+top = freestream
+bottom = no-slip
+```
+
+### 周期压力驱动
+
+```text
+left/right = periodic pair
+pressure gradient = enabled
+top = shear stress
+bottom = no-slip
+```
+
+### 周期移动顶壁
+
+```text
+left/right = periodic pair
+top = moving wall
+bottom = no-slip
+```
+
+### 开放外流
+
+```text
+left = velocity inlet
+right = advective/open outlet
+top = freestream/open boundary
+bottom = wall
+```
+
+---
+
+## 11.2 非法组合
+
+必须拒绝：
+
+```text
+left = periodic
+right = pressure_outlet
+```
+
+```text
+left/right = periodic
+同时left又是velocity inlet
+```
+
+```text
+top同时是wall和open boundary
+```
+
+```text
+所有边界都是静止wall
+且无压力梯度、体力或运动壁面
+```
+
+```text
+恒速入口
+同时左右周期
+```
+
+```text
+pressure-difference mode
+同时左右周期
+```
+
+---
+
+# 12. 实验规格 Schema
+
+统一使用：
+
+```text
+ObstacleFlowExperimentSpecV1
+```
+
+推荐结构：
+
+```json
+{
+  "schema_version": "1.0",
+  "case_family": "configurable_obstacle_flow_2d",
+
+  "domain": {
+    "length_m": 300,
+    "height_m": 25,
+    "thickness_m": 1
+  },
+
+  "fluid": {
+    "type": "water",
+    "temperature_c": 20,
+    "density_kg_m3": 998,
+    "kinematic_viscosity_m2_s": 1.004e-6
+  },
+
+  "geometry": {
+    "bump": {
+      "enabled": true,
+      "profile_type": "cosine_bell",
+      "center_x_m": 150,
+      "width_m": 20,
+      "height_m": 5,
+      "custom_points": []
+    },
+    "cylinders": [
+      {
+        "id": "cylinder_1",
+        "center_x_m": null,
+        "center_y_m": null,
+        "diameter_m": null,
+        "boundary_type": "no_slip_wall",
+        "angular_velocity_rad_s": 0
+      }
+    ]
+  },
+
+  "flow_definition": {
+    "mode": "periodic_forced",
+    "initial_velocity": {
+      "type": "quiescent",
+      "vector_m_s": [0, 0, 0]
+    }
+  },
+
+  "boundaries": {
+    "left": {
+      "type": "periodic"
+    },
+    "right": {
+      "type": "periodic"
+    },
+    "top": {
+      "type": "shear_stress",
+      "direction": [1, 0, 0],
+      "magnitude": null,
+      "unit": "Pa"
+    },
+    "bottom_flat": {
+      "type": "no_slip_wall"
+    },
+    "bump_surface": {
+      "type": "no_slip_wall"
+    },
+    "front": {
+      "type": "empty"
+    },
+    "back": {
+      "type": "empty"
+    }
+  },
+
+  "inlet_profile": {
+    "enabled": false,
+    "temporal_type": "constant",
+    "spatial_type": "uniform",
+    "parameters": {}
+  },
+
+  "forcing": {
+    "pressure_gradient": {
+      "enabled": true,
+      "direction": [1, 0, 0],
+      "magnitude": 4e-4,
+      "unit": null
+    },
+    "body_force": {
+      "enabled": false,
+      "vector_m_s2": [0, 0, 0]
+    }
+  },
+
+  "operating_stages": [],
+
+  "simulation": {
+    "time_mode": "auto",
+    "flow_regime": "auto",
+    "turbulence_model": "auto",
+    "max_courant_number": 0.5
+  },
+
+  "observables": [],
+
+  "plot_requests": [
+    "velocity_magnitude",
+    "streamlines",
+    "pressure",
+    "vorticity"
+  ],
+
+  "unresolved_fields": []
+}
+```
+
+每个关键字段应额外记录：
+
+```text
+source
+status
+confidence
+unit
+```
+
+来源包括：
+
+```text
+USER_EXPLICIT
+USER_CONFIRMED
+MODEL_RECOMMENDED
+FORMULA_DERIVED
+SYSTEM_DEFAULT
+```
+
+---
+
+# 13. 自然语言解析流程
+
+新增专用流水线：
+
+```text
+ObstacleFlowV1Pipeline
+```
+
+处理顺序：
+
+```text
+1. 场景族识别
+2. 计算域提取
+3. 几何对象提取
+4. 左右上下边界提取
+5. 圆柱边界提取
+6. 流动拓扑识别
+7. 入口时间和空间剖面提取
+8. 压力梯度和体力提取
+9. 初始条件提取
+10. 流体参数提取
+11. 观测目标提取
+12. 绘图需求提取
+13. 组合冲突检查
+14. 缺失参数分析
+15. 生成草案
+16. 用户澄清和确认
+```
+
+LLM 只能生成结构化 Spec，不得生成 OpenFOAM 文件。
+
+无法确定的内容必须保持：
+
+```text
+null
+UNRESOLVED
+AMBIGUOUS
+```
+
+---
+
+# 14. 澄清策略
+
+一轮最多询问三个阻塞问题。
+
+以示例为例，第一轮询问：
+
+1. 顶部是剪切应力还是运动壁面？对应数值和单位是什么？
+2. 压力梯度 `4×10⁻⁴` 的单位是 `Pa/m` 还是 `m/s²`？
+3. 圆柱的直径和圆心位置是什么？
+
+第二轮询问：
+
+1. 请选择点平均流速或截面平均流速；
+2. 给出点坐标或截面位置；
+3. 选择 `Ux`、`Uy` 或速度大小。
+
+不要向用户询问：
+
+* `fvSchemes`；
+* `fvSolution`；
+* OpenFOAM patch 类型；
+* PIMPLE 参数；
+* 网格字典语法。
+
+---
+
+# 15. 观测能力
+
+## 15.1 point_velocity
+
+参数：
+
+```text
+point
+component
+instantaneous / time_average
+time_window
+```
+
+输出：
+
+```text
+速度时序
+时间平均
+标准差
+```
+
+---
+
+## 15.2 section_mean_velocity
+
+参数：
+
+```text
+section_x
+component
+line_average / flux_weighted
+time_average
+time_window
+```
+
+输出：
+
+```text
+瞬时截面平均速度
+时间平均速度
+标准差
+单位厚度流量
+```
+
+---
+
+## 15.3 section_flow_rate
+
+输出：
+
+```text
+Q(t)
+平均流量
+流量波动
+```
+
+---
+
+## 15.4 cylinder_drag / lift
+
+输出：
+
+```text
+Cd(t)
+Cl(t)
+平均Cd
+均方根Cl
+```
+
+---
+
+## 15.5 wall_shear_stress
+
+可在：
+
+```text
+bottom_flat
+bump_surface
+cylinder
+```
+
+上计算。
+
+---
+
+## 15.6 recirculation_length
+
+用于凸起后或圆柱后回流区。
+
+可以作为后处理扩展。
+
+---
+
+# 16. 默认流场图
+
+正式运行完成后默认生成：
+
+1. 速度大小云图；
+2. `Ux` 云图；
+3. 压力云图；
+4. 涡量云图；
+5. 速度流线图；
+6. 用户指定主观测指标图。
+
+如果存在圆柱受力观测，再生成：
+
+7. Cd/Cl 时序图。
+
+如果入口为时变入口，再生成：
+
+8. 入口速度和观测速度对比图；
+9. 相位滞后或幅值响应图。
+
+---
+
+# 17. 几何与网格后端
+
+新增：
+
+```text
+ObstacleFlowMeshBackend
+```
+
+必须先选择一个真实可工作的主后端，不要同时半实现多个。
+
+---
+
+## 17.1 推荐后端：Gmsh
+
+若工作站存在：
+
+```text
+python3
+gmsh Python module
+gmshToFoam
+```
+
+则优先：
+
+```text
+Python Gmsh
+→ 构建矩形域
+→ 构建底部凸起
+→ 布尔减去圆柱
+→ 定义边界Physical Groups
+→ 局部网格加密
+→ 挤出单层
+→ gmshToFoam
+```
+
+优点：
+
+* 凸起和圆柱参数化稳定；
+* 支持不同轮廓；
+* 局部加密方便；
+* 边界命名明确；
+* 后续扩展多圆柱较方便。
+
+---
+
+## 17.2 备用后端
+
+如果 Gmsh 不可用：
+
+```text
+blockMesh背景网格
++ 曲线或表面定义
++ snappyHexMesh
+```
+
+但必须在工作站真实验证：
+
+* 周期面匹配；
+* 圆柱边界；
+* 凸起网格；
+* 单层 empty 边界。
+
+---
+
+## 17.3 网格加密区域
+
+支持：
+
+```text
+圆柱近场加密
+凸起近场加密
+圆柱尾迹加密
+凸起尾迹加密
+底部边界层
+顶部边界层
+开放边界缓冲区
+```
+
+网格参数：
+
+```text
+base_cell_size
+cylinder_refinement
+bump_refinement
+wake_refinement
+wall_layers
+target_y_plus
+max_cells
+```
+
+---
+
+# 18. OpenFOAM Foundation 13 编译
+
+固定平台：
+
+```text
+distribution = OpenFOAMFoundation
+version = 13
+application = foamRun
+```
+
+基础 solver module：
+
+```text
+incompressibleFluid
+```
+
+禁止保存：
+
+```text
+solver = pimpleFoam
+```
+
+必须区分：
+
+```text
+application
+solver_module
+time_mode
+pressure_velocity_coupling
+```
+
+---
+
+## 18.1 编译器结构
+
+新增：
+
+```text
+ObstacleFlowOpenFOAM13Compiler
+```
+
+内部包含：
+
+```text
+FlowTopologyCompiler
+├── InletOutletCompiler
+├── PeriodicForcedCompiler
+├── PressureDrivenCompiler
+├── OpenDomainCompiler
+└── CombinedDrivingCompiler
+```
+
+输入：
+
+```text
+ObstacleFlowExperimentSpecV1
+OpenFOAMFoundation13Profile
+MeshManifest
+VerifiedBoundaryCapabilities
+VerifiedForcingCapabilities
+```
+
+输出：
+
+```text
+CompiledCase
+CompilationManifest
+SourceMap
+ValidationPlan
+```
+
+---
+
+## 18.2 基础文件
+
+根据层流或湍流生成：
+
+```text
+0/U
+0/p
+0/k
+0/omega
+0/nut
+
+constant/physicalProperties
+constant/momentumTransport
+constant/polyMesh
+
+system/controlDict
+system/fvSchemes
+system/fvSolution
+system/decomposeParDict
+```
+
+压力梯度、体力或其他 source 使用 Foundation 13 已验证配置。
+
+---
+
+## 18.3 流态与时间模式
+
+系统根据：
+
+* 入口速度；
+* 压力梯度；
+* 顶壁速度或应力；
+* 圆柱直径；
+* 通道高度；
+* 流体黏度；
+
+估算 Reynolds 数。
+
+推荐规则：
+
+```text
+无圆柱且低Re
+→ steady laminar
+
+有圆柱且需要尾迹观测
+→ transient
+
+较低Re
+→ transient laminar
+
+中高Re
+→ transient URANS kOmegaSST
+
+只关心平均量且稳态收敛
+→ 可先做steady RANS基线
+```
+
+第一版不自动选择 LES。
+
+任何从层流切换到湍流的决定都应在实验规格中可见。
+
+---
+
+# 19. 静态验证
+
+新增：
+
+```text
+ObstacleFlowCaseStaticValidator
+```
+
+检查：
+
+* patch 名称一致；
+* front/back 为 `empty`；
+* 周期面成对；
+* 周期模式无入口出口；
+* 入口—出口模式无错误周期配置；
+* 圆柱、凸起、底部边界完整；
+* 顶部边界参数完整；
+* 压力梯度单位和方向正确；
+* 湍流字段完整；
+* function objects 参数完整；
+* 观测点和截面位于流体域；
+* 热流等不支持指标没有混入；
+* 无禁止的 codeStream、coded、任意 libs 和外部脚本。
+
+---
+
+# 20. 工作站验证状态机
+
+```text
+SPEC_CONFIRMED
+→ GEOMETRY_VALIDATED
+→ MESH_GENERATED
+→ MESH_VALIDATED
+→ CASE_COMPILED
+→ STATIC_VALIDATED
+→ DICTIONARY_VALIDATED
+→ SERIAL_SMOKE_TEST_PASSED
+→ PARALLEL_SMOKE_TEST_PASSED
+→ READY_TO_SUBMIT
+```
+
+未达到 `READY_TO_SUBMIT`，正式提交按钮必须禁用。
+
+---
+
+## 20.1 Dictionary Validation
+
+```bash
+foamDictionary system/controlDict -entry solver
+foamDictionary constant/physicalProperties
+foamDictionary constant/momentumTransport
+```
+
+---
+
+## 20.2 Mesh Validation
+
+```bash
+checkMesh -allTopology -allGeometry
+```
+
+解析：
+
+* negative volume；
+* illegal face；
+* non-manifold；
+* cyclic mismatch；
+* non-orthogonality；
+* skewness；
+* aspect ratio；
+* topology failure。
+
+---
+
+## 20.3 Serial Smoke Test
+
+临时缩短计算：
+
+```bash
+timeout 120 foamRun -solver incompressibleFluid
+```
+
+检查：
+
+* 至少完成若干时间步或迭代；
+* 无 `FOAM FATAL ERROR`；
+* 无 NaN、Inf；
+* 无 Floating point exception；
+* Courant 数合理；
+* 入口、出口和顶部边界成功加载；
+* 压力梯度或体力成功加载；
+* probes、section、forces 等输出存在。
+
+---
+
+## 20.4 Parallel Smoke Test
+
+如果正式任务并行：
+
+```bash
+decomposePar -force
+mpirun -np 2 foamRun -solver incompressibleFluid -parallel
+```
+
+检查：
+
+* MPI 启动；
+* 周期边界；
+* processor 目录；
+* 并行观测输出；
+* 短时计算稳定性。
+
+---
+
+# 21. 正式任务运行
+
+新增：
+
+```text
+SimulationRun
+```
+
+字段：
+
+```text
+run_id
+session_id
+study_id
+case_id
+spec_version
+compiled_case_version
+workstation_profile_id
+status
+remote_case_path
+submit_command
+started_at
+completed_at
+exit_code
+log_artifact_id
+```
+
+状态：
+
+```text
+QUEUED
+SUBMITTED
+RUNNING
+COMPLETED
+FAILED
+CANCELLED
+POSTPROCESSING
+RESULTS_READY
+```
+
+日志解析：
+
+* 当前时间；
+* 时间步；
+* Courant 数；
+* residual；
+* function object 输出；
+* 写出时间；
+* 错误类型。
+
+---
+
+# 22. 工作站 Python 后处理
+
+新增：
+
+```text
+WorkstationObstacleFlowPostprocessor
+```
+
+原则：
+
+> 完整流场数据保留在工作站，只传回图片、指标和必要的小型数据文件。
+
+---
+
+## 22.1 后处理后端优先级
+
+### 方案A：foamToVTK + PyVista
+
+```text
+foamToVTK
+→ PyVista读取VTK
+→ 提取二维面
+→ 绘制云图、流线和几何轮廓
+```
+
+### 方案B：ParaView pvpython
+
+```text
+pvpython
+→ OpenFOAM Reader
+→ Slice / Contour / StreamTracer
+→ 保存PNG
+```
+
+### 方案C：OpenFOAM采样 + Matplotlib
+
+```text
+foamPostProcess或sample
+→ CSV
+→ Matplotlib绘图
+```
+
+Trae 必须先探测工作站环境，再选择一个主后端。
+
+---
+
+## 22.2 目录结构
+
+建议：
+
+```text
+backend/postprocessing/
+├── workstation_plot_runner.py
+├── obstacle_flow_plot_spec.py
+├── backends/
+│   ├── pyvista_backend.py
+│   ├── pvpython_backend.py
+│   └── sampled_matplotlib_backend.py
+├── metrics/
+│   ├── point_velocity.py
+│   ├── section_mean_velocity.py
+│   ├── flow_rate.py
+│   ├── cylinder_forces.py
+│   └── recirculation_length.py
+├── plots/
+│   ├── field_contour.py
+│   ├── streamline_plot.py
+│   └── time_series_plot.py
+└── result_manifest.py
+```
+
+工作站执行入口：
+
+```text
+scripts/postprocess_obstacle_flow.py
+```
+
+---
+
+# 23. PlotSpec
+
+后处理只接受结构化 PlotSpec，不接受任意 Python 代码。
+
+```json
+{
+  "run_id": "run_xxx",
+  "case_path": "/remote/path/case",
+  "time_selection": {
+    "mode": "latest"
+  },
+  "plots": [
+    {
+      "type": "scalar_contour",
+      "field": "U",
+      "component": "magnitude",
+      "output_name": "velocity_magnitude.png"
+    },
+    {
+      "type": "scalar_contour",
+      "field": "U",
+      "component": "x",
+      "output_name": "ux.png"
+    },
+    {
+      "type": "scalar_contour",
+      "field": "p",
+      "output_name": "pressure.png"
+    },
+    {
+      "type": "vorticity_contour",
+      "output_name": "vorticity.png"
+    },
+    {
+      "type": "streamlines",
+      "field": "U",
+      "output_name": "streamlines.png"
+    }
+  ],
+  "metrics": [
+    {
+      "type": "section_mean_velocity",
+      "section_x": 180,
+      "component": "Ux",
+      "output_name": "section_mean_velocity.png"
+    }
+  ]
+}
+```
+
+---
+
+# 24. Python 后处理实现要求
+
+## 24.1 流场图
+
+必须正确显示：
+
+* 计算域；
+* 凸起轮廓；
+* 圆柱轮廓；
+* 坐标轴；
+* 物理单位；
+* 色标；
+* 仿真时间；
+* Case 名称；
+* Spec 版本；
+* Run ID。
+
+---
+
+## 24.2 点速度
+
+流程：
+
+```text
+读取probe时序
+→ 删除启动阶段
+→ 选择采样时间窗
+→ 计算平均值
+→ 计算标准差
+→ 绘制时序和平均线
+```
+
+---
+
+## 24.3 截面平均速度
+
+流程：
+
+```text
+提取x=常数截面
+→ 排除圆柱或固体区域
+→ 计算Ux空间平均
+→ 计算流量
+→ 对时间窗口再平均
+```
+
+二维单层网格中，截面相当于竖直线或单位厚度截面。
+
+---
+
+## 24.4 圆柱受力
+
+流程：
+
+```text
+读取forceCoeffs输出
+→ 删除启动阶段
+→ 计算平均Cd
+→ 计算Cl均方根
+→ 绘制Cd/Cl时序
+```
+
+---
+
+## 24.5 时变入口响应
+
+如果入口为正弦或其他时变入口：
+
+```text
+入口速度时序
+→ 观测速度时序
+→ 幅值比
+→ 相位差
+→ 响应图
+```
+
+---
+
+# 25. Result Manifest
+
+工作站生成：
+
+```text
+result_manifest.json
+```
+
+示例：
+
+```json
+{
+  "run_id": "run_xxx",
+  "case_id": "case_xxx",
+  "spec_version": 3,
+  "simulation_time": 200,
+  "status": "SUCCESS",
+  "metrics": {
+    "section_mean_velocity": {
+      "value": 1.83,
+      "unit": "m/s",
+      "time_window": [150, 200]
+    }
+  },
+  "artifacts": [
+    {
+      "artifact_type": "flow_plot",
+      "field": "U_magnitude",
+      "filename": "velocity_magnitude.png"
+    },
+    {
+      "artifact_type": "flow_plot",
+      "field": "vorticity",
+      "filename": "vorticity.png"
+    },
+    {
+      "artifact_type": "metric_plot",
+      "metric": "section_mean_velocity",
+      "filename": "section_mean_velocity.png"
+    }
+  ]
+}
+```
+
+---
+
+# 26. 结果文件回传
+
+新增：
+
+```text
+ResultArtifact
+```
+
+字段：
+
+```text
+artifact_id
+session_id
+study_id
+case_id
+run_id
+spec_version
+artifact_type
+filename
+mime_type
+storage_location
+checksum
+metadata
+created_at
+```
+
+流程：
+
+```text
+工作站生成PNG/JSON/CSV
+→ Runner检查文件存在、大小和类型
+→ 安全下载到Artifact Store
+→ 创建ResultArtifact
+→ API返回display_url
+→ 在原Session中插入RESULT消息
+→ 对话框展示图片卡片
+```
+
+禁止长期将大图以 Base64 存入数据库。
+
+---
+
+# 27. 对话框结果展示
+
+仿真完成后自动插入结果消息：
+
+```text
+计算已完成。
+
+主流场：
+[速度大小云图]
+
+主要观测：
+x=180 m截面的Ux时间平均值为1.83 m/s。
+[截面平均速度曲线]
+
+其他结果：
+[压力云图]
+[涡量云图]
+[流线图]
+```
+
+每张图片必须绑定：
+
+```text
+run_id
+case_id
+spec_version
+simulation_time
+```
+
+用户修改实验参数后，旧图必须显示为“历史版本”，不能混入新结果。
+
+---
+
+# 28. API 设计
+
+## 28.1 创建草案
+
+```text
+POST /api/research-sessions/{session_id}/obstacle-flow/draft
+```
+
+输入：
+
+```json
+{
+  "natural_language": "..."
+}
+```
+
+输出：
+
+```text
+draft_spec
+detected_flow_mode
+missing_fields
+conflicts
+clarification_questions
+```
+
+---
+
+## 28.2 修改规格
+
+```text
+PATCH /api/research-sessions/{session_id}/obstacle-flow/spec
+```
+
+采用路径级修改，不重新生成完整 Spec。
+
+---
+
+## 28.3 用户确认
+
+```text
+POST /api/research-sessions/{session_id}/obstacle-flow/confirm
+```
+
+确认后冻结当前 Spec 版本。
+
+---
+
+## 28.4 生成网格
+
+```text
+POST /api/cases/{case_id}/mesh
+```
+
+---
+
+## 28.5 编译
+
+```text
+POST /api/cases/{case_id}/compile
+```
+
+---
+
+## 28.6 验证
+
+```text
+POST /api/cases/{case_id}/validate
+```
+
+---
+
+## 28.7 正式提交
+
+```text
+POST /api/cases/{case_id}/submit
+```
+
+必须满足：
+
+```text
+validation_status = READY_TO_SUBMIT
+```
+
+---
+
+## 28.8 查询运行状态
+
+```text
+GET /api/runs/{run_id}
+```
+
+---
+
+## 28.9 后处理
+
+```text
+POST /api/runs/{run_id}/postprocess
+```
+
+---
+
+## 28.10 查询结果
+
+```text
+GET /api/runs/{run_id}/artifacts
+```
+
+---
+
+# 29. 前端交互
+
+## 29.1 输入后识别
+
+显示：
+
+```text
+已识别为：二维可配置障碍物流动实验
+```
+
+同时显示：
+
+* 流动模式；
+* 域尺寸；
+* 几何；
+* 各边界；
+* 驱动方式；
+* 流体；
+* 观测目标；
+* 待确认字段。
+
+---
+
+## 29.2 实验规格卡片
+
+卡片分为：
+
+```text
+计算域
+流体
+凸起
+圆柱
+流动模式
+左侧边界
+右侧边界
+顶部边界
+底部边界
+驱动方式
+入口剖面
+数值策略
+观测目标
+绘图请求
+```
+
+参数只读展示，用户通过对话修改。
+
+---
+
+## 29.3 变更确认
+
+例如：
+
+```text
+已完成以下修改：
+
+- 左侧改为2 m/s恒定速度入口；
+- 右侧改为压力出口；
+- 顶部改为自由流边界；
+- 圆柱直径设为2 m；
+- 圆心设为(150 m, 12 m)；
+- 观测设为x=180 m截面Ux时间平均。
+
+请确认是否按此配置生成仿真。
+```
+
+---
+
+## 29.4 运行状态
+
+依次显示：
+
+```text
+正在验证几何
+正在生成网格
+正在检查网格质量
+正在编译OpenFOAM Case
+正在进行短时预运行
+预运行通过
+任务已提交
+正在计算
+正在生成流场图
+结果已生成
+```
+
+---
+
+# 30. 状态机
+
+```text
+DRAFT
+→ NEEDS_CLARIFICATION
+→ AWAITING_CONFIRMATION
+→ SPEC_CONFIRMED
+→ GEOMETRY_VALIDATING
+→ MESH_GENERATING
+→ MESH_VALIDATED
+→ COMPILING
+→ CASE_COMPILED
+→ STATIC_VALIDATING
+→ SMOKE_TESTING
+→ READY_TO_SUBMIT
+→ SUBMITTED
+→ RUNNING
+→ COMPLETED
+→ POSTPROCESSING
+→ RESULTS_READY
+```
+
+失败状态：
+
+```text
+GEOMETRY_FAILED
+BOUNDARY_COMBINATION_INVALID
+MESH_FAILED
+COMPILATION_FAILED
+VALIDATION_FAILED
+SUBMISSION_FAILED
+RUNTIME_FAILED
+POSTPROCESSING_FAILED
+ARTIFACT_TRANSFER_FAILED
+ENVIRONMENT_BLOCKED
+```
+
+Spec 发生变化后必须回退到：
+
+```text
+AWAITING_CONFIRMATION
+```
+
+旧网格、编译结果、验证结果和图像全部失效。
+
+---
+
+# 31. 主要错误码
+
+```text
+OBSTACLE_FLOW_SPEC_INCOMPLETE
+INVALID_FLOW_TOPOLOGY
+INVALID_BOUNDARY_COMBINATION
+INVALID_PRESSURE_GRADIENT_UNIT
+INLET_PROFILE_PARAMETER_MISSING
+TOP_BOUNDARY_PARAMETER_MISSING
+CYLINDER_GEOMETRY_REQUIRED
+CYLINDER_INTERSECTS_BUMP
+CYLINDER_OUTSIDE_DOMAIN
+BUMP_GEOMETRY_INVALID
+OBSERVATION_LOCATION_REQUIRED
+OBSERVATION_INSIDE_SOLID
+PERIODIC_MESH_MISMATCH
+OPEN_BOUNDARY_NOT_VERIFIED
+FORCING_COMPONENT_NOT_VERIFIED
+MESH_GENERATION_FAILED
+MESH_QUALITY_FAILED
+OPENFOAM_COMPILATION_FAILED
+SERIAL_SMOKE_TEST_FAILED
+PARALLEL_SMOKE_TEST_FAILED
+RUNTIME_DIVERGENCE
+POSTPROCESSOR_UNAVAILABLE
+PLOT_GENERATION_FAILED
+ARTIFACT_TRANSFER_FAILED
+ENVIRONMENT_BLOCKED
+```
+
+---
+
+# 32. 自动修复边界
+
+## 32.1 可以自动修复
+
+* 减小时间步；
+* 降低最大 Courant 数；
+* 使用更稳健的离散格式；
+* 增加出口缓冲区建议；
+* 增加局部网格；
+* 调整写出间隔；
+* 修复采样时间窗口；
+* 修正图像范围和采样分辨率。
+
+## 32.2 必须由用户确认
+
+* 改变入口类型；
+* 改变出口类型；
+* 改变顶部边界；
+* 改变压力梯度单位；
+* 改变圆柱位置；
+* 改变凸起形状；
+* 改变流体；
+* 从二维改为三维；
+* 从层流改为湍流；
+* 删除用户要求的观测目标。
+
+---
+
+# 33. 端到端测试矩阵
+
+## Case A：恒速入口圆柱绕流
+
+```text
+left = uniform velocity inlet
+right = pressure outlet
+top = slip
+bottom = no-slip
+bump = disabled
+cylinder = enabled
+```
+
+验证：
+
+* 恒速入口；
+* 压力出口；
+* 圆柱网格；
+* Cd/Cl；
+* 速度云图。
+
+---
+
+## Case B：变速入口圆柱绕流
+
+```text
+left = sinusoidal velocity inlet
+right = open outlet
+top = slip
+bottom = no-slip
+cylinder = enabled
+```
+
+验证：
+
+* 时间变化入口；
+* 出口稳定性；
+* 速度响应；
+* 相位差；
+* 时序图。
+
+---
+
+## Case C：周期压力驱动凸起—圆柱流动
+
+```text
+left/right = periodic
+pressure gradient = enabled
+top = shear stress
+bottom = no-slip
+bump = enabled
+cylinder = enabled
+```
+
+验证：
+
+* 周期网格；
+* 压力梯度；
+* 顶部剪切；
+* 凸起；
+* 截面平均速度；
+* Python流场图。
+
+---
+
+## Case D：开放顶部外流
+
+```text
+left = uniform velocity inlet
+right = pressure/open outlet
+top = freestream/open
+bottom = no-slip
+cylinder = enabled
+bump = optional
+```
+
+验证：
+
+* 上方自由流；
+* 开放边界；
+* 出口回流处理；
+* 外流场速度和压力图。
+
+---
+
+## Case E：运动顶壁组合驱动
+
+```text
+left/right = periodic
+top = moving wall
+bottom = no-slip
+pressure gradient = optional
+bump = enabled
+cylinder = enabled
+```
+
+验证：
+
+* 移动顶壁；
+* 组合驱动；
+* 平均流速；
+* 壁面剪切。
+
+---
+
+## Case F：空间非均匀入口
+
+```text
+left = parabolic inlet
+right = pressure outlet
+top/bottom = wall
+bump = enabled
+cylinder = optional
+```
+
+验证：
+
+* 抛物线入口；
+* 通道流；
+* 截面平均；
+* 回流区。
+
+---
+
+# 34. 实施阶段
+
+## Phase 0：代码审计
+
+Trae 先检查：
+
+* 当前研究 Session；
+* 当前 Draft API；
+* 当前 OpenFOAM Compiler；
+* Workstation Runner；
+* ValidationRunner；
+* Artifact Store；
+* 消息模型；
+* 前端实验工作台。
+
+输出：
+
+```text
+可复用模块
+需要替换的旧链路
+新模块目录
+数据迁移方式
+风险清单
+```
+
+---
+
+## Phase 1：实验规格和自然语言解析
+
+完成：
+
+```text
+ObstacleFlowExperimentSpecV1
+ObstacleFlowFamilyIntentDetector
+FlowModeDetector
+BoundarySemanticParser
+InletProfileParser
+GeometryExtractor
+ObservableExtractor
+MissingFieldAnalyzer
+BoundaryCombinationValidator
+ClarificationGenerator
+SpecVersion
+ChangeSummary
+```
+
+验收：
+
+* 示例文本稳定解析；
+* 缺失参数保持 unresolved；
+* 能区分恒速、变速、周期压力驱动和开放顶部；
+* 不生成 OpenFOAM 文件；
+* 用户修改只影响指定路径。
+
+---
+
+## Phase 2：几何和网格
+
+完成：
+
+```text
+BumpProfileGenerator
+CylinderGeometryBuilder
+GeometryFeasibilityValidator
+一个真实可用MeshBackend
+MeshManifest
+PeriodicMeshValidator
+```
+
+验收：
+
+* 四种基础几何组合可网格化；
+* 周期模式面匹配；
+* 入口—出口模式正常；
+* `checkMesh` 真实通过；
+* 参数改变后可重新生成。
+
+---
+
+## Phase 3：边界和流动拓扑编译
+
+完成：
+
+```text
+FlowTopologyCompiler
+InletOutletCompiler
+PeriodicForcedCompiler
+PressureDrivenCompiler
+OpenDomainCompiler
+CombinedDrivingCompiler
+BoundaryCapabilityRegistry
+ForcingCapabilityRegistry
+```
+
+优先验证：
+
+```text
+uniform inlet
+sinusoidal inlet
+pressure outlet
+open outlet
+periodic pair
+no-slip
+slip
+moving wall
+shear stress
+freestream/open top
+mean pressure gradient
+```
+
+---
+
+## Phase 4：OpenFOAM 13 Compiler 和 Smoke Test
+
+完成：
+
+```text
+ObstacleFlowOpenFOAM13Compiler
+StaticValidator
+DictionaryValidator
+SerialSmokeTest
+ParallelSmokeTest
+SubmissionGate
+```
+
+验收：
+
+* Foundation 13；
+* 不使用 legacy solver；
+* 不错误生成 transportProperties；
+* 6类测试拓扑中至少3类真实跑通；
+* 未通过 Smoke Test 不能提交。
+
+---
+
+## Phase 5：正式运行和监控
+
+完成：
+
+```text
+SimulationRun
+SubmissionService
+RuntimeLogParser
+RunStatusAPI
+前端状态展示
+```
+
+验收：
+
+* 能真实提交；
+* 能识别完成和失败；
+* 日志和版本可追踪；
+* 失败有结构化错误。
+
+---
+
+## Phase 6：工作站 Python 后处理
+
+完成：
+
+```text
+WorkstationObstacleFlowPostprocessor
+一个真实可工作的PlotBackend
+PlotSpec
+MetricProcessors
+ResultManifest
+```
+
+验收：
+
+* 能生成速度大小云图；
+* 能生成压力和涡量图；
+* 能生成流线；
+* 能生成点或截面平均速度图；
+* 能生成圆柱受力图；
+* 时变入口能生成响应图。
+
+---
+
+## Phase 7：图片回传和对话展示
+
+完成：
+
+```text
+ResultArtifact
+ArtifactTransfer
+ArtifactAPI
+ResultMessage
+ChatImageCard
+HistoricalResultVersioning
+```
+
+验收：
+
+* PNG安全下载到 Artifact Store；
+* 原 Session 自动出现结果消息；
+* 图像可直接查看；
+* 图像绑定正确 Run 和 Spec；
+* 参数修改后旧图标记为历史结果。
+
+---
+
+## Phase 8：完整端到端验收
+
+至少完成：
+
+```text
+Case A
+Case B
+Case C
+Case D
+```
+
+完整链路：
+
+```text
+自然语言
+→ 澄清
+→ 确认
+→ 网格
+→ 编译
+→ Smoke Test
+→ 正式运行
+→ Python出图
+→ 图片回传
+→ 对话展示
+```
+
+保存：
+
+```text
+实验Spec
+OpenFOAM Case
+网格Evidence
+Smoke Test Evidence
+运行日志
+PlotSpec
+Result Manifest
+图片
+端到端测试报告
+```
+
+---
+
+# 35. 建议 Commit 序列
+
+```text
+feat(obstacle-flow): add configurable experiment spec
+feat(obstacle-flow): parse flow modes and boundaries
+feat(obstacle-flow): add geometry and mesh backend
+feat(obstacle-flow): compile Foundation 13 topology variants
+feat(obstacle-flow): validate cases and gate submission
+feat(obstacle-flow): track workstation simulation runs
+feat(obstacle-flow): postprocess fields with Python
+feat(obstacle-flow): return result artifacts to chat
+test(obstacle-flow): add workstation end-to-end cases
+```
+
+每个 Commit 必须提供：
+
+* 修改文件；
+* 数据结构变化；
+* 测试命令；
+* 测试结果；
+* 是否使用真实工作站；
+* 未完成问题。
+
+---
+
+# 36. 最终验收标准
+
+## 自然语言
+
+* 支持恒速入口；
+* 支持时变入口；
+* 支持空间非均匀入口；
+* 支持周期压力驱动；
+* 支持压力差驱动；
+* 支持移动顶壁和剪切顶壁；
+* 支持顶部自由流或开放边界；
+* 能识别非法边界组合；
+* 缺失单位和参数会主动澄清。
+
+## 几何
+
+* 域尺寸可配置；
+* 凸起类型、位置、宽度和高度可配置；
+* 圆柱位置和直径可配置；
+* 圆柱和凸起组合可验证；
+* 观测点和截面位置可验证；
+* 网格真实通过 `checkMesh`。
+
+## OpenFOAM
+
+* 唯一使用 Foundation 13；
+* 使用 `foamRun + incompressibleFluid`；
+* 不保留 legacy solver 双重状态；
+* 边界和 forcing 来自 VERIFIED 能力；
+* 通过串行 Smoke Test；
+* 并行任务通过并行 Smoke Test；
+* 未验证不能正式提交。
+
+## 工作站运行
+
+* 能正式提交至少4种不同拓扑；
+* 能返回实时状态；
+* 能识别失败阶段；
+* 计算结果保留在工作站；
+* 日志和 Case 版本可追踪。
+
+## Python 后处理
+
+* 能生成速度云图；
+* 能生成压力云图；
+* 能生成涡量图；
+* 能生成流线；
+* 能生成点速度图；
+* 能生成截面平均速度图；
+* 能生成圆柱受力图；
+* 时变入口能生成响应图。
+
+## 结果回传
+
+* 图片和指标能安全回传；
+* 在原对话框中显示；
+* 与正确 Run 和 Spec 绑定；
+* 修改参数后旧结果不会被误用；
+* 后处理失败不影响已完成仿真结果；
+* 工作站缺少绘图依赖时返回明确错误。
+
+---
+
+# 37. 本轮核心原则
+
+本轮不要再回到两个错误方向：
+
+```text
+只实现一个固定周期压力驱动Case
+```
+
+或：
+
+```text
+声称支持任意二维流动，但没有真实验证
+```
+
+正确目标是建立一个：
+
+```text
+边界可配置
+驱动可配置
+入口时空形式可配置
+凸起可配置
+圆柱可配置
+观测可配置
+OpenFOAM确定性生成
+工作站真实验证
+Python自动出图
+结果直接回传
+```
+
+的二维障碍物流动实验族。
+
+最终产品闭环是：
+
+> 用户通过自然语言描述实验，智能体识别流动拓扑和各边界条件，补齐并确认关键参数，生成可运行的 OpenFOAM Foundation 13 Case，在真实工作站完成验证和计算，再调用工作站 Python 生成流场图和观测指标，并把结果直接返回当前科研对话。

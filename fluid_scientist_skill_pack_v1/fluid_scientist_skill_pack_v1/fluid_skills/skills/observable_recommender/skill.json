@@ -1,0 +1,11 @@
+{
+  "skill_id": "observable.recommender",
+  "version": "1.0.0",
+  "category": "observable",
+  "summary": "用户未指定观测量时提供圆柱绕流默认观测建议。",
+  "entrypoint": "fluid_skills.runtime.observables:recommend_observables",
+  "deterministic": true,
+  "dependencies": [],
+  "platform": null,
+  "validation_status": "CANDIDATE"
+}

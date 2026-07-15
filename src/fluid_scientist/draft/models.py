@@ -253,6 +253,7 @@ class ChangeProposal(BaseModel):
     base_draft_version: int
     status: Literal["pending", "applied", "cancelled", "expired"] = "pending"
     summary: str = ""
+    user_message: str = ""
     changes: list[DraftChange] = Field(default_factory=list)
     impact_summary: list[str] = Field(default_factory=list)
     invalidates: list[str] = Field(default_factory=list)

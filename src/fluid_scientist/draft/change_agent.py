@@ -13,9 +13,12 @@ never a free-form response.
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from typing import Any
+
+from fluid_scientist.llm import LLMClient
 
 from fluid_scientist.draft.models import (
     ChangeProposal,
@@ -46,8 +49,23 @@ CHANGE_TYPES = [
 ]
 
 
+_PARAMETER_ALIASES: dict[str, tuple[str, ...]] = {
+    "reynolds_number": ("re", "reynoldsnumber", "reynolds_number", "雷诺数"),
+    "end_time": ("endtime", "end_time", "end time", "结束时间", "终止时间"),
+    "delta_t": ("deltat", "delta_t", "delta t", "时间步长"),
+}
+
+
+def _normalise_parameter_name(name: str) -> str:
+    """Normalise user-facing parameter spellings for alias comparison."""
+    return re.sub(r"[\s_-]+", "", name).casefold()
+
+
 class DraftChangeAgent:
     """Generate a :class:`ChangeProposal` from a user modification request."""
+
+    def __init__(self, llm_client: LLMClient | None = None) -> None:
+        self._llm_client = llm_client
 
     def generate(
         self,
@@ -79,7 +97,14 @@ class DraftChangeAgent:
         msg_lower = user_message.lower()
 
         # --- Detect parameter changes ---
-        changes.extend(self._detect_param_changes(draft, user_message, msg_lower))
+        llm_parameter_changes = self._detect_param_changes_with_llm(
+            draft, user_message, sid
+        )
+        changes.extend(
+            llm_parameter_changes
+            if llm_parameter_changes is not None
+            else self._detect_param_changes(draft, user_message, msg_lower)
+        )
         changes.extend(self._detect_design_field_changes(draft, user_message, msg_lower))
 
         # --- Detect boundary condition changes ---
@@ -178,6 +203,7 @@ class DraftChangeAgent:
             draft_id=draft.draft_id,
             base_draft_version=draft.version,
             summary=self._build_summary(changes, user_message),
+            user_message=user_message,
             changes=changes,
             impact_summary=impact_summary,
             invalidates=list(set(invalidates)),
@@ -187,6 +213,97 @@ class DraftChangeAgent:
         )
 
     # ------------------------------------------------------------------ helpers
+    def _detect_param_changes_with_llm(
+        self,
+        draft: ExperimentDraft,
+        message: str,
+        session_id: str,
+    ) -> list[DraftChange] | None:
+        """Use the configured model to map edits onto existing draft fields."""
+        if self._llm_client is None:
+            return None
+
+        parameters = [
+            {
+                "parameter_id": parameter.parameter_id,
+                "display_name": parameter.display_name,
+                "current_value": parameter.value,
+                "unit": parameter.unit,
+            }
+            for parameter in draft.control_parameters
+        ]
+        allowed_ids = {parameter.parameter_id: parameter for parameter in draft.control_parameters}
+        schema = {
+            "type": "object",
+            "required": ["changes"],
+            "properties": {
+                "changes": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "required": ["target_parameter_id", "new_value"],
+                        "properties": {
+                            "target_parameter_id": {
+                                "type": "string",
+                                "enum": sorted(allowed_ids),
+                            },
+                            "new_value": {},
+                            "reason": {"type": "string"},
+                        },
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "additionalProperties": False,
+        }
+        system_prompt = (
+            "You map a user's draft modification request to existing CFD draft "
+            "parameters. Select target_parameter_id only from the supplied list. "
+            "Never invent, rename, or add a parameter. Interpret Chinese and English "
+            "aliases semantically. Return an empty changes array when the request is "
+            "not a control-parameter edit."
+        )
+        model_input = {
+            "user_request": message,
+            "existing_parameters": parameters,
+        }
+        try:
+            output, _ = self._llm_client.call(
+                purpose="draft_change_proposal",
+                prompt_name="draft_parameter_field_mapping",
+                prompt_version="2",
+                system_prompt=system_prompt,
+                user_message=json.dumps(model_input, ensure_ascii=False),
+                output_schema=schema,
+                session_id=session_id,
+                input_refs=[draft.draft_id],
+            )
+        except Exception:
+            return None
+
+        raw_changes = output.get("changes")
+        if not isinstance(raw_changes, list):
+            return None
+        changes: list[DraftChange] = []
+        for item in raw_changes:
+            if not isinstance(item, dict):
+                return None
+            parameter_id = item.get("target_parameter_id")
+            if parameter_id not in allowed_ids or "new_value" not in item:
+                return None
+            parameter = allowed_ids[parameter_id]
+            changes.append(
+                DraftChange(
+                    change_type="set_parameter",
+                    target_path=f"control_parameters.{parameter_id}",
+                    old_value=parameter.value,
+                    new_value=item["new_value"],
+                    reason=str(item.get("reason") or f"用户修改 {parameter.display_name}"),
+                    confidence=0.95,
+                )
+            )
+        return changes
+
     def _detect_param_changes(
         self, draft: ExperimentDraft, message: str, msg_lower: str
     ) -> list[DraftChange]:
@@ -200,7 +317,7 @@ class DraftChangeAgent:
         changes: list[DraftChange] = []
         # Pattern: "把 Re 改成 5000" / "Re=5000" / "将直径设为 0.2"
         set_patterns = [
-            r"(?:把|将|让)?\s*(\w+)\s*(?:改成|改为|设为|修改为|调整为|换成|更新为)\s*([\d.]+)",
+            r"(?:把|将|让)?\s*(\w+?)\s*(?:修改为|调整为|更新为|改成|改为|设为|换成)\s*([\d.]+)",
             r"(\w+)\s*[=＝:：]\s*([\d.]+)",
             r"(\w+)\s+(?:设为|改为|改成)\s*([\d.]+)",
         ]
@@ -472,14 +589,19 @@ class DraftChangeAgent:
     def _find_param(
         self, draft: ExperimentDraft, name: str
     ) -> DraftParameter | None:
-        name_lower = name.lower()
+        normalised_name = _normalise_parameter_name(name)
         for p in draft.control_parameters:
-            if (
-                p.parameter_id.lower() == name_lower
-                or p.display_name.lower() == name_lower
-                or name_lower in p.display_name.lower()
-                or name_lower in p.parameter_id.lower()
-            ):
+            candidates = {p.parameter_id, p.display_name}
+            for canonical_name, aliases in _PARAMETER_ALIASES.items():
+                if _normalise_parameter_name(p.parameter_id) == _normalise_parameter_name(
+                    canonical_name
+                ) or _normalise_parameter_name(p.display_name) in {
+                    _normalise_parameter_name(alias) for alias in aliases
+                }:
+                    candidates.update(aliases)
+            if normalised_name in {
+                _normalise_parameter_name(candidate) for candidate in candidates
+            }:
                 return p
         return None
 

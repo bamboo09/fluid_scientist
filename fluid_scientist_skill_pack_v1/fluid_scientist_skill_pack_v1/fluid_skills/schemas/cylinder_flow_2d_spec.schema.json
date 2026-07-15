@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "CylinderFlow2DExperimentSpecV1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "case_family",
+    "domain",
+    "cylinder",
+    "boundaries",
+    "flow_topology",
+    "observables",
+    "analysis_goals",
+    "draft_status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "case_family": {
+      "const": "cylinder_flow_2d"
+    },
+    "domain": {
+      "type": "object",
+      "required": [
+        "dimensionality"
+      ],
+      "properties": {
+        "dimensionality": {
+          "const": "2D"
+        },
+        "length_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0
+        },
+        "height_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0
+        },
+        "thickness_m": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        }
+      }
+    },
+    "cylinder": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "cylinder"
+        },
+        "radius_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0
+        },
+        "diameter_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0
+        },
+        "characteristic_dimension_m": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "exclusiveMinimum": 0
+        },
+        "center_x_m": {
+          "type": [
+            "number",
+            "null"
+          ]
+        },
+        "center_y_m": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      }
+    },
+    "bottom_profile": {
+      "type": "object"
+    },
+    "boundaries": {
+      "type": "object"
+    },
+    "flow_topology": {
+      "type": "object"
+    },
+    "observables": {
+      "type": "array"
+    },
+    "analysis_goals": {
+      "type": "array"
+    },
+    "blocking_issues": {
+      "type": "array"
+    },
+    "draft_status": {
+      "enum": [
+        "NEEDS_CLARIFICATION",
+        "AWAITING_CONFIRMATION",
+        "READY_TO_CONFIRM",
+        "SPEC_CONFIRMED"
+      ]
+    }
+  }
+}

@@ -84,8 +84,11 @@ class AmbiguityDetector:
             for o in study.observables
         )
         has_heat_flux_bc = any(
-            "heat" in str(bc.get("type", "")).lower()
-            or "thermal" in str(bc.get("type", "")).lower()
+            isinstance(bc, dict)
+            and (
+                "heat" in str(bc.get("type", "")).lower()
+                or "thermal" in str(bc.get("type", "")).lower()
+            )
             for bc in study.boundary_conditions
         )
         if has_heat_flux_obs or has_heat_flux_bc:
@@ -235,8 +238,11 @@ class AmbiguityDetector:
 
         # 5. Inlet condition implementation unclear
         has_fully_developed = any(
-            "fully_developed" in str(ic.get("type", "")).lower()
-            or "充分发展" in str(ic.get("type", ""))
+            isinstance(ic, dict)
+            and (
+                "fully_developed" in str(ic.get("type", "")).lower()
+                or "充分发展" in str(ic.get("type", ""))
+            )
             for ic in study.initial_conditions
         )
         if has_fully_developed:
@@ -256,8 +262,11 @@ class AmbiguityDetector:
 
         # 6. Outlet boundary mapping unclear
         has_advective = any(
-            "advective" in str(bc.get("type", "")).lower()
-            or "对流" in str(bc.get("type", ""))
+            isinstance(bc, dict)
+            and (
+                "advective" in str(bc.get("type", "")).lower()
+                or "对流" in str(bc.get("type", ""))
+            )
             for bc in study.boundary_conditions
         )
         if has_advective:
@@ -292,7 +301,7 @@ class AmbiguityDetector:
                     severity="non_blocking_assumption",
                     reason="可根据物理模型自动推荐求解器",
                     suggested_question=None,
-                    recommended_default="pimpleFoam (transient) / simpleFoam (steady)",
+                    recommended_default="incompressibleFluid (foamRun -solver incompressibleFluid)",
                 )
             )
 

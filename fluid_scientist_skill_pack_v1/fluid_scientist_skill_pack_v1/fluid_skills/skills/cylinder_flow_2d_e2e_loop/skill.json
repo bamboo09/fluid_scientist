@@ -1,0 +1,23 @@
+{
+  "skill_id": "cylinder_flow_2d.e2e_loop",
+  "version": "1.0.0",
+  "category": "orchestrator",
+  "summary": "从草案到工作站验证、正式运行、可视化回传的有界闭环。",
+  "entrypoint": "fluid_skills.runtime.orchestrator:CylinderFlow2DSkillOrchestrator",
+  "deterministic": false,
+  "dependencies": [
+    "cylinder_flow_2d.router",
+    "geometry.cylinder.normalizer",
+    "geometry.derived_dimensions",
+    "fluid.flow_topology.classifier",
+    "boundary.topology_2d",
+    "observable.extractor",
+    "observable.recommender",
+    "analysis_goal.builder",
+    "openfoam13.case.static_validator",
+    "validation.smoke_test",
+    "postprocess.flow_visualization"
+  ],
+  "platform": null,
+  "validation_status": "CANDIDATE"
+}

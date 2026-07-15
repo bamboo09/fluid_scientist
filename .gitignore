@@ -23,10 +23,4 @@ ssh-keys/
 
 # Test temp files
 .tmp_pytest/
-tmp_test/
-.pytest_tmp/
-workspace_test_*/
-_debug_test.py
-check_turb.py
-inspect_case.py
-case/
+tmp_test

@@ -201,6 +201,4 @@ Workflow V2 闭环整改任务已完成。三条核心链路真正连接：
 
 1. **MeasurementPlan → OpenFOAM Case** ✅ — functionObjects 写入真实 controlDict
 2. **ExperimentSpec → Native Compiler** ✅ — 直接生成 Case，不调用任何旧函数
-3. **Remote results → MetricResult → ScientificReport** ✅ — API 连接完整分析管道
-
-所有 12 个提交已在 main 分支本地完成，1272 个测试通过，47 个 E2E 测试全部通过。
+3. 

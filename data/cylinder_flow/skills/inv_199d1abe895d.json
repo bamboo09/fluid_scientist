@@ -1,0 +1,139 @@
+{
+  "invocation_id": "inv_199d1abe895d",
+  "skill_id": "fluid.metric_spec_builder",
+  "skill_version": "1.0",
+  "entrypoint": "<lambda>",
+  "input": {
+    "spec": "schema_version='1.0' spec_version=1 case_family='cylinder_flow_2d' pipeline_id='cylinder-flow-2d-v1' pipeline_stage='DRAFT_NORMALIZED' domain=DomainSpec(length_m=ProvenanceField(value=20.0, source=<FieldSource.USER_EXPLICIT: 'USER_EXPLICIT'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=1.0, reason=None), height_m=ProvenanceField(value=8.0, source=<FieldSource.USER_EXPLICIT: 'USER_EXPLICIT'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=1.0, reason=None), thickness_m=ProvenanceField(value=1.0, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=1.0, reason='2D single-layer extrusion default'), dimensionality='2D') fluid=FluidSpec(type=ProvenanceField(value=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, reason=None), temperature_c=ProvenanceField(value=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, reason=None), density_kg_m3=ProvenanceField(value=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, reason=None), kinematic_viscosity_m2_s=ProvenanceField(value=0.001, source=<FieldSource.FORMULA_DERIVED: 'FORMULA_DERIVED'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=1.0, reason='nu = U*D/Re = 1.0*0.2/200.0 = 0.001 m^2/s')) cylinder=CylinderSpec(type='cylinder', radius_m=ProvenanceField(value=0.1, source=<FieldSource.USER_EXPLICIT: 'USER_EXPLICIT'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=1.0, reason='用户明确指定'), diameter_m=ProvenanceField(value=0.2, source=<FieldSource.FORMULA_DERIVED: 'FORMULA_DERIVED'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=1.0, reason='Derived from radius (0.1 m): D = 2R'), characteristic_dimension_m=ProvenanceField(value=0.2, source=<FieldSource.FORMULA_DERIVED: 'FORMULA_DERIVED'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=1.0, reason='Characteristic dimension = diameter (0.2 m)'), center_x_m=ProvenanceField(value=10.0, source=<FieldSource.MODEL_RECOMMENDED: 'MODEL_RECOMMENDED'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=0.9, reason='LLM提取: '), center_y_m=ProvenanceField(value=4.0, source=<FieldSource.MODEL_RECOMMENDED: 'MODEL_RECOMMENDED'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=0.9, reason='LLM提取: '), wall_type=<CylinderWallType.NO_SLIP_WALL: 'no_slip_wall'>, angular_velocity_rad_s=0.0, rotation_direction='ccw') rectangle=RectangleSpec(enabled=False, width_m=ProvenanceField(value=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, reason=None), height_m=ProvenanceField(value=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, reason=None), center_x_m=ProvenanceField(value=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, reason=None), center_y_m=ProvenanceField(value=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, reason=None), relation_to_cylinder=None) triangle=TriangleSpec(enabled=True, base_width_m=ProvenanceField(value=0.4, source=<FieldSource.FORMULA_DERIVED: 'FORMULA_DERIVED'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=0.6, reason='默认底宽 = 2D = 0.4m（用户未指定，根据圆柱直径推导）'), height_m=ProvenanceField(value=0.2, source=<FieldSource.FORMULA_DERIVED: 'FORMULA_DERIVED'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=0.6, reason='默认高度 = D = 0.2m（用户未指定，根据圆柱直径推导）'), center_x_m=ProvenanceField(value=10.0, source=<FieldSource.FORMULA_DERIVED: 'FORMULA_DERIVED'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=0.7, reason='默认位置 = 圆柱圆心x = 10.0m'), center_y_m=ProvenanceField(value=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, reason=None), apex_direction='up', relation_to_cylinder='aligned_below', attached_boundary='bottom_wall', semantic_type='triangle_2d', solver_representation='polygon', source_text='.在二维流场中，长20米，宽8米，圆柱半径 0.1m，圆心位于流场正中央，来流速度 1.0m/s，Re=200。下壁面贴附一个高2m、宽3m 的三角形凸起，位于圆柱正下方。左为速度入口，右为压力出口，上自由出流，下壁面无滑移。观测圆柱尾迹涡街形态、升阻力系数及涡脱落频率。') bottom_profile=BottomProfileSpec(enabled=False, profile_type=<BumpProfileType.FLAT: 'flat'>, center_x_m=ProvenanceField(value=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, reason=None), width_m=ProvenanceField(value=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, reason=None), height_m=ProvenanceField(value=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, reason=None), custom_points=[], aligned_below_cylinder=False) flow_topology={'mode': 'open_domain'} boundaries=BoundaryConfig(left=BoundarySpec(semantic_type=<SemanticBoundaryType.UNIFORM_VELOCITY_INLET: 'uniform_velocity_inlet'>, source=<FieldSource.USER_EXPLICIT: 'USER_EXPLICIT'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=1.0, inlet_velocity=1.0, pressure_value=None, velocity_vector=None, shear_direction=None, shear_magnitude=None, freestream_velocity=None, pressure_gradient_magnitude=None), right=BoundarySpec(semantic_type=<SemanticBoundaryType.PRESSURE_OUTLET: 'pressure_outlet'>, source=<FieldSource.USER_EXPLICIT: 'USER_EXPLICIT'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=1.0, inlet_velocity=None, pressure_value=0.0, velocity_vector=None, shear_direction=None, shear_magnitude=None, freestream_velocity=None, pressure_gradient_magnitude=None), top=BoundarySpec(semantic_type=<SemanticBoundaryType.OPEN_BOUNDARY: 'open_boundary'>, source=<FieldSource.USER_EXPLICIT: 'USER_EXPLICIT'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=1.0, inlet_velocity=None, pressure_value=None, velocity_vector=None, shear_direction=None, shear_magnitude=None, freestream_velocity=None, pressure_gradient_magnitude=None), bottom_flat=BoundarySpec(semantic_type=<SemanticBoundaryType.NO_SLIP_WALL: 'no_slip_wall'>, source=<FieldSource.USER_EXPLICIT: 'USER_EXPLICIT'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=1.0, inlet_velocity=None, pressure_value=None, velocity_vector=None, shear_direction=None, shear_magnitude=None, freestream_velocity=None, pressure_gradient_magnitude=None), bottom_profile_surface=BoundarySpec(semantic_type=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, inlet_velocity=None, pressure_value=None, velocity_vector=None, shear_direction=None, shear_magnitude=None, freestream_velocity=None, pressure_gradient_magnitude=None), front=BoundarySpec(semantic_type=<SemanticBoundaryType.EMPTY: 'empty'>, source=<FieldSource.SYSTEM_DERIVED: 'SYSTEM_DERIVED'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=1.0, inlet_velocity=None, pressure_value=None, velocity_vector=None, shear_direction=None, shear_magnitude=None, freestream_velocity=None, pressure_gradient_magnitude=None, reason='2D simulation: front must be empty'), back=BoundarySpec(semantic_type=<SemanticBoundaryType.EMPTY: 'empty'>, source=<FieldSource.SYSTEM_DERIVED: 'SYSTEM_DERIVED'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, confidence=1.0, inlet_velocity=None, pressure_value=None, velocity_vector=None, shear_direction=None, shear_magnitude=None, freestream_velocity=None, pressure_gradient_magnitude=None, reason='2D simulation: back must be empty')) forcing=ForcingSpec(pressure_gradient=PressureGradientSpec(enabled=False, direction=[1.0, 0.0, 0.0], magnitude=ProvenanceField(value=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, reason=None), unit=ProvenanceField(value=None, source=<FieldSource.SYSTEM_DEFAULT: 'SYSTEM_DEFAULT'>, status=<FieldStatus.UNRESOLVED: 'UNRESOLVED'>, confidence=0.0, reason=None)), body_force=BodyForceSpec(enabled=False, vector_m_s2=[0.0, 0.0, 0.0])) inlet_profile=InletProfileSpec(enabled=False, temporal_type=<TemporalType.CONSTANT: 'constant'>, spatial_type=<SpatialType.UNIFORM: 'uniform'>, parameters={}) initial_conditions=InitialConditionsSpec(velocity=VelocityIC(type='quiescent', vector_m_s=[0.0, 0.0, 0.0])) simulation=SimulationSpec(time_mode=<TimeMode.AUTO: 'auto'>, flow_regime=<FlowRegime.LAMINAR: 'laminar'>, max_courant_number=0.5, end_time=None, delta_t=None) observables=[ObservableSpec(type=<ObservableType.CYLINDER_DRAG: 'cylinder_drag'>, label='圆柱阻力', component='Ux', spatial_operation=None, temporal_operation=None, point=None, section_x=None, cylinder_id=None, wall_name=None, source=<FieldSource.USER_EXPLICIT: 'USER_EXPLICIT'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, missing_fields=[], confidence=0.9), ObservableSpec(type=<ObservableType.WAKE_SHEDDING_FREQUENCY: 'wake_shedding_frequency'>, label='涡脱落频率', component='Ux', spatial_operation=None, temporal_operation=None, point=None, section_x=None, cylinder_id=None, wall_name=None, source=<FieldSource.USER_EXPLICIT: 'USER_EXPLICIT'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, missing_fields=[], confidence=0.9), ObservableSpec(type=<ObservableType.CYLINDER_LIFT: 'cylinder_lift'>, label='圆柱升力', component='Ux', spatial_operation=None, temporal_operation=None, point=None, section_x=None, cylinder_id=None, wall_name=None, source=<FieldSource.USER_EXPLICIT: 'USER_EXPLICIT'>, status=<FieldStatus.RESOLVED: 'RESOLVED'>, missing_fields=[], confidence=0.9)] analysis_goals=[AnalysisGoalSpec(id='cylinder_separation', description='分析圆柱周围的流动分离及尾迹结构。', related_observables=['vorticity_field', 'streamlines'], source=<FieldSource.MODEL_RECOMMENDED: 'MODEL_RECOMMENDED'>, status=<FieldStatus.AWAITING_CONFIRMATION: 'AWAITING_CONFIRMATION'>, confidence=0.7), AnalysisGoalSpec(id='cylinder_forces', description='评估圆柱阻力和升力特征。', related_observables=['cylinder_drag', 'cylinder_lift'], source=<FieldSource.MODEL_RECOMMENDED: 'MODEL_RECOMMENDED'>, status=<FieldStatus.AWAITING_CONFIRMATION: 'AWAITING_CONFIRMATION'>, confidence=0.7), AnalysisGoalSpec(id='cylinder_wake_recovery', description='分析圆柱下游速度亏损及恢复过程。', related_observables=['velocity_magnitude_field', 'point_velocity'], source=<FieldSource.MODEL_RECOMMENDED: 'MODEL_RECOMMENDED'>, status=<FieldStatus.AWAITING_CONFIRMATION: 'AWAITING_CONFIRMATION'>, confidence=0.7), AnalysisGoalSpec(id='transient_vortex_shedding', description='分析圆柱升阻力波动及周期性涡脱落特征。', related_observables=['drag_lift_time_series', 'wake_shedding_frequency'], source=<FieldSource.MODEL_RECOMMENDED: 'MODEL_RECOMMENDED'>, status=<FieldStatus.AWAITING_CONFIRMATION: 'AWAITING_CONFIRMATION'>, confidence=0.7)] assumptions=[] ambiguities=[{'id': 'TOP_BOUNDARY_AMBIGUITY', 'category': 'SOLVER_CRITICAL_AMBIGUITY', 'description': \"'自由出流'不能唯一映射为 OpenFOAM 边界条件。对于水平来流外流场，推荐使用 symmetryPlane/slip 作为远场边界。\", 'options': ['symmetryPlane / slip（推荐）', 'freestream 自由流边界', 'open 开放边界（允许流入流出）', '自定义'], 'recommendation': 'symmetryPlane / slip（推荐）', 'resolved': False}, {'id': 'REYNOLDS_CHARACTERISTIC_LENGTH', 'category': 'NON_BLOCKING_ASSUMPTION', 'description': '用户提供了 Re 和半径 R，但未明确 Re 的特征长度。标准做法：Re 基于 D=2R（圆柱直径）。', 'options': [], 'recommendation': 'Re 基于 D=2R（圆柱直径），这是 CFD 标准做法', 'resolved': True}, {'id': 'CYLINDER_X_CENTER_ASSUMPTION', 'category': 'NON_BLOCKING_ASSUMPTION', 'description': \"用户提到'居中'，将圆柱 x 坐标设为域中心 x=10.0 m。\", 'options': [], 'recommendation': 'x = 10.0 m', 'resolved': True}] unresolved_fields=[] blocking_issues=[{'code': 'LLM_AMBIGUITY', 'message': 'LLM识别的歧义: 歧义描述1'}, {'code': 'LLM_MISSING_FIELD', 'message': 'LLM识别的缺失字段: missing_fields'}] recommendations=[] decision_summary=DecisionSummary(facts=['用户指定了二维流场', '用户描述了圆柱', '用户指定了圆柱半径 R=0.1 m', '用户指定了计算域长度 20.0 m', '用户指定了计算域高度 8.0 m', '用户指定了来流速度 1.0 m/s', '用户指定了底部无滑移', '用户指定了顶部无滑移', '用户指定了顶部自由出流', '用户指定了压力出口', '用户提到了来流/入口/流入', '用户指定了三角形障碍物: 高=None, 底宽=None, 方向=up', '用户指定了雷诺数 Re=200.0', 'Re=200.0 < 2000，流态判定为层流（laminar）', '用户要求观测圆柱阻力'], derived_values=['流动拓扑: open_domain', 'cylinder_diameter = 0.2 m (公式: D = 2 * R  [R=0.1 -> D=0.2]; 依赖: cylinder_radius)', 'cylinder_radius = 0.1 m (公式: R = D / 2  [D=0.2 -> R=0.1]; 依赖: cylinder_diameter)', 'characteristic_dimension = 0.2 m (公式: L_char = D  [D=0.2]; 依赖: cylinder_diameter)', 'kinematic_viscosity = 0.001 m^2/s (公式: nu = U * D / Re  [U=1.0, D=0.2, Re=200.0 -> nu=0.001]; 依赖: inlet_velocity, cylinder_diameter, reynolds_number)', 'reference_length = 0.2 m (公式: L_ref = D  [D=0.2]; 依赖: cylinder_diameter)', 'reference_area = 0.2 m^2 (公式: A_ref = D * 1 (2D unit span)  [D=0.2 -> A_ref=0.2]; 依赖: cylinder_diameter)', 'strouhal_number = 0.178497  (公式: St = 0.198 * (1 - 19.7/Re)  [Re=200.0 -> St=0.178497]; 依赖: reynolds_number)', 'shedding_frequency = 0.8924849999999999 Hz (公式: f = St * U / D  [St=0.178497, U=1.0, D=0.2 -> f=0.8924849999999999]; 依赖: strouhal_number, inlet_velocity, cylinder_diameter)', 'time_step = 0.005 s (公式: delta_t = CFL * D / (U * N_cells)  [CFL=0.5, D=0.2, U=1.0, N=20 -> dt=0.005]; 依赖: cylinder_diameter, inlet_velocity, max_courant_number)', 'triangle_base_width = 0.4 m (公式: 2 * D [D=0.2 -> bw=0.4]; 依赖: cylinder_diameter)', 'triangle_height = 0.2 m (公式: D [D=0.2 -> h=0.2]; 依赖: cylinder_diameter)', 'cylinder_diameter = 0.2 m (公式: D = 2 * R  [R=0.1 -> D=0.2]; 依赖: cylinder_radius)', 'cylinder_radius = 0.1 m (公式: R = D / 2  [D=0.2 -> R=0.1]; 依赖: cylinder_diameter)', 'characteristic_dimension = 0.2 m (公式: L_char = D  [D=0.2]; 依赖: cylinder_diameter)', 'kinematic_viscosity = 0.001 m^2/s (公式: nu = U * D / Re  [U=1.0, D=0.2, Re=200.0 -> nu=0.001]; 依赖: inlet_velocity, cylinder_diameter, reynolds_number)', 'reference_length = 0.2 m (公式: L_ref = D  [D=0.2]; 依赖: cylinder_diameter)', 'reference_area = 0.2 m^2 (公式: A_ref = D * 1 (2D unit span)  [D=0.2 -> A_ref=0.2]; 依赖: cylinder_diameter)', 'strouhal_number = 0.178497  (公式: St = 0.198 * (1 - 19.7/Re)  [Re=200.0 -> St=0.178497]; 依赖: reynolds_number)', 'shedding_frequency = 0.8924849999999999 Hz (公式: f = St * U / D  [St=0.178497, U=1.0, D=0.2 -> f=0.8924849999999999]; 依赖: strouhal_number, inlet_velocity, cylinder_diameter)', 'time_step = 0.005 s (公式: delta_t = CFL * D / (U * N_cells)  [CFL=0.5, D=0.2, U=1.0, N=20 -> dt=0.005]; 依赖: cylinder_diameter, inlet_velocity, max_courant_number)', 'triangle_center_x = 10.0 m (公式: cylinder_center_x [10.0]; 依赖: cylinder_center_x)'], assumptions=['[假设] Reynolds 数特征长度假设: 用户提供了 Re 和半径 R，但未明确 Re 的特征长度。标准做法：Re 基于 D=2R（圆柱直径）。', \"[假设] 圆柱水平位置假设: 用户提到'居中'，将圆柱 x 坐标设为域中心 x=10.0 m。\", '圆柱圆心默认位于域水平中心 x=10.0 m', '圆柱圆心默认位于域垂直中心 y=4.0 m', '[假设] 三角形障碍物默认假设: 已识别为三角形障碍物（非 cosine bell）。以下为默认假设：\\n  - 底宽=0.4m（根据圆柱直径推导：2D）\\n  - 高度=0.2m（根据圆柱直径推导：D）\\n  - 位置x=10.0m（对齐圆柱圆心）\\n  - 默认为等腰三角形\\n  - 尖端朝up'], alternatives=[], unresolved_items=['TOP_BOUNDARY_AMBIGUITY', 'USER_TOP_NOT_CAPTURED'], rejected_interpretations=['Critic发现未解决的问题'], confidence=0.9230769230769231) draft_status=<DraftStatus.AWAITING_CONFIRMATION: 'AWAITING_CONFIRMATION'> experiment_id=None title=None objective=None user_input_text='.在二维流场中，长20米，宽8米，圆柱半径 0.1m，圆心位于流场正中央，来流速度 1.0m/s，Re=200。下壁面贴附一个高2m、宽3m 的三角形凸起，位于圆柱正下方。左为速度入口，右为压力出口，上自由出流，下壁面无滑移。观测圆柱尾迹涡街形态、升阻力系数及涡脱落频率。'",
+    "llm_parsed": {
+      "scene": {
+        "dimension": "2D",
+        "flow_type": "external_flow",
+        "confidence": 0.9
+      },
+      "geometry": {
+        "domain": {
+          "length": {
+            "value": 20,
+            "unit": "m"
+          },
+          "height": {
+            "value": 8,
+            "unit": "m"
+          }
+        },
+        "objects": [
+          {
+            "id": "cylinder_1",
+            "type": "cylinder",
+            "radius": {
+              "value": 0.1,
+              "unit": "m"
+            },
+            "center": {
+              "x": {
+                "value": 10,
+                "unit": "m"
+              },
+              "y": {
+                "value": 4,
+                "unit": "m"
+              }
+            }
+          },
+          {
+            "id": "triangle_rise",
+            "type": "triangle",
+            "center": {
+              "x": {
+                "value": 10,
+                "unit": "m"
+              },
+              "y": {
+                "value": 2,
+                "unit": "m"
+              }
+            },
+            "base_length": {
+              "value": 3,
+              "unit": "m"
+            },
+            "height": {
+              "value": 2,
+              "unit": "m"
+            }
+          }
+        ]
+      },
+      "physics": {
+        "fluid_model": "incompressible_newtonian",
+        "density": {
+          "value": 1000,
+          "unit": "kg/m3",
+          "source": "USER_EXPLICIT"
+        },
+        "kinematic_viscosity": {
+          "value": 0.0001,
+          "unit": "m2/s"
+        },
+        "reynolds_number": {
+          "value": 200
+        },
+        "inlet_velocity": {
+          "value": 1.0,
+          "unit": "m/s"
+        }
+      },
+      "boundaries": [
+        {
+          "name": "left",
+          "type": "velocity_inlet",
+          "details": {}
+        },
+        {
+          "name": "right",
+          "type": "pressure_outlet",
+          "details": {}
+        },
+        {
+          "name": "top",
+          "type": "free_outflow",
+          "details": {}
+        },
+        {
+          "name": "bottom",
+          "type": "no_slip_wall",
+          "details": {}
+        }
+      ],
+      "research_goals": [
+        "观测圆柱尾迹涡街形态",
+        "计算升阻力系数",
+        "计算涡脱落频率"
+      ],
+      "requested_metrics": [
+        "drag_coefficient",
+        "lift_coefficient",
+        "shedding_frequency"
+      ],
+      "missing_fields": [
+        "missing_fields"
+      ],
+      "ambiguities": [
+        "歧义描述1"
+      ],
+      "unsupported_capabilities": [
+        "不支持的能力1"
+      ]
+    },
+    "user_text": ".在二维流场中，长20米，宽8米，圆柱半径 0.1m，圆心位于流场正中央，来流速度 1.0m/s，Re=200。下壁面贴附一个高2m、宽3m 的三角形凸起，位于圆柱正下方。左为速度入口，右为压力出口，上自由出流，下壁面无滑移。观测圆柱尾迹涡街形态、升阻力系数及涡脱落频率。"
+  },
+  "output": {
+    "result": "None"
+  },
+  "status": "PASSED",
+  "evidence": [],
+  "started_at": "2026-07-15T08:58:07.498361+00:00",
+  "finished_at": "2026-07-15T08:58:07.498361+00:00",
+  "error": null
+}

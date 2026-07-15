@@ -405,19 +405,28 @@ def _rule_solver_selection(params: dict[str, ClosedParameter]) -> dict[str, Clos
     compressible = params.get("compressibility")
     temporal_val = temporal.value if temporal else "transient"
     comp_val = compressible.value if compressible else "incompressible"
-    if temporal_val == "steady":
-        solver_name = "simpleFoam" if comp_val == "incompressible" else "rhoSimpleFoam"
+    # Foundation 13: foamRun -solver <module>
+    if comp_val == "incompressible":
+        solver_module = "incompressibleFluid"
     else:
-        solver_name = "pimpleFoam" if comp_val == "incompressible" else "rhoPimpleFoam"
+        solver_module = "fluid"
     return {
         "solver": ClosedParameter(
             name="solver",
-            value=solver_name,
+            value=solver_module,
             source="SYSTEM_SELECTED",
-            reason=f"Solver selected for {temporal_val} {comp_val} flow.",
+            reason=f"Solver module selected for {temporal_val} {comp_val} flow (foamRun application).",
             confidence=0.9,
-            derivation_trace=[f"solver = {solver_name}"],
-        )
+            derivation_trace=[f"solver_module = {solver_module} (foamRun)"],
+        ),
+        "application": ClosedParameter(
+            name="application",
+            value="foamRun",
+            source="SYSTEM_SELECTED",
+            reason="Foundation 13 uses foamRun as the application.",
+            confidence=0.9,
+            derivation_trace=["application = foamRun"],
+        ),
     }
 
 
@@ -582,7 +591,7 @@ def _default_rules() -> list[ClosureRule]:
         ClosureRule("length_default", [], ["L_ref"], _rule_reference_length_default, priority=-10),
         ClosureRule("density_default", [], ["rho"], _rule_density_default, priority=-10),
         ClosureRule("co_default", [], ["Co_max"], _rule_co_default, priority=-10),
-        ClosureRule("solver", [], ["solver"], _rule_solver_selection, priority=5),
+        ClosureRule("solver", [], ["solver", "application"], _rule_solver_selection, priority=5),
         ClosureRule("turbulence", [], ["turbulence_model", "turbulence_family", "target_y_plus"], _rule_turbulence_model, priority=5),
         ClosureRule("nu_from_re", ["Re", "U_ref"], ["nu"], _rule_nu_from_re, priority=2),
         ClosureRule("re_from_nu", ["nu", "U_ref", "L_ref"], ["Re"], _rule_re_from_nu, priority=2),

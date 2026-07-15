@@ -93,4 +93,4 @@ confidence: high
 基础: python:3.12-slim, OpenFOAM Foundation 13 兼容
 
 ## 16. 尚未支持的物理能力
-多相流(VOF/Eulerian), 可压缩流, 共轭传热, 动网格, 并行计算(decomposePar), 自定义边界条件编译, DES/SAS湍流模型, 非牛顿流体
+多相流(VOF/Eulerian), 可压缩流, 共轭传热, 动网格, 

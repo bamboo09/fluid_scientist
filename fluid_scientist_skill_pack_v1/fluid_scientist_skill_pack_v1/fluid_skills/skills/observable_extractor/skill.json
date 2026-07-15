@@ -1,0 +1,11 @@
+{
+  "skill_id": "observable.extractor",
+  "version": "1.0.0",
+  "category": "observable",
+  "summary": "从中文自然语言提取点速度、截面平均速度、升阻力和频率。",
+  "entrypoint": "fluid_skills.runtime.observables:extract_observables",
+  "deterministic": false,
+  "dependencies": [],
+  "platform": null,
+  "validation_status": "CANDIDATE"
+}

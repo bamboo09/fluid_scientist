@@ -38,7 +38,7 @@ class CapabilityCheckResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 _NATIVE_CAPABILITIES: dict[str, list[str]] = {
-    "solver": ["icoFoam", "simpleFoam", "pisoFoam", "pimpleFoam"],
+    "solver": ["incompressibleFluid"],
     "geometry_generator": [
         "cylinder",
         "pipe",
@@ -221,6 +221,8 @@ class CapabilityPreChecker:
             supported.append("physical_model_writer:turbulent_les")
 
         for bc in study.boundary_conditions:
+            if not isinstance(bc, dict):
+                continue
             bc_type = bc.get("type", "")
             if bc_type in self._native.get("boundary_condition_writer", []):
                 supported.append(f"boundary_condition_writer:{bc_type}")

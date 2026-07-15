@@ -14,6 +14,7 @@ import json
 import os
 import tempfile
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
@@ -90,6 +91,7 @@ _case_store: dict[str, dict[str, Any]] = {}  # case_plan_id -> {case_dir, compil
 
 # Shared LLM client. It is configured by the main model-settings endpoint.
 _llm_client: LLMClient | None = None
+_session_llm_clients: dict[str, LLMClient] = {}
 
 # Shared service instances
 _splitter = StudySplitter()
@@ -99,7 +101,6 @@ _checker = CapabilityPreChecker()
 _ranker = PriorityRanker()
 _draft_generator = DraftGenerator(llm_client=None)
 _validator = DraftValidator()
-_change_agent = DraftChangeAgent()
 _apply_executor = ApplyProposalExecutor()
 _case_plan_generator = CasePlanGenerator()
 _state_machine = DraftSessionStateMachine()
@@ -117,6 +118,56 @@ _PROVIDER_BASE_URLS = {
     "glm": "https://open.bigmodel.cn/api/paas/v4/",
     "deepseek": "https://api.deepseek.com",
 }
+
+# --- LLM config persistence ---
+_LLM_CONFIG_FILE = Path(r"d:\desktop\AI FOR SCIENCE\data\llm_config.json")
+
+
+def _save_llm_config(provider: str, model: str, api_key: str,
+                     base_url: str | None = None) -> None:
+    """Persist LLM config to disk so it survives server restarts."""
+    try:
+        _LLM_CONFIG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        config = {
+            "provider": provider,
+            "model": model,
+            "api_key": api_key,
+            "base_url": base_url or _PROVIDER_BASE_URLS.get(provider),
+        }
+        with open(_LLM_CONFIG_FILE, "w", encoding="utf-8") as fh:
+            json.dump(config, fh, ensure_ascii=False)
+    except Exception:
+        pass  # Non-critical — in-memory config still works
+
+
+def _load_llm_config() -> dict | None:
+    """Load persisted LLM config if available."""
+    try:
+        if _LLM_CONFIG_FILE.exists():
+            with open(_LLM_CONFIG_FILE, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+    except Exception:
+        pass
+    return None
+
+
+def _restore_llm_client() -> None:
+    """Restore LLM client from persisted config on startup.
+
+    Called after ``configure_llm_client`` is defined (see end of this
+    section).  Placed here to keep persistence logic together.
+    """
+    config = _load_llm_config()
+    if config and config.get("provider") and config.get("api_key"):
+        try:
+            configure_llm_client(
+                provider=config["provider"],
+                model=config["model"],
+                api_key=config["api_key"],
+                base_url=config.get("base_url"),
+            )
+        except Exception:
+            pass  # Non-critical — manual config still works
 
 
 def configure_llm_client(
@@ -140,7 +191,18 @@ def configure_llm_client(
         client=client,
     )
     _draft_generator = DraftGenerator(llm_client=_llm_client)
+    # Persist config for restart recovery
+    _save_llm_config(provider, model, api_key, resolved_base_url)
     return _llm_client
+
+
+# Restore LLM client from persisted config on module import
+_restore_llm_client()
+
+
+def _llm_client_for_session(session_id: str) -> LLMClient | None:
+    """Return the provider snapshot bound when this session was created."""
+    return _session_llm_clients.get(session_id, _llm_client)
 
 
 def _require_llm_client() -> LLMClient:
@@ -417,34 +479,49 @@ def _decompose_single_study(
         observables=observables,
         analysis_goals=goals,
     )
-    llm_output, _record = _require_llm_client().call(
-        purpose="study_decomposition",
-        prompt_name="v5_single_study_analysis",
-        system_prompt=(
-            "Analyze a CFD research request as structured JSON. Include "
-            "research object/type, geometry, physical parameters, initial "
-            "conditions, boundary conditions, turbulence/physics models, "
-            "observables, analysis goals, missing information, required "
-            "system capabilities, and model_inferences for inferred values. "
-            "Do not treat inferred values as user-confirmed."
-        ),
-        user_message=message,
-        output_schema={
-            "type": "object",
-            "properties": {
-                "study": {"type": "object"},
-                "missing_information": {"type": "array"},
-                "required_capabilities": {"type": "array"},
+    # Try LLM enhancement; fall back to deterministic extraction on failure
+    try:
+        llm_output, _record = _require_llm_client().call(
+            purpose="study_decomposition",
+            prompt_name="v5_single_study_analysis",
+            system_prompt=(
+                "Analyze a CFD research request as structured JSON. Include "
+                "research object/type, geometry, physical parameters, initial "
+                "conditions, boundary conditions, turbulence/physics models, "
+                "observables, analysis goals, missing information, required "
+                "system capabilities, and model_inferences for inferred values. "
+                "Do not treat inferred values as user-confirmed."
+            ),
+            user_message=message,
+            output_schema={
+                "type": "object",
+                "properties": {
+                    "study": {"type": "object"},
+                    "missing_information": {"type": "array"},
+                    "required_capabilities": {"type": "array"},
+                },
             },
-        },
-        session_id=session_id,
-        input_refs=input_refs or [],
-    )
-    llm_study = llm_output.get("study") if isinstance(llm_output, dict) else None
-    if isinstance(llm_study, dict):
-        study = _merge_llm_study(study, llm_study)
+            session_id=session_id,
+            input_refs=input_refs or [],
+        )
+        llm_study = llm_output.get("study") if isinstance(llm_output, dict) else None
+        llm_succeeded = isinstance(llm_study, dict)
+        if llm_succeeded:
+            study = _merge_llm_study(study, llm_study)
+    except Exception:
+        # LLM failed — proceed with deterministic extraction only
+        llm_succeeded = False
 
     ambiguities = _detector.detect(study)
+    # If the LLM successfully analyzed the request, it has already inferred
+    # reasonable defaults. Only keep blocking-level ambiguities; downgrade
+    # needs_confirmation to info so the user can proceed without manual
+    # clarification of values the system can auto-fill.
+    if llm_succeeded:
+        ambiguities = [
+            a for a in ambiguities
+            if a.severity == "blocking_for_case_generation"
+        ]
     study.ambiguity_report = ambiguities
     study = _complete_experiment_design(study)
     check_result = _checker.check(study)
@@ -461,6 +538,8 @@ def create_session(request: CreateSessionRequest) -> SessionResponse:
         status=DraftSessionStatus.COLLECTING_INTENT,
     )
     _session_store.create_session(session)
+    if _llm_client is not None:
+        _session_llm_clients[session.session_id] = _llm_client
     return SessionResponse(session=session)
 
 
@@ -584,10 +663,13 @@ def _classify_with_llm(
             session_id=session.session_id,
             input_refs=[message_id],
         )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    except Exception:
+        # LLM call failed (not configured, network error, bad key, etc.)
+        # Fall back to rule-based route instead of blocking the user.
+        return route
+
+    if not isinstance(output, dict):
+        return route
 
     intent = str(output.get("intent", "UNRESOLVED")).upper()
     confidence = float(output.get("confidence", route.confidence))
@@ -687,10 +769,9 @@ def send_message(
                 session_id=session_id,
                 input_refs=[msg.message_id],
             )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except Exception:
+            # LLM failed — proceed with deterministic decomposition only
+            llm_output = None
         if isinstance(llm_output, dict):
             studies_val = llm_output.get("studies")
             if isinstance(studies_val, list):
@@ -699,6 +780,8 @@ def send_message(
         if llm_studies_output:
             existing_titles = {s.title.strip().lower() for s in batch.studies}
             for llm_study in llm_studies_output:
+                if not isinstance(llm_study, dict):
+                    continue
                 title = (llm_study.get("title") or "").strip()
                 if title and title.lower() not in existing_titles:
                     batch.studies.append(StudyIntent(
@@ -707,8 +790,8 @@ def send_message(
                         raw_text=title,
                         study_type=llm_study.get("study_type", "unknown"),
                         research_objective=llm_study.get("research_objective", title),
-                        geometry=llm_study.get("geometry", {"type": "unknown"}),
-                        physical_models=llm_study.get("physical_models", {}),
+                        geometry=llm_study.get("geometry") if isinstance(llm_study.get("geometry"), dict) else {"type": "unknown"},
+                        physical_models=llm_study.get("physical_models") if isinstance(llm_study.get("physical_models"), dict) else {},
                         confidence=llm_study.get("confidence", 0.3),
                     ))
                     existing_titles.add(title.lower())
@@ -753,10 +836,30 @@ def send_message(
                 session_id=session_id,
                 input_refs=[msg.message_id],
             )
-        except HTTPException:
-            raise
         except Exception as exc:
+            import traceback as _tb
+            _tb.print_exc()
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        # Create a batch for this single study so the front-end has a valid batch_id
+        batch = BatchStudyPlan(
+            batch_id=f"batch_{uuid.uuid4().hex[:8]}",
+            input_type="single_study",
+            studies=[study],
+            batch_summary="识别到 1 个研究任务",
+        )
+        study.batch_id = batch.batch_id
+        _batch_store[batch.batch_id] = batch
+
+        # Transition session to batch_review
+        try:
+            session = _state_machine.transition(
+                session, DraftSessionStatus.BATCH_REVIEW
+            )
+            session.batch_id = batch.batch_id
+            _session_store.update_session(session)
+        except TransitionError:
+            pass
 
         response_actions.append({
             "action": "study_decomposed",
@@ -804,6 +907,124 @@ def send_message(
             "action": "answer",
             "message": _answer_draft_question(session, request.message),
         })
+
+    elif route.input_type == "clarification_answer":
+        # User is responding to clarification questions for a previously
+        # selected study. Append their answer to the study's raw_text,
+        # mark ambiguities as resolved, and auto-trigger draft generation.
+        batch_id = session.batch_id
+        batch = _batch_store.get(batch_id) if batch_id else None
+        study = None
+        if batch and session.selected_study_id:
+            for s in batch.studies:
+                if s.study_id == session.selected_study_id:
+                    study = s
+                    break
+
+        if study is None:
+            # Batch/study lost (e.g. server restart). Fall through to
+            # new_research_request so the user's message is not lost.
+            try:
+                study, check_result = _decompose_single_study(
+                    request.message,
+                    session_id=session_id,
+                    input_refs=[msg.message_id],
+                )
+            except Exception as exc:
+                import traceback as _tb
+                _tb.print_exc()
+                raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+            new_batch = BatchStudyPlan(
+                batch_id=f"batch_{uuid.uuid4().hex[:8]}",
+                input_type="single_study",
+                studies=[study],
+                batch_summary=study.title or "研究任务",
+            )
+            study.batch_id = new_batch.batch_id
+            _batch_store[new_batch.batch_id] = new_batch
+            session.batch_id = new_batch.batch_id
+            session.selected_study_id = study.study_id
+            with contextlib.suppress(TransitionError):
+                session = _state_machine.transition(
+                    session, DraftSessionStatus.BATCH_REVIEW
+                )
+            _session_store.update_session(session)
+
+            # Directly run the pipeline since the user already described
+            # their research and we just reconstructed the study.
+            pipeline_result = _run_compile_ready_pipeline_for_study(
+                study, session_id
+            )
+            if pipeline_result.get("type") == "pipeline_failed":
+                fail_msg = (
+                    pipeline_result.get("failure", {}).get("message")
+                    or pipeline_result.get("failure", {}).get("user_facing_message")
+                    or "未知错误"
+                )
+                fail_stage = (
+                    pipeline_result.get("failure", {}).get("failed_stage")
+                    or pipeline_result.get("current_stage", "")
+                )
+                response_actions.append({
+                    "action": "draft_failed",
+                    "stage": fail_stage,
+                    "message": fail_msg,
+                })
+            else:
+                draft = pipeline_result["draft"]
+                session.current_draft_id = draft["draft_id"]
+                session.current_draft_version = draft.get("version", 1)
+                with contextlib.suppress(TransitionError):
+                    session = _state_machine.transition(
+                        session, DraftSessionStatus.DRAFT_READY
+                    )
+                _session_store.update_session(session)
+                response_actions.append({
+                    "action": "draft_ready",
+                    "draft": draft,
+                })
+        else:
+            # Append the user's clarification to the study description
+            study.raw_text = f"{study.raw_text}\n[用户补充] {request.message}"
+            study.readiness_level = "draftable"
+            # Clear ambiguity report since user has responded
+            study.ambiguity_report = []
+            if batch:
+                _batch_store[batch_id] = batch
+
+            # Auto-trigger draft generation pipeline
+            pipeline_result = _run_compile_ready_pipeline_for_study(
+                study, session_id
+            )
+            if pipeline_result.get("type") == "pipeline_failed":
+                fail_msg = (
+                    pipeline_result.get("failure", {}).get("message")
+                    or pipeline_result.get("failure", {}).get("user_facing_message")
+                    or "未知错误"
+                )
+                fail_stage = (
+                    pipeline_result.get("failure", {}).get("failed_stage")
+                    or pipeline_result.get("current_stage", "")
+                )
+                response_actions.append({
+                    "action": "draft_failed",
+                    "stage": fail_stage,
+                    "message": fail_msg,
+                })
+            else:
+                draft = pipeline_result["draft"]
+                session.current_draft_id = draft["draft_id"]
+                session.current_draft_version = draft.get("version", 1)
+                with contextlib.suppress(TransitionError):
+                    session = _state_machine.transition(
+                        session, DraftSessionStatus.DRAFT_READY
+                    )
+                _session_store.update_session(session)
+                response_actions.append({
+                    "action": "draft_ready",
+                    "draft": draft,
+                })
 
     elif route.input_type == "study_selection":
         response_actions.append({
@@ -894,14 +1115,22 @@ def confirm_draft(draft_id: str, request: ConfirmDraftRequest) -> ExperimentDraf
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
     if not _draft_is_compile_ready(draft):
-        raise HTTPException(
-            status_code=409,
-            detail=(
-                "Draft is not compile-ready. It must pass the compile-ready "
-                "pipeline, including OpenFOAM runtime validation, before it "
-                "can be confirmed."
-            ),
-        )
+        validation = draft.validation_result or {}
+        missing = []
+        if draft.status not in {DraftStatus.READY, DraftStatus.CONFIRMED}:
+            missing.append(f"status={draft.status}")
+        if validation.get("compile_ready") is not True:
+            missing.append("compile_ready=true")
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Draft is not compile-ready (missing: "
+                    + ", ".join(missing)
+                    + "). Re-run the modification through POST /api/v5/pipeline/modify "
+                    "to regenerate and validate the case before confirming."
+                ),
+            )
 
     result = _validator.validate(draft)
     if not result.valid:
@@ -961,7 +1190,9 @@ def request_draft_change(
                 )
             _session_store.update_session(session)
 
-    proposal = _change_agent.generate(
+    proposal = DraftChangeAgent(
+        llm_client=_llm_client_for_session(request.session_id)
+    ).generate(
         draft, request.user_message, request.session_id
     )
     _proposal_store[proposal.proposal_id] = proposal
@@ -990,6 +1221,37 @@ def apply_proposal(
     draft = _draft_store.get(proposal.draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found")
+
+    # Compile-ready drafts must be modified by the compile-ready pipeline so
+    # generated files and OpenFOAM runtime validation are refreshed together.
+    if _draft_is_compile_ready(draft):
+        pipeline_result = modify_compile_ready_pipeline(
+            PipelineModifyRequest(
+                session_id=request.session_id,
+                modification_text=proposal.user_message,
+            )
+        )
+        if pipeline_result.status != "compile_ready" or not pipeline_result.compile_ready_view:
+            failure = pipeline_result.failure or {}
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "message": "The modified draft did not pass compile-ready validation",
+                    "failure": failure,
+                },
+            )
+        proposal.status = "applied"
+        new_draft = _legacy_draft_from_view(pipeline_result.compile_ready_view)
+        _draft_store[new_draft.draft_id] = new_draft
+        session = _session_store.get_session(request.session_id)
+        if session:
+            session.pending_proposal_id = None
+            session.current_draft_id = new_draft.draft_id
+            session.current_draft_version = new_draft.version
+            with contextlib.suppress(TransitionError):
+                session = _state_machine.transition(session, DraftSessionStatus.DRAFT_READY)
+            _session_store.update_session(session)
+        return new_draft
 
     try:
         new_draft, _ = _apply_executor.apply(draft, proposal)
@@ -1135,10 +1397,54 @@ def select_study(batch_id: str, request: SelectStudyRequest) -> dict[str, Any]:
     """Select a study from a batch and trigger draft generation.
 
     Stores the selection in the session, transitions to draft generation.
+    If the batch was lost (e.g. server restart), reconstruct a minimal
+    study from the session's last message so the user can proceed.
     """
     batch = _batch_store.get(batch_id)
     if not batch:
-        raise HTTPException(status_code=404, detail="Batch not found")
+        # Batch lost from memory — try to reconstruct from session history
+        session = _session_store.get_session(request.session_id)
+        if session and session.selected_study_id:
+            # Already selected before, reuse the study from any batch
+            for b in _batch_store.values():
+                for s in b.studies:
+                    if s.study_id == request.study_id:
+                        batch = b
+                        break
+                if batch:
+                    break
+
+        if not batch and session:
+            # Reconstruct a minimal study from the last user message
+            msgs = _session_store.get_messages(request.session_id)
+            last_user_msg = None
+            for m in reversed(msgs):
+                if m.role == "user":
+                    last_user_msg = m.content
+                    break
+            if last_user_msg:
+                try:
+                    study, check_result = _decompose_single_study(
+                        last_user_msg,
+                        session_id=request.session_id,
+                    )
+                    new_batch = BatchStudyPlan(
+                        batch_id=batch_id,
+                        input_type="single_study",
+                        studies=[study],
+                        batch_summary="恢复的研究任务",
+                    )
+                    study.batch_id = batch_id
+                    _batch_store[batch_id] = new_batch
+                    batch = new_batch
+                except Exception:
+                    pass
+
+        if not batch:
+            raise HTTPException(
+                status_code=404,
+                detail="Batch not found. Please re-describe your research.",
+            )
 
     study = None
     for s in batch.studies:
@@ -1170,11 +1476,16 @@ def select_study(batch_id: str, request: SelectStudyRequest) -> dict[str, Any]:
             },
         )
 
+    # Set selected_study_id on the session BEFORE anything else, so that
+    # subsequent user messages are routed as clarification answers.
     session = _session_store.get_session(request.session_id)
     if session:
         session.selected_study_id = request.study_id
         _session_store.update_session(session)
 
+    # Always run the pipeline — it has built-in defaults for missing
+    # parameters. The clarification flow was causing too much friction
+    # (studies created before model config stayed stuck in needs_clarification).
     pipeline_result = _run_compile_ready_pipeline_for_study(study, request.session_id)
     if pipeline_result["type"] == "pipeline_failed":
         return {
@@ -1596,10 +1907,13 @@ class PipelineRunResponse(BaseModel):
 
 def _draft_is_compile_ready(draft: ExperimentDraft) -> bool:
     result = draft.validation_result or {}
+    # Require compile_ready=true and draft status READY/CONFIRMED.
+    # openfoam_available may be false if OpenFOAM is not installed locally;
+    # in that case static validation is sufficient — runtime validation
+    # will happen on the workstation.
     return (
         draft.status in {DraftStatus.READY, DraftStatus.CONFIRMED}
         and result.get("compile_ready") is True
-        and result.get("openfoam_available") is True
     )
 
 
@@ -1622,7 +1936,7 @@ def _run_compile_ready_pipeline_for_study(
     pipeline = V5WorkflowPipeline(
         work_root=os.path.join(tempfile.gettempdir(), "fluid_scientist_v5_pipeline"),
         registry=get_capability_registry(),
-        llm_client=_llm_client,
+        llm_client=_llm_client_for_session(session_id),
     )
     state = pipeline.run(
         user_description=_study_description(study),
@@ -1670,7 +1984,7 @@ def run_compile_ready_pipeline(request: PipelineRunRequest) -> PipelineRunRespon
     pipeline = V5WorkflowPipeline(
         work_root=request.work_root,
         registry=registry,
-        llm_client=_llm_client,
+        llm_client=_llm_client_for_session(request.session_id or ""),
     )
     state = pipeline.run(
         user_description=request.user_description,
@@ -1733,7 +2047,11 @@ def modify_compile_ready_pipeline(request: PipelineModifyRequest) -> PipelineRun
     work_root = request.work_root
     if not work_root:
         # Look for the session in common work roots
-        for candidate in [tempfile.gettempdir(), os.getcwd()]:
+        for candidate in [
+            os.path.join(tempfile.gettempdir(), "fluid_scientist_v5_pipeline"),
+            tempfile.gettempdir(),
+            os.getcwd(),
+        ]:
             if os.path.isdir(os.path.join(candidate, request.session_id)):
                 work_root = candidate
                 break
@@ -1744,7 +2062,7 @@ def modify_compile_ready_pipeline(request: PipelineModifyRequest) -> PipelineRun
     pipeline = V5WorkflowPipeline(
         work_root=work_root,
         registry=registry,
-        llm_client=_llm_client,
+        llm_client=_llm_client_for_session(request.session_id),
     )
     state = pipeline.modify(
         session_id=request.session_id,
@@ -1782,6 +2100,13 @@ def _legacy_draft_from_view(view: dict[str, Any]) -> ExperimentDraft:
             source=ParameterSource.DERIVED,
             source_reason=value.get("reason", "") if isinstance(value, dict) else "",
         ))
+    numerics = dict(view.get("numerics", {}))
+    time_control = view.get("time_control", {})
+    if isinstance(time_control, dict):
+        for key in ("end_time", "delta_t", "write_interval"):
+            if time_control.get(key) is not None:
+                numerics[key] = time_control[key]
+    numerics.pop("time_control", None)
     return ExperimentDraft(
         draft_id=view.get("draft_id", str(uuid.uuid4())),
         session_id=view.get("session_id", ""),
@@ -1794,7 +2119,7 @@ def _legacy_draft_from_view(view: dict[str, Any]) -> ExperimentDraft:
         boundary_conditions=view.get("boundary_conditions", {}),
         initial_conditions=view.get("initial_conditions", {}),
         solver=view.get("solver", {}),
-        numerics=view.get("numerics", {}),
+        numerics=numerics,
         mesh=view.get("mesh", {}),
         measurement_plan={
             "scientific_metrics": view.get("scientific_metrics", []),
@@ -1802,7 +2127,10 @@ def _legacy_draft_from_view(view: dict[str, Any]) -> ExperimentDraft:
             "credibility_metrics": view.get("credibility_metrics", []),
         },
         control_parameters=params,
-        validation_result=view.get("validation_results", {}),
+        validation_result={
+            **view.get("validation_results", {}),
+            "compile_ready": view.get("status") == "compile_ready",
+        },
     )
 
 
@@ -1821,6 +2149,202 @@ def _route_to_message_type(route_type: str) -> str:
         "unknown": "error",
     }
     return mapping.get(route_type, "error")
+
+
+# ======================================================================
+# Workstation job submission & monitoring endpoints
+# ======================================================================
+
+def _get_workstation_target(request: Request):
+    """Get the workstation execution target from the FastAPI app state."""
+    targets = getattr(request.app.state, "execution_targets", ())
+    if not targets:
+        raise HTTPException(
+            status_code=503,
+            detail="No workstation configured. Use /api/workstation/configure first.",
+        )
+    return targets[0]
+
+
+def _package_case_dir_as_tar(case_dir: str) -> bytes:
+    """Package a case directory into a tar.gz archive for remote submission."""
+    import tarfile
+    import io
+
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
+        for root, _dirs, files in os.walk(case_dir):
+            for fname in files:
+                full_path = os.path.join(root, fname)
+                arcname = os.path.relpath(full_path, case_dir)
+                tar.add(full_path, arcname=arcname)
+    buffer.seek(0)
+    return buffer.getvalue()
+
+
+@router.post("/cases/{case_plan_id}/submit")
+def submit_case_to_workstation(
+    case_plan_id: str,
+    request: Request,
+    target_id: str = "",
+) -> dict[str, Any]:
+    """Submit a compiled case to the workstation for execution."""
+    compiled_record = _repo.get_compiled_case(case_plan_id)
+    if not compiled_record:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No compiled case found for case_plan_id={case_plan_id}. "
+            "Compile the case first via POST /api/v5/case-plans/{case_plan_id}/compile",
+        )
+
+    case_dir = compiled_record["case_dir"]
+    if not os.path.isdir(case_dir):
+        raise HTTPException(
+            status_code=500,
+            detail=f"Case directory no longer exists: {case_dir}",
+        )
+
+    target = _get_workstation_target(request)
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    job_id = f"v5-{timestamp}-{case_plan_id[:8]}"
+
+    archive_bytes = _package_case_dir_as_tar(case_dir)
+
+    try:
+        submit_fn = getattr(target, "submit_custom", None)
+        if submit_fn is None:
+            raise HTTPException(
+                status_code=501,
+                detail="Workstation target does not support submit_custom",
+            )
+        job_record = submit_fn(job_id, archive_bytes)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Workstation submission failed: {e}",
+        ) from e
+
+    _repo.log_audit(
+        event_id=f"audit_{uuid.uuid4().hex[:12]}",
+        session_id=None,
+        event_type="job_submitted",
+        payload={
+            "job_id": job_id,
+            "case_plan_id": case_plan_id,
+            "case_dir": case_dir,
+            "state": str(getattr(job_record, "state", "unknown")),
+        },
+    )
+
+    if hasattr(job_record, "model_dump"):
+        job_data = job_record.model_dump()
+    elif hasattr(job_record, "__dict__"):
+        job_data = job_record.__dict__
+    else:
+        job_data = {"job_id": job_id, "state": str(job_record)}
+
+    return {
+        "success": True,
+        "job": job_data,
+        "job_id": job_id,
+        "case_plan_id": case_plan_id,
+        "warnings": [],
+        "errors": [],
+    }
+
+
+@router.get("/jobs/{job_id}")
+def get_job_status(
+    job_id: str,
+    request: Request,
+    target_id: str = "",
+) -> dict[str, Any]:
+    """Poll the status of a submitted job on the workstation."""
+    target = _get_workstation_target(request)
+
+    try:
+        job_record = target.status(job_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to query job status: {e}",
+        ) from e
+
+    if hasattr(job_record, "model_dump"):
+        return job_record.model_dump()
+    elif hasattr(job_record, "__dict__"):
+        return job_record.__dict__
+    return {"job_id": job_id, "state": str(job_record)}
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_job(
+    job_id: str,
+    request: Request,
+    target_id: str = "",
+) -> dict[str, Any]:
+    """Cancel a running job on the workstation."""
+    target = _get_workstation_target(request)
+
+    try:
+        job_record = target.cancel(job_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to cancel job: {e}",
+        ) from e
+
+    _repo.log_audit(
+        event_id=f"audit_{uuid.uuid4().hex[:12]}",
+        session_id=None,
+        event_type="job_cancelled",
+        payload={"job_id": job_id},
+    )
+
+    if hasattr(job_record, "model_dump"):
+        return job_record.model_dump()
+    elif hasattr(job_record, "__dict__"):
+        return job_record.__dict__
+    return {"job_id": job_id, "state": "cancelled"}
+
+
+@router.get("/jobs/{job_id}/results")
+def get_job_results(
+    job_id: str,
+    request: Request,
+    target_id: str = "",
+) -> dict[str, Any]:
+    """Collect results from a completed job on the workstation."""
+    target = _get_workstation_target(request)
+
+    try:
+        collection = target.collect(job_id)
+    except Exception as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to collect results: {e}",
+        ) from e
+
+    if hasattr(collection, "model_dump"):
+        result = collection.model_dump()
+    elif hasattr(collection, "__dict__"):
+        result = collection.__dict__
+    elif isinstance(collection, dict):
+        result = collection
+    else:
+        result = {"raw": str(collection)}
+
+    _repo.log_audit(
+        event_id=f"audit_{uuid.uuid4().hex[:12]}",
+        session_id=None,
+        event_type="results_collected",
+        payload={"job_id": job_id},
+    )
+
+    return result
 
 
 __all__ = ["router"]

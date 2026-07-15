@@ -1,0 +1,13 @@
+{
+  "skill_id": "geometry.derived_dimensions",
+  "version": "1.0.0",
+  "category": "geometry",
+  "summary": "根据半径/直径确定性派生圆柱特征尺度。",
+  "entrypoint": "fluid_skills.runtime.geometry:normalize_cylinder_geometry",
+  "deterministic": true,
+  "dependencies": [
+    "geometry.cylinder.normalizer"
+  ],
+  "platform": null,
+  "validation_status": "CANDIDATE"
+}

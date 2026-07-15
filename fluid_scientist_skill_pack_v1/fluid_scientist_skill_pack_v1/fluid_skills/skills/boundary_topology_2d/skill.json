@@ -1,0 +1,11 @@
+{
+  "skill_id": "boundary.topology_2d",
+  "version": "1.0.0",
+  "category": "boundary",
+  "summary": "强制二维前后面为 empty，并检查周期边界成对。",
+  "entrypoint": "fluid_skills.runtime.topology:enforce_2d_boundary_topology",
+  "deterministic": true,
+  "dependencies": [],
+  "platform": null,
+  "validation_status": "CANDIDATE"
+}

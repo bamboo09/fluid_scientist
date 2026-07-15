@@ -1,0 +1,2997 @@
+# Fluid Scientist 完整重构方案
+
+## 面向复杂、未知科研 Case 的开放式建模、能力解析、OpenFOAM 13 编译与验证系统
+
+---
+
+# 1. 项目目标
+
+当前 Fluid Scientist 已具备以下基础能力：
+
+* 用户研究需求输入；
+* 科学意图解析；
+* StudyDraft 生成；
+* 多轮对话修改；
+* CasePlan 生成；
+* OpenFOAM 文件生成；
+* 工作站连接；
+* OpenFOAM 任务提交；
+* OpenFOAMValidationRunner；
+* ConfigExtensionExecutor；
+* UnknownCapabilityOrchestrator；
+* validation evidence；
+* test manifest；
+* VERIFIED 动态能力注册。
+
+但当前系统存在两个核心问题。
+
+## 1.1 OpenFOAM Case 生成质量不足
+
+具体表现为：
+
+* 模型盲猜 OpenFOAM 参数；
+* OpenFOAM 版本混用；
+* 字典语法错误；
+* CasePlan 与编译结果不一致；
+* patch 名称跨文件不一致；
+* 湍流模型和字段不匹配；
+* function object 参数不完整；
+* 网格生成失败；
+* 数值运行立即发散；
+* 页面显示“生成成功”，提交后立即失败。
+
+## 1.2 提高可靠性后可能退化成模板选择器
+
+系统又不能采用：
+
+```text
+用户需求
+→ 匹配完整案例模板
+→ 没有模板
+→ 无法处理
+```
+
+因为真实科研场景可能包括：
+
+* 未见过的几何；
+* 未见过的边界组合；
+* 未见过的材料；
+* 新的物理过程；
+* 新的观测指标；
+* 多区域、多物理场耦合；
+* 多阶段工况；
+* 复杂时变边界；
+* 用户自定义分析需求。
+
+完整案例模板永远不可能覆盖所有科研问题。
+
+因此本轮系统需要同时实现：
+
+> 已知能力可靠复用、已有能力动态组合、未知能力受控扩展、全流程真实验证。
+
+---
+
+# 2. 总体设计原则
+
+本轮重构遵循以下原则。
+
+## 2.1 LLM 负责理解，不负责保证语法
+
+LLM 负责：
+
+* 理解研究需求；
+* 提取用户事实；
+* 构建科学语义；
+* 识别实体、区域和关系；
+* 分解物理问题；
+* 推断观测需求；
+* 拆解原子能力；
+* 发现未知能力；
+* 生成 ExtensionSpec；
+* 生成结构化 CaseIR Patch。
+
+LLM 不负责：
+
+* 直接生成完整 OpenFOAM 字典；
+* 保证 OpenFOAM 语法；
+* 直接修改最终 Case 文件；
+* 注册未验证能力；
+* 判定工作站运行成功。
+
+---
+
+## 2.2 Schema 负责忠实表达复杂问题
+
+Schema 的目标不是提前枚举所有科学问题，而是能够表达：
+
+* 实体；
+* 区域；
+* 几何关系；
+* 区域接口；
+* 物理过程；
+* 材料；
+* 初始条件；
+* 边界条件意图；
+* 多阶段工况；
+* 观测目标；
+* 参数来源；
+* 假设；
+* 歧义；
+* 未解决要求；
+* 能力缺口。
+
+---
+
+## 2.3 Capability System 负责判断和组合
+
+系统不对整个 Case 简单分类成：
+
+```text
+圆柱
+射流
+管流
+```
+
+而是将 Case 拆解为原子能力需求，并逐项判断：
+
+```text
+已有
+可组合
+需扩展
+需要新物理
+需要澄清
+环境受阻
+```
+
+---
+
+## 2.4 Compiler 负责确定性生成
+
+最终 OpenFOAM 文件必须由：
+
+* 版本化 PlatformProfile；
+* VERIFIED BasePack；
+* VERIFIED Capability Components；
+* 确定性映射规则；
+* 确定性 Compiler；
+
+共同生成。
+
+相同输入必须产生一致输出。
+
+---
+
+## 2.5 ValidationRunner 负责证明可运行
+
+系统不能用以下标准判定成功：
+
+```text
+生成了8个文件
+JSON格式正确
+controlDict里有solver
+```
+
+只有经过真实 OpenFOAM Foundation 13 环境验证，才能进入正式提交。
+
+---
+
+# 3. 最终系统架构
+
+完整流程如下：
+
+```text
+用户自然语言
+    ↓
+Session / Study 管理
+    ↓
+Fact Extractor
+    ↓
+Ambiguity & Conflict Detector
+    ↓
+Scientific Normalizer
+    ↓
+Entity / Region / Relation Builder
+    ↓
+Physics Decomposer
+    ↓
+Observable Decomposer
+    ↓
+RequestedCaseIR
+    ↓
+Requirement Coverage Critic
+    ↓
+Atomic Requirement Decomposer
+    ↓
+Requirement Dependency Graph
+    ↓
+Capability Resolution Engine
+    ↓
+Capability Gap Analyzer
+    ↓
+┌─────────────────────────────────────┐
+│ EXACT_SUPPORTED                     │
+│ COMPOSABLE_SUPPORTED                │
+│ EXTENDABLE                          │
+│ REQUIRES_NEW_PHYSICS                │
+│ NEEDS_CLARIFICATION                 │
+│ ENVIRONMENT_BLOCKED                 │
+└─────────────────────────────────────┘
+    ↓
+ResolvedCaseIR
+    ↓
+Component-based OpenFOAM 13 Compiler
+    ↓
+CompiledCaseManifest
+    ↓
+Static Validator
+    ↓
+Dictionary Validator
+    ↓
+Mesh Validator
+    ↓
+Serial Smoke Test
+    ↓
+Parallel Smoke Test
+    ↓
+READY_TO_SUBMIT
+    ↓
+正式任务提交
+```
+
+能力缺失时走扩展分支：
+
+```text
+NEEDS_EXTENSION
+    ↓
+ExtensionSpec
+    ↓
+ConfigExtensionExecutor / CodeExtensionExecutor
+    ↓
+原子能力测试
+    ↓
+最小 OpenFOAM 案例测试
+    ↓
+目标 Case Smoke Test
+    ↓
+Evidence + Test Manifest
+    ↓
+注册 VERIFIED Capability
+    ↓
+恢复原 Case
+    ↓
+重新 Capability Resolution
+```
+
+---
+
+# 4. OpenFOAM 平台版本锁定
+
+## 4.1 当前目标环境
+
+当前工作站版本为：
+
+```text
+OpenFOAM Foundation 13
+```
+
+不是：
+
+```text
+OpenCFD v2406
+OpenCFD v2312
+OpenCFD v2506
+```
+
+必须清理所有 v2406 专属知识、配置和命令。
+
+---
+
+## 4.2 Foundation 13 基础运行方式
+
+单相不可压缩流的基础求解模块：
+
+```foam
+solver incompressibleFluid;
+```
+
+运行命令：
+
+```bash
+foamRun -solver incompressibleFluid
+```
+
+主要文件：
+
+```text
+system/controlDict
+system/fvSchemes
+system/fvSolution
+
+constant/physicalProperties
+constant/momentumTransport
+
+0/U
+0/p
+0/k
+0/omega
+0/nut
+```
+
+不得继续默认生成：
+
+```text
+constant/transportProperties
+```
+
+---
+
+## 4.3 OpenFOAMPlatformProfile
+
+新增统一平台配置：
+
+```json
+{
+  "profile_id": "openfoam-foundation-13",
+  "distribution": "OpenFOAMFoundation",
+  "version": "13",
+  "application": "foamRun",
+  "default_solver_module": "incompressibleFluid",
+  "physical_properties_file": "constant/physicalProperties",
+  "momentum_transport_file": "constant/momentumTransport",
+  "supports_dry_run": false,
+  "security_policy": {
+    "allow_code_stream": false,
+    "allow_case_local_dynamic_libs": false,
+    "allow_shell_variables": false,
+    "allow_external_include": false,
+    "allow_arbitrary_scripts": false,
+    "allow_arbitrary_executables": false
+  }
+}
+```
+
+平台能力必须通过工作站探测确认：
+
+```bash
+foamVersion
+foamRun -help
+foamToC -solvers
+foamToC -vectorBCs
+foamToC -scalarBCs
+foamToC -functionObjects
+foamPostProcess -list
+```
+
+所有模块必须读取同一个 PlatformProfile。
+
+---
+
+# 5. 数据模型分层
+
+原有 CasePlan 同时混合了科学意图、OpenFOAM 实现和运行配置，必须拆分。
+
+新的核心数据模型：
+
+```text
+StudyDraft
+RequestedCaseIR
+AtomicRequirementSet
+CapabilityResolutionPlan
+ResolvedCaseIR
+CompiledCaseManifest
+ValidationManifest
+```
+
+---
+
+# 6. StudyDraft
+
+StudyDraft 用于面向用户展示和多轮确认，内容包括：
+
+* 研究目标；
+* 研究对象；
+* 已知条件；
+* 推荐参数；
+* 待确认问题；
+* 观测指标；
+* 计算资源建议；
+* 变更摘要。
+
+StudyDraft 不是 Compiler 的直接输入。
+
+同一 Session 中用户修改参数时：
+
+```text
+修改StudyDraft
+→ 更新RequestedCaseIR相关路径
+→ 生成变更摘要
+→ 用户确认
+→ 创建新CaseIR版本
+```
+
+不能每次都创建新的研究工作流。
+
+---
+
+# 7. RequestedCaseIR
+
+## 7.1 定位
+
+RequestedCaseIR 表达：
+
+> 用户真正想研究什么。
+
+它不要求系统已经具备实现能力，也不要求匹配完整模板。
+
+---
+
+## 7.2 Core Schema
+
+建议结构：
+
+```json
+{
+  "schema_version": "2.0",
+  "case_ir_version": 1,
+  "study_id": "study_xxx",
+  "case_id": "case_xxx",
+
+  "physics": {},
+  "entities": [],
+  "regions": [],
+  "relations": [],
+  "interfaces": [],
+  "materials": [],
+  "fields": [],
+  "boundary_intents": [],
+  "initial_conditions": [],
+  "operating_stages": [],
+  "mesh_intent": {},
+  "numerical_intent": {},
+  "observables": [],
+  "derived_constraints": [],
+  "assumptions": [],
+  "ambiguities": [],
+  "unresolved_requirements": [],
+  "extensions": []
+}
+```
+
+---
+
+# 8. 参数统一结构
+
+关键参数不能只保存一个 value。
+
+统一使用：
+
+```json
+{
+  "value": 3900,
+  "unit": "dimensionless",
+  "source": "USER_EXPLICIT",
+  "confidence": 1.0,
+  "status": "CONFIRMED",
+  "assumption": null,
+  "derived_from": [],
+  "alternatives": []
+}
+```
+
+支持的来源：
+
+```text
+USER_EXPLICIT
+USER_CONFIRMED
+MODEL_INFERRED
+MODEL_RECOMMENDED
+SYSTEM_DEFAULT
+FORMULA_DERIVED
+CAPABILITY_REQUIRED
+TEMPLATE_DERIVED
+LITERATURE_SUGGESTED
+```
+
+支持的状态：
+
+```text
+CONFIRMED
+INFERRED
+RECOMMENDED
+ASSUMED
+UNRESOLVED
+AMBIGUOUS
+CONFLICTING
+```
+
+---
+
+# 9. 实体、区域、关系和接口
+
+## 9.1 Entity
+
+实体描述几何对象：
+
+```json
+{
+  "id": "cylinder_1",
+  "kind": "cylinder",
+  "parameters": {
+    "diameter": {
+      "value": 0.01,
+      "unit": "m"
+    }
+  }
+}
+```
+
+---
+
+## 9.2 Region
+
+区域表示求解域：
+
+```json
+{
+  "id": "fluid_region",
+  "kind": "fluid",
+  "material_ref": "air",
+  "physics_refs": [
+    "incompressible_flow"
+  ]
+}
+```
+
+复杂热耦合场景：
+
+```json
+{
+  "id": "solid_wall_region",
+  "kind": "solid",
+  "material_ref": "steel",
+  "physics_refs": [
+    "solid_heat_conduction"
+  ]
+}
+```
+
+---
+
+## 9.3 Relation
+
+空间关系不能全部写死为 archetype。
+
+例如：
+
+```json
+{
+  "id": "relation_1",
+  "type": "near",
+  "source": "cylinder_1",
+  "target": "wall_1",
+  "parameters": {
+    "gap": {
+      "value": 0.2,
+      "unit": "D",
+      "reference": "cylinder_1.diameter"
+    }
+  }
+}
+```
+
+可支持：
+
+```text
+near
+inside
+intersects
+aligned_with
+inclined_to
+upstream_of
+downstream_of
+attached_to
+rotates_about
+moves_along
+```
+
+---
+
+## 9.4 Interface
+
+区域之间的耦合必须显式表达：
+
+```json
+{
+  "id": "fluid_solid_interface",
+  "region_a": "fluid_region",
+  "region_b": "solid_region",
+  "coupling_intent": "conjugate_heat_transfer"
+}
+```
+
+不能只写：
+
+```json
+{
+  "thermal": true
+}
+```
+
+---
+
+# 10. 单位与派生约束
+
+所有物理参数必须带单位或明确为无量纲。
+
+错误：
+
+```json
+{
+  "diameter": 1
+}
+```
+
+正确：
+
+```json
+{
+  "diameter": {
+    "value": 0.01,
+    "unit": "m"
+  }
+}
+```
+
+无量纲关系必须保存：
+
+```json
+{
+  "id": "reynolds_relation",
+  "expression": "Re = U_ref * L_ref / nu",
+  "inputs": [
+    "reference.velocity",
+    "reference.length",
+    "physics.reynolds_number"
+  ],
+  "output": "materials.fluid.kinematic_viscosity"
+}
+```
+
+新增：
+
+```text
+DimensionalConsistencyValidator
+```
+
+用于检查：
+
+* 单位错误；
+* 量纲不一致；
+* Re、U、L、ν关系；
+* 时间和频率关系；
+* 热流与温度单位；
+* 压力与速度尺度。
+
+---
+
+# 11. 多阶段工况
+
+复杂 Case 可能包含：
+
+* 初始静止；
+* 入口渐增；
+* 流动发展；
+* 工况切换；
+* 正式采样。
+
+需要：
+
+```json
+{
+  "operating_stages": [
+    {
+      "id": "initialization",
+      "type": "initialization",
+      "actions": [
+        "set_quiescent_velocity"
+      ]
+    },
+    {
+      "id": "startup",
+      "type": "transient_ramp",
+      "time_range": [0, 2]
+    },
+    {
+      "id": "development",
+      "type": "flow_development",
+      "time_range": [2, 20]
+    },
+    {
+      "id": "sampling",
+      "type": "measurement",
+      "time_range": [20, 60],
+      "observable_refs": [
+        "drag_spectrum",
+        "wake_flip"
+      ]
+    }
+  ]
+}
+```
+
+频谱分析不得使用启动阶段数据。
+
+---
+
+# 12. Observable Schema
+
+观测指标不能只保存名称。
+
+每个 Observable 至少包含：
+
+* 科学目标；
+* 目标对象；
+* 需要的物理字段；
+* 空间区域；
+* 时间窗口；
+* 采样频率；
+* OpenFOAM 内部采样能力；
+* 外部分析能力；
+* 输出形式；
+* 前置依赖；
+* 当前能力状态。
+
+示例：
+
+```json
+{
+  "id": "wake_flip_metric",
+  "semantic_type": "spanwise_wake_flip",
+  "target_region": "wake_region",
+  "required_fields": [
+    "U"
+  ],
+  "sampling": {
+    "type": "spanwise_probe_array",
+    "frequency_requirement": "resolve_expected_shedding_frequency",
+    "stage_ref": "sampling"
+  },
+  "analysis": {
+    "method": "phase_and_sign_change_detection"
+  },
+  "capability_status": "UNRESOLVED"
+}
+```
+
+必须区分：
+
+### OpenFOAM 采样能力
+
+```text
+forces
+forceCoeffs
+probes
+fieldAverage
+wallShearStress
+surface sampling
+```
+
+### 外部分析能力
+
+```text
+FFT
+wake deflection fitting
+vortex tracking
+spanwise flip detection
+horseshoe vortex detection
+asymmetric separation analysis
+```
+
+---
+
+# 13. 动态 Schema
+
+不能为每个未知能力修改 Core Schema。
+
+采用：
+
+```text
+Core Schema
++
+Capability-specific Parameter Schema
+```
+
+例如：
+
+```json
+{
+  "capability_id": "boundary.helical_pulsating_inlet",
+  "parameter_schema": {
+    "swirl_number": {
+      "type": "number",
+      "minimum": 0
+    },
+    "frequency": {
+      "type": "number",
+      "exclusiveMinimum": 0
+    },
+    "amplitude": {
+      "type": "number"
+    },
+    "profile_type": {
+      "enum": [
+        "sinusoidal",
+        "tabulated"
+      ]
+    }
+  }
+}
+```
+
+RequestedCaseIR 可先写：
+
+```json
+{
+  "semantic_role": "helical_pulsating_inlet",
+  "capability_ref": null,
+  "parameters": {
+    "swirl_number": 0.6,
+    "frequency": 20,
+    "amplitude": 0.15
+  }
+}
+```
+
+验证并注册新能力后，再绑定 capability_ref。
+
+---
+
+# 14. 大模型多阶段拆解 Pipeline
+
+禁止采用：
+
+```text
+一次LLM调用
+→ 直接输出最终CaseIR和OpenFOAM配置
+```
+
+必须使用多 Pass 流水线。
+
+---
+
+## Pass 1：Fact Extractor
+
+只提取用户明确说出的事实。
+
+输出：
+
+* 实体；
+* 参数；
+* 初始条件；
+* 边界；
+* 时间顺序；
+* 研究目标；
+* 观测要求；
+* 约束；
+* 原始文本位置。
+
+规则：
+
+* 不补默认值；
+* 不推荐 solver；
+* 不映射 OpenFOAM；
+* 不添加用户没有说过的事实。
+
+---
+
+## Pass 2：Ambiguity and Conflict Detector
+
+识别：
+
+* 同一参数多个值；
+* 稳态与频谱冲突；
+* 二维与展向翻转冲突；
+* 等温与热流冲突；
+* 周期边界和几何冲突；
+* Re、U、D、ν不一致；
+* 出口语义不明确；
+* 研究目标互相矛盾。
+
+输出：
+
+```text
+ambiguities
+conflicts
+blocking_unknowns
+non_blocking_unknowns
+```
+
+---
+
+## Pass 3：Scientific Normalizer
+
+将用户描述标准化为科学语义。
+
+例如：
+
+```text
+全场静止
+→ quiescent initial velocity field
+
+壁面黏住
+→ no-slip wall intent
+
+自然流出
+→ unresolved outlet intent
+```
+
+如果存在多个候选解释，必须保留候选：
+
+```json
+{
+  "raw_text": "对流出口",
+  "candidate_concepts": [
+    {
+      "concept": "advective_outlet",
+      "confidence": 0.62
+    },
+    {
+      "concept": "non_reflecting_outlet",
+      "confidence": 0.38
+    }
+  ],
+  "status": "AMBIGUOUS"
+}
+```
+
+---
+
+## Pass 4：Entity / Region / Relation Builder
+
+生成：
+
+```text
+EntityGraph
+RegionGraph
+RelationGraph
+InterfaceGraph
+```
+
+识别：
+
+* 哪些是几何实体；
+* 哪些是流体区域；
+* 哪些是固体区域；
+* 实体之间的位置关系；
+* 区域之间如何耦合；
+* 哪些实体运动；
+* 哪些接口发生传热或质量交换。
+
+---
+
+## Pass 5：Physics Decomposer
+
+按照区域判断：
+
+* 方程类型；
+* 可压缩性；
+* 相态；
+* 热传递；
+* 湍流；
+* 材料模型；
+* 外力；
+* 旋转；
+* 多孔介质；
+* 运动和变形；
+* 多区域耦合。
+
+原则：
+
+> 先判断需要求解哪些物理量和方程，再判断应该使用什么 OpenFOAM solver module。
+
+---
+
+## Pass 6：Observable Decomposer
+
+将科学目标转化为：
+
+```text
+需要什么字段
+在哪里采样
+何时采样
+多高采样频率
+如何后处理
+需要哪些前置能力
+```
+
+例如：
+
+```text
+分析尾迹翻转
+→ 展向速度时序
+→ 展向探针阵列
+→ 稳定后的采样窗口
+→ 足够采样频率
+→ 翻转检测算法
+```
+
+不能直接将“尾迹翻转”映射为一个 probes function object。
+
+---
+
+## Pass 7：Atomic Requirement Decomposer
+
+把需求拆成最小可实现能力。
+
+近壁倾斜圆柱应拆成：
+
+```text
+单相不可压缩流
+三维瞬态
+LES WALE
+圆柱几何
+几何旋转
+近壁定位
+均匀速度入口
+对流出口
+无滑移边界
+周期边界
+尾迹网格加密
+近壁网格加密
+力系数采样
+展向速度采样
+尾迹偏斜分析
+展向翻转分析
+壁面涡结构分析
+频谱分析
+串行Smoke Test
+并行Smoke Test
+```
+
+---
+
+## Pass 8：Decomposition Critic
+
+独立检查：
+
+* 是否漏掉用户要求；
+* 是否添加用户未说内容；
+* 是否过早映射 OpenFOAM；
+* 是否存在未拆开的复合需求；
+* 是否遗漏多区域关系；
+* 是否遗漏观测所需采样；
+* 是否将新物理误判为普通配置；
+* 是否提出了不必要澄清；
+* 是否遗漏阻塞问题。
+
+Proposer 和 Critic 可以使用同一个模型，但必须是独立调用和独立 Prompt。
+
+---
+
+# 15. Requirement Coverage
+
+将用户原文拆成事实单元：
+
+```text
+F1 初始全场静止
+F2 入口均匀来流
+F3 圆柱无滑移
+F4 壁面无滑移
+F5 出口对流
+F6 展向周期
+F7 尾迹偏斜
+F8 展向翻转
+```
+
+每个事实必须映射到以下之一：
+
+```text
+CaseIR path
+Unresolved requirement
+Clarification question
+Explicit rejection
+```
+
+输出：
+
+```json
+{
+  "coverage": 1.0,
+  "facts": [
+    {
+      "fact_id": "F8",
+      "mapped_to": "/observables/wake_flip"
+    }
+  ]
+}
+```
+
+Coverage 未达到阈值时，禁止进入能力解析。
+
+建议阈值：
+
+```text
+用户明确事实覆盖率 = 100%
+```
+
+---
+
+# 16. 原子需求停止条件
+
+某项需求满足以下条件时停止拆解：
+
+1. 能映射到一个 Capability；
+2. 或能映射到一个明确 ExtensionSpec；
+3. 有清晰输入；
+4. 有清晰输出；
+5. 有独立验证方式；
+6. 不同时跨越多个责任模块；
+7. 进一步拆分不会改善编译和验证。
+
+例如：
+
+```text
+periodic boundary pair
+```
+
+可以作为原子能力。
+
+但：
+
+```text
+生成周期网格、运行LES并分析频谱
+```
+
+不能作为一个原子能力。
+
+---
+
+# 17. Requirement Dependency Graph
+
+除层级树外，还必须建立依赖图。
+
+支持边类型：
+
+```text
+REQUIRES
+CONFLICTS_WITH
+DERIVED_FROM
+MEASURED_BY
+IMPLEMENTED_BY
+VALIDATED_BY
+```
+
+例如：
+
+```text
+壁面热流指标
+REQUIRES 能量方程
+REQUIRES 温度字段
+REQUIRES 热物性
+REQUIRES 热边界
+MEASURED_BY wallHeatFlux capability
+```
+
+---
+
+# 18. 澄清策略
+
+只询问真正阻塞的问题。
+
+## 18.1 必须询问
+
+满足以下情况之一：
+
+* 不回答就无法确定物理体系；
+* 不同答案会导致不同 solver 或区域结构；
+* 参数无法推导；
+* 用户要求互相冲突；
+* 存在重大安全或计算资源风险。
+
+## 18.2 不需要询问
+
+可通过以下方式解决：
+
+* 公式推导；
+* 合理系统默认；
+* 模型推荐；
+* 已验证能力默认值；
+* Smoke Test 自动调整。
+
+## 18.3 交互规则
+
+* 一轮最多3个问题；
+* 同类问题合并；
+* 提供推荐选项；
+* 解释不同答案影响；
+* 用户回答后只更新相关 CaseIR 路径；
+* 不重新生成整个研究草案。
+
+---
+
+# 19. 四层 Schema 验证
+
+## 19.1 SchemaValidator
+
+检查：
+
+* 类型；
+* 必填字段；
+* 枚举；
+* 数值范围；
+* ID格式；
+* ParameterValue结构。
+
+---
+
+## 19.2 ReferenceValidator
+
+检查：
+
+* entity_ref 是否存在；
+* region_ref 是否存在；
+* interface 两端是否存在；
+* observable target 是否存在；
+* boundary target 是否属于正确区域；
+* derived constraint 引用是否合法。
+
+---
+
+## 19.3 ScientificConsistencyValidator
+
+检查：
+
+* 稳态与频谱冲突；
+* 二维与展向翻转冲突；
+* 热流和等温物理冲突；
+* LES与稳态冲突；
+* Re关系；
+* 周期方向与几何关系；
+* 多相指标与相分数场；
+* 力系数参考面积和方向；
+* 多阶段采样窗口。
+
+---
+
+## 19.4 CapabilityFeasibilityValidator
+
+检查：
+
+* 对应能力是否存在；
+* 能力是否 VERIFIED；
+* 平台版本是否匹配；
+* 依赖是否齐全；
+* 是否存在能力冲突；
+* 是否需要 Extension；
+* 是否违反安全策略。
+
+---
+
+# 20. Capability Registry
+
+## 20.1 能力分类
+
+至少支持：
+
+```text
+solver
+physics_model
+material_model
+geometry
+geometry_operation
+geometry_relation
+boundary_condition
+initial_condition
+mesh_strategy
+numerical_strategy
+observable
+post_processor
+validator
+executor
+```
+
+---
+
+## 20.2 能力结构
+
+```json
+{
+  "capability_id": "boundary.foundation13.periodic_pair",
+  "category": "boundary_condition",
+  "platform": {
+    "distribution": "OpenFOAMFoundation",
+    "version": "13"
+  },
+  "semantic_roles": [
+    "periodic_pair"
+  ],
+  "supports": {
+    "fields": ["U", "p", "k", "omega", "nut"],
+    "flow_families": ["incompressible"],
+    "dimensions": ["3D"]
+  },
+  "parameter_schema": {},
+  "dependencies": [
+    "mesh.periodic_face_compatibility"
+  ],
+  "conflicts": [],
+  "implementation": {
+    "type": "compiler_component",
+    "component_id": "foundation13_cyclic_mapper"
+  },
+  "validation_status": "VERIFIED",
+  "evidence_ids": []
+}
+```
+
+---
+
+## 20.3 能力状态
+
+```text
+DRAFT
+CANDIDATE
+VALIDATING
+VERIFIED
+DEPRECATED
+BLOCKED
+```
+
+只有 VERIFIED 能力可以用于正式提交。
+
+---
+
+# 21. Capability Resolution Engine
+
+输入：
+
+```text
+AtomicRequirementSet
+PlatformProfile
+CapabilityRegistry
+```
+
+输出：
+
+```text
+CapabilityResolutionPlan
+```
+
+对每项能力判断：
+
+## EXACT_SUPPORTED
+
+已有完全匹配且经过验证的能力组合。
+
+## COMPOSABLE_SUPPORTED
+
+没有完整案例模板，但所有原子能力已存在，可以动态组合。
+
+## EXTENDABLE
+
+缺少局部能力，可以通过配置、代码或分析组件扩展。
+
+## REQUIRES_NEW_PHYSICS
+
+当前物理体系无法表达，需要新增 BasePack、solver module 或物理耦合能力。
+
+## NEEDS_CLARIFICATION
+
+缺少阻塞信息或存在科学矛盾。
+
+## ENVIRONMENT_BLOCKED
+
+工作站、编译器、MPI或安全环境无法满足。
+
+---
+
+# 22. 未知 Case 的分类方式
+
+未知 Case 必须区分四种情况。
+
+## 22.1 参数未见过
+
+例如：
+
+```text
+Re=3900
+→ Re=5000
+```
+
+直接修改参数并重新验证，不创建新能力。
+
+## 22.2 组合未见过
+
+例如系统已有：
+
+* 倾斜圆柱；
+* 近壁定位；
+* 周期边界；
+* LES；
+* forceCoeffs。
+
+但从未组合过。
+
+处理：
+
+```text
+COMPOSABLE_SUPPORTED
+→ 动态组合
+→ 首次组合验证
+→ 保存VerifiedComposition
+```
+
+## 22.3 原子能力未见过
+
+例如新入口：
+
+```text
+脉动旋流入口
+```
+
+处理：
+
+```text
+EXTENDABLE
+→ ExtensionSpec
+→ 实现
+→ 原子测试
+→ 目标Case测试
+→ 注册VERIFIED
+```
+
+## 22.4 新物理未见过
+
+例如：
+
+* 热流体；
+* 多相；
+* 共轭传热；
+* 非牛顿；
+* 多孔介质；
+* 流固耦合。
+
+处理：
+
+```text
+REQUIRES_NEW_PHYSICS
+→ PhysicsExtensionSpec
+→ 新BasePack或Solver能力
+→ 基准验证
+→ 目标Case验证
+```
+
+---
+
+# 23. ResolvedCaseIR
+
+RequestedCaseIR 经能力解析后生成 ResolvedCaseIR。
+
+示例：
+
+```json
+{
+  "requested_case_ir_version": 3,
+
+  "runtime": {
+    "platform_profile": "openfoam-foundation-13",
+    "application": "foamRun",
+    "solver_module": "incompressibleFluid"
+  },
+
+  "resolved_physics": {
+    "time_mode": "transient",
+    "turbulence_capability": "turbulence.foundation13.LES.WALE"
+  },
+
+  "resolved_capabilities": [
+    {
+      "requirement_id": "R4",
+      "capability_id": "geometry.parametric.cylinder",
+      "validation_status": "VERIFIED"
+    },
+    {
+      "requirement_id": "R5",
+      "capability_id": "geometry.transform.rotate",
+      "validation_status": "VERIFIED"
+    }
+  ],
+
+  "composition_plan": {
+    "base_pack": "foundation13-incompressible-les-transient",
+    "geometry_components": [],
+    "boundary_components": [],
+    "mesh_components": [],
+    "observable_components": [],
+    "validation_components": []
+  }
+}
+```
+
+ResolvedCaseIR 是 Compiler 的唯一输入。
+
+---
+
+# 24. Solver 数据模型修正
+
+禁止保存：
+
+```json
+{
+  "solver": "pimpleFoam"
+}
+```
+
+统一使用：
+
+```json
+{
+  "runtime": {
+    "application": "foamRun",
+    "solver_module": "incompressibleFluid"
+  },
+  "physics": {
+    "time_mode": "transient"
+  },
+  "numerics": {
+    "pressure_velocity_coupling": "PIMPLE"
+  }
+}
+```
+
+必须区分：
+
+```text
+application
+solver module
+time mode
+coupling algorithm
+```
+
+---
+
+## 24.1 Legacy Migration
+
+```text
+simpleFoam
+→ incompressibleFluid
+→ steady
+→ SIMPLE
+
+pimpleFoam
+→ incompressibleFluid
+→ transient
+→ PIMPLE
+
+icoFoam
+→ incompressibleFluid
+→ transient
+→ laminar
+
+pisoFoam
+→ incompressibleFluid
+→ transient
+→ PIMPLE-compatible
+```
+
+迁移后不得继续保留旧 solver 字段。
+
+---
+
+# 25. 组件化模板体系
+
+完整案例模板无法覆盖全部问题。
+
+模板系统拆分为：
+
+```text
+BasePack
+GeometryComponent
+BoundaryComponent
+MeshComponent
+ObservableComponent
+PostProcessorComponent
+ValidationComponent
+```
+
+---
+
+## 25.1 BasePack
+
+第一批：
+
+```text
+foundation13-incompressible-laminar-transient
+foundation13-incompressible-rans-steady
+foundation13-incompressible-rans-transient
+foundation13-incompressible-les-transient
+```
+
+未来：
+
+```text
+foundation13-thermal-fluid
+foundation13-incompressible-vof
+foundation13-multiregion-cht
+```
+
+BasePack 负责：
+
+* 基础字段；
+* physicalProperties；
+* momentumTransport；
+* fvSchemes；
+* fvSolution；
+* controlDict；
+* solver command；
+* 基础验证计划。
+
+---
+
+## 25.2 Geometry Components
+
+第一批：
+
+```text
+box
+pipe
+cylinder
+sphere
+plane_wall
+circular_nozzle
+imported_stl
+rotate
+translate
+scale
+near_wall_relation
+multi_body_placement
+boolean_union
+boolean_subtract
+```
+
+新场景优先通过：
+
+```text
+基础几何
++ 几何变换
++ 几何关系
+```
+
+动态组合。
+
+---
+
+## 25.3 Boundary Components
+
+第一批：
+
+```text
+uniform_velocity_inlet
+developed_pipe_inlet
+pressure_outlet
+convective_outlet
+no_slip_wall
+slip_wall
+moving_wall
+symmetry_plane
+periodic_pair
+```
+
+每个组件声明：
+
+* 支持字段；
+* 参数；
+* 依赖；
+* 冲突；
+* Foundation 13 映射；
+* 验证证据。
+
+---
+
+## 25.4 Mesh Components
+
+第一批：
+
+```text
+block_mesh_basic
+body_refinement
+wake_refinement
+near_wall_refinement
+boundary_layer_refinement
+periodic_mesh_pairing
+snappy_surface_refinement
+```
+
+网格参数不能仅由 LLM 自由输出，必须结合：
+
+* 几何尺度；
+* Reynolds 数；
+* RANS或LES；
+* 近壁需求；
+* 指标；
+* 计算资源；
+* 目标 y+。
+
+---
+
+## 25.5 Observable Components
+
+第一批：
+
+```text
+forces
+force_coefficients
+pressure_coefficient
+wall_shear_stress
+probes
+field_average
+surface_average
+frequency_spectrum
+wake_deflection
+vortex_identification
+```
+
+动态扩展：
+
+```text
+spanwise_wake_flip
+horseshoe_vortex_detector
+asymmetric_separation_metric
+wall_heat_flux_asymmetry
+```
+
+---
+
+# 26. Deterministic Compiler
+
+新增：
+
+```text
+OpenFOAM13ComponentCompiler
+```
+
+输入：
+
+```text
+ResolvedCaseIR
+PlatformProfile
+Verified Components
+```
+
+输出：
+
+```text
+CompiledCase
+CompiledCaseManifest
+SourceMap
+ValidationPlan
+```
+
+---
+
+## 26.1 Compiler 职责
+
+* 合成 BasePack；
+* 生成几何；
+* 映射边界条件；
+* 生成物性；
+* 生成湍流字段；
+* 生成 fvSchemes；
+* 生成 fvSolution；
+* 生成 controlDict；
+* 生成 function objects；
+* 生成外部分析计划；
+* 生成网格流水线；
+* 生成并行配置；
+* 生成验证计划。
+
+---
+
+## 26.2 SourceMap
+
+每个生成项都要追溯来源：
+
+```json
+{
+  "file": "constant/physicalProperties",
+  "path": "nu",
+  "source": "/materials/fluid/kinematic_viscosity",
+  "value": 1.5e-5
+}
+```
+
+错误修复应修改 CaseIR 或能力组件，不直接修改最终字典。
+
+---
+
+# 27. OpenFOAM 静态验证
+
+新增：
+
+```text
+OpenFOAMCaseStaticValidator
+```
+
+---
+
+## 27.1 Patch 一致性
+
+检查：
+
+```text
+mesh patches
+0/U patches
+0/p patches
+turbulence field patches
+function object patches
+sampling patches
+```
+
+必须一致。
+
+---
+
+## 27.2 Solver 和文件结构
+
+当：
+
+```text
+solver_module = incompressibleFluid
+```
+
+必须存在：
+
+```text
+constant/physicalProperties
+constant/momentumTransport
+```
+
+发现：
+
+```text
+constant/transportProperties
+```
+
+必须拒绝。
+
+---
+
+## 27.3 湍流依赖
+
+```text
+laminar
+→ U
+→ p
+
+kOmegaSST
+→ U
+→ p
+→ k
+→ omega
+→ nut
+
+SpalartAllmaras
+→ U
+→ p
+→ nuTilda
+→ nut
+
+LES WALE
+→ U
+→ p
+→ nut
+```
+
+检查：
+
+* 字段存在；
+* class正确；
+* internalField正确；
+* patch完整；
+* fvSchemes完整；
+* fvSolution完整。
+
+---
+
+## 27.4 稳态与瞬态
+
+如果用户要求：
+
+* 频谱；
+* 涡脱落；
+* 瞬态尾迹；
+* 展向翻转；
+
+不得生成稳态 Case。
+
+---
+
+## 27.5 周期边界
+
+检查：
+
+* 两个 patch 成对；
+* 所有字段一致；
+* 网格面匹配；
+* 并行分解后有效。
+
+---
+
+## 27.6 Function Objects
+
+检查：
+
+* 类型存在；
+* patch存在；
+* 参数完整；
+* Aref、lRef大于0；
+* dragDir、liftDir非零；
+* probes位置有效；
+* 字段存在；
+* 热流指标存在能量方程。
+
+---
+
+## 27.7 安全检查
+
+最终 Case 中禁止：
+
+```text
+codeStream
+coded boundary
+arbitrary libs
+external include
+shell variables
+systemCall
+arbitrary executable
+Allrun
+```
+
+受控扩展环境可以生成和编译代码，但只有已验证、已注册、allowlist 内的能力才能进入正式 Case。
+
+---
+
+# 28. 工作站验证闭环
+
+状态：
+
+```text
+COMPILED
+→ STATIC_VALIDATED
+→ DICTIONARY_VALIDATED
+→ MESH_BUILT
+→ MESH_VALIDATED
+→ SERIAL_SMOKE_TEST_PASSED
+→ PARALLEL_SMOKE_TEST_PASSED
+→ READY_TO_SUBMIT
+```
+
+---
+
+## 28.1 Dictionary Validation
+
+```bash
+foamDictionary system/controlDict -entry solver
+foamDictionary constant/physicalProperties
+foamDictionary constant/momentumTransport
+```
+
+---
+
+## 28.2 Mesh Validation
+
+```bash
+blockMesh
+```
+
+或：
+
+```bash
+blockMesh
+surfaceFeatureExtract
+snappyHexMesh -overwrite
+```
+
+然后：
+
+```bash
+checkMesh -allTopology -allGeometry
+```
+
+解析：
+
+* negative volume；
+* non-manifold；
+* illegal faces；
+* cyclic mismatch；
+* skewness；
+* non-orthogonality；
+* aspect ratio；
+* topology failure。
+
+不能只看退出码。
+
+---
+
+## 28.3 Serial Smoke Test
+
+在临时副本中缩短计算：
+
+```bash
+timeout 120 foamRun -solver incompressibleFluid
+```
+
+检查：
+
+* exit code；
+* FOAM FATAL ERROR；
+* Floating point exception；
+* NaN；
+* Inf；
+* Courant 数；
+* residual；
+* function object 初始化；
+* 时间目录；
+* 预期输出。
+
+---
+
+## 28.4 Parallel Smoke Test
+
+如果正式任务使用并行：
+
+```bash
+decomposePar -force
+mpirun -np 2 foamRun -solver incompressibleFluid -parallel
+```
+
+---
+
+## 28.5 提交门禁
+
+只有：
+
+```text
+READY_TO_SUBMIT
+```
+
+可以调用正式提交 API。
+
+任何 CaseIR、能力组合或编译器版本变化后，旧验证 evidence 自动失效。
+
+---
+
+# 29. 未知能力扩展
+
+## 29.1 ConfigExtensionSpec
+
+适用于：
+
+* 新字典映射；
+* 新边界组合；
+* 新 function object；
+* 新参数 Schema；
+* 新模板组件。
+
+---
+
+## 29.2 CodeExtensionSpec
+
+适用于：
+
+* Python 前处理器；
+* 几何生成器；
+* 网格生成器；
+* 后处理算法；
+* 必要的 OpenFOAM C++ 扩展。
+
+必须声明：
+
+```text
+inputs
+outputs
+dependencies
+security constraints
+fallback behavior
+unit tests
+benchmark tests
+target case tests
+```
+
+---
+
+## 29.3 PhysicsExtensionSpec
+
+适用于：
+
+* 新 solver module；
+* 新方程；
+* 新相态；
+* 新材料模型；
+* 多区域耦合；
+* 能量方程；
+* 多孔介质；
+* 共轭传热。
+
+必须声明：
+
+```text
+physical scope
+governing equations
+required fields
+solver module
+boundary requirements
+validation benchmark
+conservation checks
+applicability limits
+```
+
+---
+
+# 30. UnknownCapabilityOrchestrator
+
+输入：
+
+```text
+RequestedCaseIR
+AtomicRequirementSet
+CapabilityResolutionPlan
+ExtensionSpec
+PlatformProfile
+```
+
+执行：
+
+```text
+创建Checkpoint
+→ 生成候选能力
+→ 静态安全扫描
+→ 构建候选组件
+→ 原子单元测试
+→ 最小OpenFOAM案例测试
+→ 目标Case Smoke Test
+→ 保存Evidence
+→ 保存Test Manifest
+→ 注册VERIFIED Capability
+→ 恢复原Case
+→ 重新Capability Resolution
+→ 重新编译
+```
+
+失败状态：
+
+```text
+EXTENSION_VALIDATION_FAILED
+UNSUPPORTED_PHYSICS
+ENVIRONMENT_BLOCKED
+```
+
+不得伪成功。
+
+---
+
+# 31. 自动修复
+
+修复优先级：
+
+```text
+错误分类
+→ 确定性规则修复
+→ 重新Resolve
+→ 重新编译
+→ 重新验证
+→ LLM结构化诊断
+→ CaseIR JSON Patch
+→ 重新完整流程
+```
+
+LLM 只能输出：
+
+```json
+{
+  "diagnosis": "LES case uses an excessive maximum Courant number.",
+  "error_category": "NUMERICAL_DIVERGENCE",
+  "patches": [
+    {
+      "op": "replace",
+      "path": "/numerical_intent/max_courant_number/value",
+      "value": 0.5
+    }
+  ],
+  "confidence": 0.87
+}
+```
+
+禁止直接返回 OpenFOAM 文件内容。
+
+自动修复最多两轮：
+
+```text
+第一轮：确定性修复
+第二轮：LLM结构化Patch
+```
+
+仍失败则：
+
+```text
+VALIDATION_FAILED
+```
+
+---
+
+# 32. Session 与多轮修改
+
+同一个 Session 中：
+
+```text
+用户提出修改
+→ 定位受影响的RequestedCaseIR路径
+→ 生成变更摘要
+→ 用户确认
+→ 创建新CaseIR版本
+→ 旧ResolvedCaseIR失效
+→ 旧CompiledCase失效
+→ 旧Validation Evidence失效
+→ 重新Capability Resolution
+→ 重新编译和验证
+```
+
+禁止：
+
+* 修改一次就创建新 Session；
+* 覆盖未修改字段；
+* 重新提问已经确认的问题；
+* 复用旧验证结果。
+
+---
+
+# 33. 状态机
+
+完整状态机：
+
+```text
+DRAFT
+→ FACTS_EXTRACTED
+→ AMBIGUITIES_ANALYZED
+→ REQUESTED_CASE_IR_CREATED
+→ REQUESTED_CASE_IR_VALIDATED
+→ REQUIREMENT_COVERAGE_VALIDATED
+→ REQUIREMENTS_DECOMPOSED
+→ CAPABILITY_RESOLVING
+```
+
+分支：
+
+```text
+CAPABILITY_RESOLVED
+NEEDS_EXTENSION
+NEEDS_NEW_PHYSICS
+NEEDS_CLARIFICATION
+ENVIRONMENT_BLOCKED
+```
+
+成功路径：
+
+```text
+CAPABILITY_RESOLVED
+→ RESOLVED_CASE_IR_VALIDATED
+→ COMPILED
+→ STATIC_VALIDATED
+→ DICTIONARY_VALIDATED
+→ MESH_BUILT
+→ MESH_VALIDATED
+→ SERIAL_SMOKE_TEST_PASSED
+→ PARALLEL_SMOKE_TEST_PASSED
+→ READY_TO_SUBMIT
+→ SUBMITTED
+→ RUNNING
+→ COMPLETED
+```
+
+扩展路径：
+
+```text
+NEEDS_EXTENSION
+→ EXTENSION_SPEC_CREATED
+→ EXTENSION_IMPLEMENTED
+→ EXTENSION_VALIDATING
+→ CAPABILITY_REGISTERED
+→ CAPABILITY_RESOLVING
+```
+
+---
+
+# 34. 错误分类
+
+## 34.1 上游理解错误
+
+```text
+FACT_EXTRACTION_INCOMPLETE
+FACT_HALLUCINATION
+AMBIGUITY_NOT_PRESERVED
+ENTITY_RELATION_ERROR
+REGION_DECOMPOSITION_ERROR
+PHYSICS_DECOMPOSITION_ERROR
+OBSERVABLE_DECOMPOSITION_ERROR
+COMPOSITE_REQUIREMENT_NOT_SPLIT
+REQUIREMENT_COVERAGE_INCOMPLETE
+CONTRADICTION_NOT_DETECTED
+PREMATURE_IMPLEMENTATION_MAPPING
+OVER_CLARIFICATION
+BLOCKING_CLARIFICATION_MISSED
+```
+
+## 34.2 能力解析错误
+
+```text
+CAPABILITY_NOT_FOUND
+CAPABILITY_DEPENDENCY_MISSING
+CAPABILITY_CONFLICT
+CAPABILITY_NOT_VERIFIED
+COMPOSITION_ERROR
+REQUIRES_NEW_PHYSICS
+```
+
+## 34.3 编译和运行错误
+
+```text
+PLATFORM_VERSION_MISMATCH
+RESOLVED_CASE_IR_ERROR
+COMPILATION_ERROR
+CONFIG_SYNTAX_ERROR
+CROSS_FILE_SEMANTIC_ERROR
+BOUNDARY_MAPPING_ERROR
+FIELD_DEPENDENCY_ERROR
+FUNCTION_OBJECT_ERROR
+MESH_GENERATION_ERROR
+MESH_TOPOLOGY_ERROR
+MESH_QUALITY_ERROR
+NUMERICAL_DIVERGENCE
+COURANT_NUMBER_EXCEEDED
+FLOATING_POINT_ERROR
+WORKSTATION_ENVIRONMENT_ERROR
+OPENFOAM_COMMAND_NOT_FOUND
+MPI_EXECUTION_ERROR
+VALIDATION_TIMEOUT
+ENVIRONMENT_BLOCKED
+```
+
+---
+
+# 35. 前端交互
+
+页面展示真实阶段：
+
+```text
+正在提取研究条件
+正在检查歧义和冲突
+正在构建物理问题
+正在拆解所需能力
+已识别可复用能力
+发现需要扩展的能力
+正在验证新能力
+正在编译OpenFOAM Case
+正在检查网格
+正在进行预运行
+预运行通过
+可以提交
+```
+
+能力状态显示：
+
+```text
+已支持
+可组合
+待扩展
+需要新物理
+需要确认
+环境受阻
+```
+
+提交按钮仅在 READY_TO_SUBMIT 时启用。
+
+---
+
+# 36. 可观测性与指标
+
+记录：
+
+```text
+session_id
+study_id
+case_id
+case_ir_version
+schema_version
+platform_profile
+capability_ids
+compiler_version
+validation_stage
+command
+exit_code
+duration
+error_code
+repair_attempt
+```
+
+核心指标：
+
+```text
+fact coverage rate
+hallucinated fact rate
+unresolved retention rate
+clarification necessity rate
+capability matching accuracy
+new physics detection accuracy
+composition success rate
+extension success rate
+compile pass rate
+static validation pass rate
+mesh validation pass rate
+serial smoke pass rate
+parallel smoke pass rate
+first-attempt submit success rate
+auto-repair recovery rate
+false-ready rate
+```
+
+其中：
+
+```text
+false-ready rate
+```
+
+必须接近0。
+
+---
+
+# 37. 必须通过的端到端场景
+
+## 场景一：近壁倾斜圆柱
+
+条件：
+
+* Re=3900；
+* 三维；
+* 瞬态；
+* 初始静止；
+* 均匀来流；
+* 圆柱和壁面无滑移；
+* 对流出口；
+* 展向周期；
+* 尾迹偏斜；
+* 展向翻转；
+* 壁面涡结构；
+* Cd、Cl；
+* 频谱。
+
+验收：
+
+* 事实覆盖100%；
+* 正确拆解能力；
+* 不依赖完整 Case 模板；
+* 已有能力动态组合；
+* 展向翻转指标缺失时进入 Observable Extension；
+* 完成真实工作站 Smoke Test。
+
+---
+
+## 场景二：45°倾斜冲击射流
+
+条件：
+
+* Re=23000；
+* 喷嘴直径 D；
+* 距壁面2D；
+* 初始静止；
+* 充分发展入口；
+* 壁面无滑移；
+* 压力出口；
+* 展向周期；
+* 壁面压力；
+* 热流不对称；
+* 马蹄涡；
+* 非对称分离。
+
+验收：
+
+* 充分发展入口保留候选实现策略；
+* 热流需求触发能量方程判断；
+* 当前无热流体能力时进入 REQUIRES_NEW_PHYSICS；
+* 不伪造 wallHeatFlux；
+* 已有非热能力不被丢弃；
+* 扩展后恢复原 Case。
+
+---
+
+## 场景三：复杂未知组合
+
+输入：
+
+> 脉动旋流椭圆射流以30°冲击带孔恒温移动壁面，研究壁面热流非对称、旋涡进动频率和孔隙附近压力脉动。
+
+必须拆解：
+
+```text
+不可压缩瞬态
+热传递
+椭圆喷嘴
+几何旋转
+30°定位
+脉动入口
+旋流入口
+移动壁面
+恒温壁面
+带孔几何
+热流采样
+压力探针
+频谱
+旋涡进动检测
+```
+
+分别判断：
+
+```text
+SUPPORTED
+COMPOSABLE
+EXTENDABLE
+REQUIRES_NEW_PHYSICS
+```
+
+不得返回“找不到模板”。
+
+---
+
+## 场景四：物理冲突
+
+输入同时要求：
+
+* 二维；
+* 稳态；
+* 展向翻转；
+* 涡脱落频谱。
+
+系统必须：
+
+* 检测冲突；
+* 阻止编译；
+* 只询问必要问题；
+* 不静默修改用户研究目标。
+
+---
+
+## 场景五：多区域共轭传热
+
+包含：
+
+* 流体区域；
+* 固体壁；
+* 流固接口；
+* 固体导热；
+* 外壁恒温；
+* 壁面热流。
+
+必须正确构建：
+
+```text
+regions
+interfaces
+physics dependencies
+new BasePack requirement
+```
+
+不能只生成：
+
+```text
+thermal=true
+```
+
+---
+
+# 38. 测试体系
+
+## 38.1 单元测试
+
+至少覆盖：
+
+* PlatformProfile；
+* RequestedCaseIR；
+* ParameterValue；
+* entity/region/reference；
+* dimensional consistency；
+* FactExtractor；
+* AmbiguityDetector；
+* RequirementCoverage；
+* AtomicDecomposer；
+* RequirementDependencyGraph；
+* CapabilityRegistry；
+* CapabilityResolver；
+* Dynamic Capability Schema；
+* Legacy solver migration；
+* Boundary mapper；
+* Turbulence dependencies；
+* CaseIR Patch whitelist；
+* Evidence version binding。
+
+---
+
+## 38.2 组合测试
+
+构造没有完整模板，但所有组件均存在的 Case。
+
+验证：
+
+```text
+没有完整模板
+→ 动态组合
+→ 编译
+→ Smoke Test
+```
+
+---
+
+## 38.3 扩展测试
+
+分别构造：
+
+* 新入口剖面；
+* 新几何组件；
+* 新后处理指标；
+* 新热物理。
+
+验证：
+
+```text
+识别原子能力缺口
+→ ExtensionSpec
+→ 实现
+→ 验证
+→ 注册
+→ 恢复原Case
+```
+
+---
+
+## 38.4 失败测试
+
+必须包含：
+
+* patch不一致；
+* 缺少omega；
+* 错误transportProperties；
+* cyclic patch不成对；
+* 热流指标无能量方程；
+* 未验证能力被使用；
+* 用户事实被遗漏；
+* 模型添加不存在事实；
+* 新物理被误判为配置扩展；
+* 扩展验证失败；
+* 工作站不可用；
+* MPI不可用；
+* 修改CaseIR后复用旧Evidence。
+
+---
+
+# 39. 实施阶段
+
+## Phase 1：Foundation 13 清理
+
+完成：
+
+* PlatformProfile；
+* v2406清理；
+* solver字段重构；
+* legacy migration；
+* physicalProperties修正；
+* 平台探测。
+
+---
+
+## Phase 2：复杂 RequestedCaseIR
+
+完成：
+
+* Core Schema；
+* entities；
+* regions；
+* relations；
+* interfaces；
+* operating stages；
+* observables；
+* assumptions；
+* ambiguities；
+* unresolved requirements；
+* versioning。
+
+---
+
+## Phase 3：多 Pass LLM Pipeline
+
+完成：
+
+* FactExtractor；
+* AmbiguityDetector；
+* ScientificNormalizer；
+* EntityRelationBuilder；
+* PhysicsDecomposer；
+* ObservableDecomposer；
+* AtomicRequirementDecomposer；
+* DecompositionCritic；
+* RequirementCoverage。
+
+---
+
+## Phase 4：四层 Validator
+
+完成：
+
+* SchemaValidator；
+* ReferenceValidator；
+* ScientificConsistencyValidator；
+* CapabilityFeasibilityValidator；
+* DimensionalConsistencyValidator。
+
+---
+
+## Phase 5：Capability System
+
+完成：
+
+* CapabilityRegistry；
+* Dynamic Capability Schema；
+* Dependency Graph；
+* Conflict Rules；
+* CapabilityResolver；
+* Gap Analyzer；
+* ResolutionPlan；
+* ResolvedCaseIR。
+
+---
+
+## Phase 6：组件化 Compiler
+
+完成：
+
+* BasePack；
+* Geometry Components；
+* Boundary Components；
+* Mesh Components；
+* Observable Components；
+* deterministic compiler；
+* SourceMap；
+* CompilationManifest。
+
+---
+
+## Phase 7：真实验证
+
+完成：
+
+* StaticValidator；
+* DictionaryValidator；
+* MeshValidator；
+* Serial Smoke Test；
+* Parallel Smoke Test；
+* READY_TO_SUBMIT门禁。
+
+---
+
+## Phase 8：未知能力扩展
+
+完成：
+
+* ConfigExtensionSpec；
+* CodeExtensionSpec；
+* PhysicsExtensionSpec；
+* UnknownCapabilityOrchestrator；
+* 原子测试；
+* 目标Case测试；
+* Evidence；
+* Registry注册；
+* Case恢复。
+
+---
+
+## Phase 9：前端和多轮对话
+
+完成：
+
+* 状态展示；
+* 能力缺口展示；
+* 最小澄清；
+* 修改摘要；
+* CaseIR版本；
+* Evidence失效；
+* 提交门禁。
+
+---
+
+## Phase 10：端到端验收
+
+完成五个复杂场景和真实工作站验证。
+
+---
+
+# 40. 每阶段提交要求
+
+每个 Phase 单独 commit。
+
+每次提交必须说明：
+
+```text
+修改文件
+新增模块
+删除或迁移的旧逻辑
+数据结构变化
+测试命令
+测试结果
+真实工作站结果
+未解决问题
+下一阶段计划
+```
+
+禁止一次性混合提交全部改动。
+
+---
+
+# 41. 最终交付物
+
+必须包含：
+
+```text
+1. OpenFOAM Foundation 13 PlatformProfile
+2. StudyDraft模型
+3. RequestedCaseIR Schema
+4. ResolvedCaseIR Schema
+5. ParameterValue和单位体系
+6. Entity/Region/Relation/Interface模型
+7. OperatingStage模型
+8. Observable模型
+9. Dynamic Capability Schema
+10. FactExtractor
+11. AmbiguityDetector
+12. ScientificNormalizer
+13. EntityRelationBuilder
+14. PhysicsDecomposer
+15. ObservableDecomposer
+16. AtomicRequirementDecomposer
+17. DecompositionCritic
+18. RequirementCoverage
+19. RequirementDependencyGraph
+20. 四层Validator
+21. DimensionalConsistencyValidator
+22. CapabilityRegistry
+23. CapabilityResolutionEngine
+24. CapabilityGapAnalyzer
+25. BasePack
+26. Geometry Components
+27. Boundary Components
+28. Mesh Components
+29. Observable Components
+30. OpenFOAM13ComponentCompiler
+31. SourceMap
+32. StaticValidator
+33. Workstation Smoke-Test Runner
+34. ConfigExtensionSpec
+35. CodeExtensionSpec
+36. PhysicsExtensionSpec
+37. UnknownCapabilityOrchestrator集成
+38. Validation Evidence
+39. Test Manifest
+40. Session和CaseIR版本管理
+41. 前端状态机
+42. 提交门禁
+43. 五个复杂端到端场景
+44. 架构说明文档
+```
+
+---
+
+# 42. 最终验收标准
+
+## 42.1 复杂需求理解
+
+* 用户事实覆盖率达到100%；
+* 用户未提及内容不会被当作事实；
+* 歧义和冲突能够保留；
+* 支持实体、区域、关系和接口；
+* 支持多阶段工况；
+* 支持参数来源、置信度和假设；
+* 支持动态能力参数。
+
+## 42.2 大模型拆解
+
+* 使用多 Pass Pipeline；
+* 不一次生成最终 Case；
+* 具有独立 Critic；
+* 能输出原子需求；
+* 具有明确停止条件；
+* 能构建依赖图；
+* 只询问阻塞问题；
+* 新物理不会误判为普通配置。
+
+## 42.3 未知 Case
+
+* 不依赖完整案例模板；
+* 能识别参数变化、组合变化、原子能力变化和新物理；
+* 能动态组合已有能力；
+* 能受控扩展缺失能力；
+* 扩展后能恢复原 Case；
+* 未验证能力不能正式使用。
+
+## 42.4 OpenFOAM 可靠性
+
+* 唯一锁定 Foundation 13；
+* 无 v2406 混用；
+* 无 legacy solver 双重状态；
+* LLM 不生成最终字典；
+* Compiler 确定性；
+* 跨文件验证完整；
+* 网格验证完整；
+* 串行和并行 Smoke Test；
+* 未通过验证不能提交。
+
+## 42.5 用户体验
+
+* 同一 Session 内持续修改；
+* 不重复询问已确认内容；
+* 修改后仅更新相关路径；
+* 页面展示真实处理阶段；
+* 能查看能力缺口；
+* 能查看失败原因；
+* 不再出现“生成成功但提交立即失败”。
+
+---
+
+# 43. 执行优先级
+
+不要立即开始堆更多完整模板。
+
+优先顺序必须是：
+
+```text
+1. Foundation 13版本清理
+2. RequestedCaseIR和复杂Schema
+3. 多Pass大模型拆解
+4. Requirement Coverage和Critic
+5. Capability Registry与Resolver
+6. 组件化Compiler
+7. 真实Smoke Test门禁
+8. Unknown Capability扩展
+9. 前端交互
+```
+
+---
+
+# 44. 核心结论
+
+本系统最终不能是：
+
+```text
+自然语言
+→ 模型生成OpenFOAM文件
+→ 失败后继续让模型修文件
+```
+
+也不能是：
+
+```text
+自然语言
+→ 匹配完整模板
+→ 找不到模板就失败
+```
+
+最终架构必须是：
+
+```text
+LLM忠实理解复杂科研需求
+→ Schema保存全部科学语义
+→ 多阶段拆解原子能力
+→ Capability Resolver判断已有、可组合、需扩展和新物理
+→ 确定性Compiler生成OpenFOAM Foundation 13 Case
+→ ValidationRunner在真实工作站证明可运行
+→ 新能力验证后沉淀到Registry
+```
+
+核心原则：
+
+> LLM 负责理解，Schema 负责表达，Capability System 负责判断与成长，Compiler 负责确定性生成，ValidationRunner 负责证明，只有真实验证通过的 Case 才能提交。

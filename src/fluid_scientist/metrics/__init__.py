@@ -558,6 +558,10 @@ class GoalToMetricCompiler:
         seen_ids: set[str] = set()
 
         for goal in analysis_goals:
+            if isinstance(goal, str):
+                goal = {"goal_id": goal, "phenomenon": goal, "target_quantity": goal}
+            if not isinstance(goal, dict):
+                continue
             goal_id = goal.get("goal_id", "")
             phenomenon = goal.get("phenomenon", "").lower()
             target_qty = goal.get("target_quantity", "").lower()

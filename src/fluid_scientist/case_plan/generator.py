@@ -214,41 +214,14 @@ class CasePlanGenerator:
         return self._auto_select_solver(draft.physics_models)
 
     def _auto_select_solver(self, physics: dict) -> str:
-        """Auto-select a solver based on physics models.
+        """Select the Foundation 13 solver module.
 
-        Selection logic (in priority order):
-        - buoyancy present        -> buoyantPimpleFoam
-        - turbulent + transient   -> pimpleFoam
-        - turbulent + steady      -> simpleFoam
-        - laminar + transient     -> pisoFoam
-        - laminar + steady        -> simpleFoam
-        - default                 -> pimpleFoam
-
-        ``turbulent`` and ``temporal`` must be *explicitly* present in the
-        physics dict for the specific rules to apply.  When either key is
-        absent the system falls back to the default (pimpleFoam).
+        Foundation 13 uses foamRun -solver <module> instead of individual
+        solver executables. For incompressible flow we always use
+        incompressibleFluid; the time_mode (steady/transient) is handled
+        separately in the controlDict.
         """
-        if physics.get("buoyancy", False):
-            return "buoyantPimpleFoam"
-
-        turbulent = physics.get("turbulent")
-        temporal = physics.get("temporal")
-
-        if turbulent is True:
-            if temporal == "transient":
-                return "pimpleFoam"
-            if temporal == "steady":
-                return "simpleFoam"
-            return "pimpleFoam"
-
-        if turbulent is False:
-            if temporal == "transient":
-                return "pisoFoam"
-            if temporal == "steady":
-                return "simpleFoam"
-            return "pimpleFoam"
-
-        return "pimpleFoam"
+        return "incompressibleFluid"
 
     def _determine_dimensions(self, draft: ExperimentDraft) -> str:
         """Determine 2D or 3D from geometry or physics models."""
@@ -340,9 +313,21 @@ class CasePlanGenerator:
                     "writeControl": "timeStep",
                     "writeInterval": 100,
                 }
+        time_control = plan.get("time_control", {})
+        if isinstance(time_control, dict):
+            if "endTime" not in plan and time_control.get("end_time") is not None:
+                plan["endTime"] = time_control["end_time"]
+            if "deltaT" not in plan and time_control.get("delta_t") is not None:
+                plan["deltaT"] = time_control["delta_t"]
+            if "writeInterval" not in plan and time_control.get("write_interval") is not None:
+                plan["writeInterval"] = time_control["write_interval"]
+        if "endTime" not in plan and plan.get("end_time") is not None:
+            plan["endTime"] = plan["end_time"]
+        if "deltaT" not in plan and plan.get("delta_t") is not None:
+            plan["deltaT"] = plan["delta_t"]
         # Override with values from control_parameters if present
         for param in draft.control_parameters:
-            pid = param.parameter_id.lower()
+            pid = param.parameter_id.lower().replace("_", "")
             if pid == "endtime" and param.value is not None:
                 plan["endTime"] = param.value
             elif pid == "deltat" and param.value is not None:

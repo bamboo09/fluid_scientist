@@ -1,0 +1,14 @@
+{
+  "skill_id": "openfoam13.platform.discovery",
+  "version": "1.0.0",
+  "category": "openfoam",
+  "summary": "在真实工作站探测 Foundation 13、求解模块、边界和后处理能力。",
+  "entrypoint": "fluid_skills.runtime.openfoam13:platform_discovery",
+  "deterministic": true,
+  "dependencies": [],
+  "platform": {
+    "distribution": "OpenFOAMFoundation",
+    "version": "13"
+  },
+  "validation_status": "CANDIDATE"
+}

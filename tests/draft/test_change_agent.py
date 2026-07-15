@@ -9,6 +9,16 @@ from fluid_scientist.draft.models import (
     ExperimentDraft,
     ParameterSource,
 )
+from fluid_scientist.llm import LLMClient
+
+
+class _FieldMappingLLM(LLMClient):
+    def __init__(self, changes: list[dict]) -> None:
+        super().__init__()
+        self._changes = changes
+
+    def _mock_response(self, purpose, user_message, output_schema):
+        return {"changes": self._changes}
 
 
 def _make_draft(**kwargs) -> ExperimentDraft:
@@ -35,6 +45,12 @@ def _make_draft(**kwargs) -> ExperimentDraft:
                 unit="m",
                 source=ParameterSource.USER_PROVIDED,
             ),
+            DraftParameter(
+                parameter_id="end_time",
+                display_name="end_time",
+                value=20,
+                source=ParameterSource.DERIVED,
+            ),
         ],
         requested_outputs=[{"name": "drag"}],
         analysis_goals=["Study wake"],
@@ -58,6 +74,58 @@ class TestDraftChangeAgent:
         proposal = agent.generate(draft, "viscosity=0.001")
         add_changes = [c for c in proposal.changes if c.change_type == "add_parameter"]
         assert len(add_changes) >= 1
+
+    def test_chinese_and_compact_aliases_update_existing_parameters(self) -> None:
+        draft = _make_draft()
+        proposal = DraftChangeAgent().generate(
+            draft, "把雷诺数修改为4000，endtime改为40"
+        )
+
+        assert [change.change_type for change in proposal.changes] == [
+            "set_parameter",
+            "set_parameter",
+        ]
+        assert [change.target_path for change in proposal.changes] == [
+            "control_parameters.reynolds_number",
+            "control_parameters.end_time",
+        ]
+        assert [change.new_value for change in proposal.changes] == [4000, 40]
+
+    def test_llm_maps_only_to_existing_parameter_ids(self) -> None:
+        agent = DraftChangeAgent(
+            llm_client=_FieldMappingLLM(
+                [
+                    {
+                        "target_parameter_id": "reynolds_number",
+                        "new_value": 4000,
+                        "reason": "雷诺数对应现有 Re 字段",
+                    },
+                    {
+                        "target_parameter_id": "end_time",
+                        "new_value": 40,
+                    },
+                ]
+            )
+        )
+        proposal = agent.generate(
+            _make_draft(), "把雷诺数修改为4000，endtime改为40"
+        )
+
+        assert [change.target_path for change in proposal.changes] == [
+            "control_parameters.reynolds_number",
+            "control_parameters.end_time",
+        ]
+
+    def test_llm_invented_field_is_rejected_and_falls_back(self) -> None:
+        agent = DraftChangeAgent(
+            llm_client=_FieldMappingLLM(
+                [{"target_parameter_id": "invented_field", "new_value": 1}]
+            )
+        )
+        proposal = agent.generate(_make_draft(), "Re=4200")
+
+        assert len(proposal.changes) == 1
+        assert proposal.changes[0].target_path == "control_parameters.reynolds_number"
 
     def test_bc_change_detected(self) -> None:
         draft = _make_draft()

@@ -1,0 +1,640 @@
+{
+  "session_id": "spec_24ba68f3d99f",
+  "created_at": "2026-07-14T09:35:15.698754+00:00",
+  "spec_id": "spec_24ba68f3d99f",
+  "spec": {
+    "schema_version": "1.0",
+    "spec_version": 4,
+    "case_family": "cylinder_flow_2d",
+    "pipeline_id": "cylinder-flow-2d-v1",
+    "pipeline_stage": "DRAFT_NORMALIZED",
+    "domain": {
+      "length_m": {
+        "value": 6.0,
+        "source": "MODEL_RECOMMENDED",
+        "status": "AWAITING_CONFIRMATION",
+        "confidence": 0.5,
+        "reason": null
+      },
+      "height_m": {
+        "value": 4.0,
+        "source": "MODEL_RECOMMENDED",
+        "status": "AWAITING_CONFIRMATION",
+        "confidence": 0.6,
+        "reason": null
+      },
+      "thickness_m": {
+        "value": 1.0,
+        "source": "SYSTEM_DEFAULT",
+        "status": "RESOLVED",
+        "confidence": 1.0,
+        "reason": "2D single-layer extrusion default"
+      },
+      "dimensionality": "2D"
+    },
+    "fluid": {
+      "type": {
+        "value": "water",
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "confidence": 0.7,
+        "reason": "默认推荐水作为流体"
+      },
+      "temperature_c": {
+        "value": 20.0,
+        "source": "MODEL_RECOMMENDED",
+        "status": "AWAITING_CONFIRMATION",
+        "confidence": 0.7,
+        "reason": null
+      },
+      "density_kg_m3": {
+        "value": 998.0,
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "confidence": 0.7,
+        "reason": null
+      },
+      "kinematic_viscosity_m2_s": {
+        "value": 1.004e-06,
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "confidence": 0.7,
+        "reason": null
+      }
+    },
+    "cylinder": {
+      "type": "cylinder",
+      "radius_m": {
+        "value": 0.1,
+        "source": "USER_EXPLICIT",
+        "status": "RESOLVED",
+        "confidence": 1.0,
+        "reason": "用户明确指定"
+      },
+      "diameter_m": {
+        "value": 0.2,
+        "source": "FORMULA_DERIVED",
+        "status": "RESOLVED",
+        "confidence": 1.0,
+        "reason": "Derived from radius (0.1 m): D = 2R"
+      },
+      "characteristic_dimension_m": {
+        "value": 0.2,
+        "source": "FORMULA_DERIVED",
+        "status": "RESOLVED",
+        "confidence": 1.0,
+        "reason": "Characteristic dimension = diameter (0.2 m)"
+      },
+      "center_x_m": {
+        "value": null,
+        "source": "SYSTEM_DEFAULT",
+        "status": "UNRESOLVED",
+        "confidence": 0.0,
+        "reason": null
+      },
+      "center_y_m": {
+        "value": null,
+        "source": "SYSTEM_DEFAULT",
+        "status": "UNRESOLVED",
+        "confidence": 0.0,
+        "reason": null
+      },
+      "wall_type": "no_slip_wall",
+      "angular_velocity_rad_s": 0.0,
+      "rotation_direction": "ccw"
+    },
+    "bottom_profile": {
+      "enabled": false,
+      "profile_type": "flat",
+      "center_x_m": {
+        "value": null,
+        "source": "SYSTEM_DEFAULT",
+        "status": "UNRESOLVED",
+        "confidence": 0.0,
+        "reason": null
+      },
+      "width_m": {
+        "value": null,
+        "source": "SYSTEM_DEFAULT",
+        "status": "UNRESOLVED",
+        "confidence": 0.0,
+        "reason": null
+      },
+      "height_m": {
+        "value": null,
+        "source": "SYSTEM_DEFAULT",
+        "status": "UNRESOLVED",
+        "confidence": 0.0,
+        "reason": null
+      },
+      "custom_points": []
+    },
+    "flow_topology": {
+      "mode": "inlet_outlet"
+    },
+    "boundaries": {
+      "left": {
+        "semantic_type": "uniform_velocity_inlet",
+        "source": "USER_EXPLICIT",
+        "status": "RESOLVED",
+        "confidence": 1.0,
+        "inlet_velocity": 2.0,
+        "pressure_value": null,
+        "velocity_vector": null,
+        "shear_direction": null,
+        "shear_magnitude": null,
+        "freestream_velocity": null,
+        "pressure_gradient_magnitude": null
+      },
+      "right": {
+        "semantic_type": "pressure_outlet",
+        "source": "USER_EXPLICIT",
+        "status": "RESOLVED",
+        "confidence": 1.0,
+        "inlet_velocity": null,
+        "pressure_value": 0.0,
+        "velocity_vector": null,
+        "shear_direction": null,
+        "shear_magnitude": null,
+        "freestream_velocity": null,
+        "pressure_gradient_magnitude": null
+      },
+      "top": {
+        "semantic_type": "slip_wall",
+        "source": "USER_EXPLICIT",
+        "status": "RESOLVED",
+        "confidence": 1.0,
+        "inlet_velocity": null,
+        "pressure_value": null,
+        "velocity_vector": null,
+        "shear_direction": null,
+        "shear_magnitude": null,
+        "freestream_velocity": null,
+        "pressure_gradient_magnitude": null
+      },
+      "bottom_flat": {
+        "semantic_type": "no_slip_wall",
+        "source": "USER_EXPLICIT",
+        "status": "RESOLVED",
+        "confidence": 1.0,
+        "inlet_velocity": null,
+        "pressure_value": null,
+        "velocity_vector": null,
+        "shear_direction": null,
+        "shear_magnitude": null,
+        "freestream_velocity": null,
+        "pressure_gradient_magnitude": null
+      },
+      "bottom_profile_surface": {
+        "semantic_type": null,
+        "source": "SYSTEM_DEFAULT",
+        "status": "UNRESOLVED",
+        "confidence": 0.0,
+        "inlet_velocity": null,
+        "pressure_value": null,
+        "velocity_vector": null,
+        "shear_direction": null,
+        "shear_magnitude": null,
+        "freestream_velocity": null,
+        "pressure_gradient_magnitude": null
+      },
+      "front": {
+        "semantic_type": "empty",
+        "source": "SYSTEM_DERIVED",
+        "status": "RESOLVED",
+        "confidence": 1.0,
+        "inlet_velocity": null,
+        "pressure_value": null,
+        "velocity_vector": null,
+        "shear_direction": null,
+        "shear_magnitude": null,
+        "freestream_velocity": null,
+        "pressure_gradient_magnitude": null,
+        "reason": "2D simulation: front must be empty"
+      },
+      "back": {
+        "semantic_type": "empty",
+        "source": "SYSTEM_DERIVED",
+        "status": "RESOLVED",
+        "confidence": 1.0,
+        "inlet_velocity": null,
+        "pressure_value": null,
+        "velocity_vector": null,
+        "shear_direction": null,
+        "shear_magnitude": null,
+        "freestream_velocity": null,
+        "pressure_gradient_magnitude": null,
+        "reason": "2D simulation: back must be empty"
+      }
+    },
+    "forcing": {
+      "pressure_gradient": {
+        "enabled": false,
+        "direction": [
+          1.0,
+          0.0,
+          0.0
+        ],
+        "magnitude": {
+          "value": null,
+          "source": "SYSTEM_DEFAULT",
+          "status": "UNRESOLVED",
+          "confidence": 0.0,
+          "reason": null
+        },
+        "unit": {
+          "value": null,
+          "source": "SYSTEM_DEFAULT",
+          "status": "UNRESOLVED",
+          "confidence": 0.0,
+          "reason": null
+        }
+      },
+      "body_force": {
+        "enabled": false,
+        "vector_m_s2": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "inlet_profile": {
+      "enabled": false,
+      "temporal_type": "constant",
+      "spatial_type": "uniform",
+      "parameters": {}
+    },
+    "initial_conditions": {
+      "velocity": {
+        "type": "quiescent",
+        "vector_m_s": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    "simulation": {
+      "time_mode": "transient",
+      "flow_regime": "auto",
+      "max_courant_number": 0.5,
+      "end_time": 1.0,
+      "delta_t": null
+    },
+    "observables": [
+      {
+        "type": "cylinder_drag",
+        "label": "圆柱阻力",
+        "component": "Ux",
+        "spatial_operation": null,
+        "temporal_operation": null,
+        "point": null,
+        "section_x": null,
+        "cylinder_id": null,
+        "wall_name": null,
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "missing_fields": [],
+        "confidence": 0.6
+      },
+      {
+        "type": "cylinder_lift",
+        "label": "圆柱升力",
+        "component": "Ux",
+        "spatial_operation": null,
+        "temporal_operation": null,
+        "point": null,
+        "section_x": null,
+        "cylinder_id": null,
+        "wall_name": null,
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "missing_fields": [],
+        "confidence": 0.6
+      },
+      {
+        "type": "point_velocity",
+        "label": "下游监测点流速",
+        "component": "Ux",
+        "spatial_operation": "point",
+        "temporal_operation": "mean",
+        "point": null,
+        "section_x": null,
+        "cylinder_id": null,
+        "wall_name": null,
+        "source": "MODEL_RECOMMENDED",
+        "status": "PARTIALLY_RESOLVED",
+        "missing_fields": [
+          "point"
+        ],
+        "confidence": 0.5
+      },
+      {
+        "type": "section_mean_velocity",
+        "label": "截面平均流速",
+        "component": "Ux",
+        "spatial_operation": "section_mean",
+        "temporal_operation": "mean",
+        "point": null,
+        "section_x": null,
+        "cylinder_id": null,
+        "wall_name": null,
+        "source": "MODEL_RECOMMENDED",
+        "status": "PARTIALLY_RESOLVED",
+        "missing_fields": [
+          "section_x"
+        ],
+        "confidence": 0.5
+      },
+      {
+        "type": "velocity_magnitude_field",
+        "label": "速度幅值场",
+        "component": "magnitude",
+        "spatial_operation": null,
+        "temporal_operation": null,
+        "point": null,
+        "section_x": null,
+        "cylinder_id": null,
+        "wall_name": null,
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "missing_fields": [],
+        "confidence": 0.6
+      },
+      {
+        "type": "pressure_field",
+        "label": "压力场",
+        "component": "magnitude",
+        "spatial_operation": null,
+        "temporal_operation": null,
+        "point": null,
+        "section_x": null,
+        "cylinder_id": null,
+        "wall_name": null,
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "missing_fields": [],
+        "confidence": 0.6
+      },
+      {
+        "type": "vorticity_field",
+        "label": "涡量场",
+        "component": "magnitude",
+        "spatial_operation": null,
+        "temporal_operation": null,
+        "point": null,
+        "section_x": null,
+        "cylinder_id": null,
+        "wall_name": null,
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "missing_fields": [],
+        "confidence": 0.6
+      },
+      {
+        "type": "streamlines",
+        "label": "流线",
+        "component": "magnitude",
+        "spatial_operation": null,
+        "temporal_operation": null,
+        "point": null,
+        "section_x": null,
+        "cylinder_id": null,
+        "wall_name": null,
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "missing_fields": [],
+        "confidence": 0.6
+      },
+      {
+        "type": "drag_lift_time_series",
+        "label": "阻力升力时间序列",
+        "component": "Ux",
+        "spatial_operation": null,
+        "temporal_operation": null,
+        "point": null,
+        "section_x": null,
+        "cylinder_id": null,
+        "wall_name": null,
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "missing_fields": [],
+        "confidence": 0.6
+      },
+      {
+        "type": "wake_shedding_frequency",
+        "label": "尾迹涡脱落频率",
+        "component": "Ux",
+        "spatial_operation": null,
+        "temporal_operation": null,
+        "point": null,
+        "section_x": null,
+        "cylinder_id": null,
+        "wall_name": null,
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "missing_fields": [],
+        "confidence": 0.6
+      }
+    ],
+    "analysis_goals": [
+      {
+        "id": "cylinder_separation",
+        "description": "分析圆柱周围的流动分离及尾迹结构。",
+        "related_observables": [
+          "vorticity_field",
+          "streamlines"
+        ],
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "confidence": 0.7
+      },
+      {
+        "id": "cylinder_forces",
+        "description": "评估圆柱阻力和升力特征。",
+        "related_observables": [
+          "cylinder_drag",
+          "cylinder_lift"
+        ],
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "confidence": 0.7
+      },
+      {
+        "id": "cylinder_wake_recovery",
+        "description": "分析圆柱下游速度亏损及恢复过程。",
+        "related_observables": [
+          "velocity_magnitude_field",
+          "point_velocity"
+        ],
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "confidence": 0.7
+      },
+      {
+        "id": "section_mean_velocity",
+        "description": "计算指定截面的平均流速，并分析其随时间的变化和稳定性。",
+        "related_observables": [
+          "section_mean_velocity"
+        ],
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "confidence": 0.7
+      },
+      {
+        "id": "transient_vortex_shedding",
+        "description": "分析圆柱升阻力波动及周期性涡脱落特征。",
+        "related_observables": [
+          "drag_lift_time_series",
+          "wake_shedding_frequency"
+        ],
+        "source": "USER_CONFIRMED",
+        "status": "RESOLVED",
+        "confidence": 0.7
+      }
+    ],
+    "assumptions": [],
+    "ambiguities": [],
+    "unresolved_fields": [],
+    "blocking_issues": [],
+    "recommendations": [],
+    "decision_summary": {
+      "facts": [
+        "用户指定了二维流场",
+        "用户描述了圆柱",
+        "用户指定了圆柱半径 R=0.1 m",
+        "用户指定了来流速度 2.0 m/s",
+        "用户指定了底部无滑移",
+        "用户指定了顶部滑移",
+        "用户指定了压力出口",
+        "用户提到了来流/入口/流入",
+        "用户要求观测截面平均流速"
+      ],
+      "derived_values": [
+        "流动拓扑: inlet_outlet",
+        "直径 D=0.2 m (from radius)",
+        "特征尺度=0.2 m (derived)"
+      ],
+      "assumptions": [
+        "假设流体为水（20°C）",
+        "推荐计算域长度 6.0 m",
+        "推荐计算域高度 4.0 m"
+      ],
+      "alternatives": [],
+      "unresolved_items": [],
+      "rejected_interpretations": [],
+      "confidence": 0.9230769230769231
+    },
+    "draft_status": "SPEC_CONFIRMED",
+    "experiment_id": "spec_24ba68f3d99f",
+    "title": null,
+    "objective": null,
+    "user_input_text": "二维长方形流场，左侧2 m/s恒速入口，右侧压力出口，顶部滑移，底部无滑移，圆柱半径0.1 m，观测圆柱下游截面平均速度。\n[修改] 仿真时间为1秒"
+  },
+  "plan_confirmation": {
+    "confirmed": true,
+    "confirmed_at": "2026-07-14T09:36:28.864050+00:00",
+    "spec_version": 4
+  },
+  "compile_preview": {
+    "openfoam_version": "13",
+    "application": "incompressibleFluid",
+    "solver_module": "foamRun -solver incompressibleFluid",
+    "temporal_type": "transient",
+    "turbulence_model": "laminar",
+    "mesh_backend": "blockMesh + snappyHexMesh",
+    "estimated_mesh_count": 100000,
+    "mesh_detail": {
+      "nx": 500,
+      "ny": 200,
+      "nz": 1
+    },
+    "time_step": 0.00025,
+    "end_time": 1.0,
+    "estimated_steps": 4000,
+    "estimated_computation_time_s": 6000.0,
+    "reynolds_number": 398406.374501992,
+    "max_courant_number": 0.5,
+    "observables_implementation": [
+      {
+        "observable": "cylinder_drag",
+        "label": "圆柱阻力",
+        "implementation": "forceCoeffs functionObject",
+        "output_file": "postProcessing/forceCoeffs1/0/forceCoeffs.dat"
+      },
+      {
+        "observable": "cylinder_lift",
+        "label": "圆柱升力",
+        "implementation": "forceCoeffs functionObject",
+        "output_file": "postProcessing/forceCoeffs1/0/forceCoeffs.dat"
+      },
+      {
+        "observable": "point_velocity",
+        "label": "下游监测点流速",
+        "implementation": "probes functionObject",
+        "output_file": "postProcessing/probes1/0/U"
+      },
+      {
+        "observable": "section_mean_velocity",
+        "label": "截面平均流速",
+        "implementation": "surfaces functionObject (cuttingPlane)",
+        "output_file": "postProcessing/surfaces1/"
+      },
+      {
+        "observable": "velocity_magnitude_field",
+        "label": "速度幅值场",
+        "implementation": "foamToVTK field export + postProcess",
+        "output_file": "VTK/"
+      },
+      {
+        "observable": "pressure_field",
+        "label": "压力场",
+        "implementation": "foamToVTK field export",
+        "output_file": "VTK/"
+      },
+      {
+        "observable": "vorticity_field",
+        "label": "涡量场",
+        "implementation": "postProcess -func vorticity + foamToVTK",
+        "output_file": "VTK/"
+      },
+      {
+        "observable": "streamlines",
+        "label": "流线",
+        "implementation": "matplotlib streamplot from VTK data",
+        "output_file": "VTK/"
+      },
+      {
+        "observable": "drag_lift_time_series",
+        "label": "阻力升力时间序列",
+        "implementation": "forceCoeffs functionObject",
+        "output_file": "postProcessing/forceCoeffs1/0/forceCoeffs.dat"
+      },
+      {
+        "observable": "wake_shedding_frequency",
+        "label": "尾迹涡脱落频率",
+        "implementation": "forceCoeffs functionObject (FFT post-analysis)",
+        "output_file": "postProcessing/forceCoeffs1/0/forceCoeffs.dat"
+      }
+    ],
+    "domain": {
+      "length_m": 6.0,
+      "height_m": 4.0,
+      "thickness_m": 1.0
+    },
+    "cylinder": {
+      "has_cylinder": true,
+      "diameter_m": 0.2,
+      "radius_m": 0.1,
+      "center_x_m": null,
+      "center_y_m": null
+    },
+    "fluid": {
+      "type": "water",
+      "density_kg_m3": 998.0,
+      "kinematic_viscosity_m2_s": 1.004e-06
+    }
+  },
+  "updated_at": "2026-07-14T09:36:28.864050+00:00"
+}

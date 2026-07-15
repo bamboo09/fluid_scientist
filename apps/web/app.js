@@ -298,6 +298,9 @@ function clearResearchSession() {
   if (welcomeMessage) welcomeMessage.hidden = false;
   if (researchForm) researchForm.hidden = false;
   if (startNewExperiment) startNewExperiment.hidden = true;
+  // Hide vertical workflow stepper
+  const stepper = byId("workflow-stepper");
+  if (stepper) stepper.hidden = true;
   if (promptInput) promptInput.value = "";
   setStatus("");
   updateContext();
@@ -1506,6 +1509,159 @@ function renderParameterRow(param, spec) {
   return row;
 }
 
+// ============================================================
+// Vertical Workflow Stepper (left sidebar)
+// ============================================================
+
+// Ordered workflow steps matching the design spec (top-to-bottom = left-to-right in original design)
+const WORKFLOW_STEPS = [
+  { id: "spec-save-btn",        text: "保存草案",         action: () => saveSpecDraft() },
+  { id: "spec-apply-btn",       text: "应用修改",         action: () => applyPendingParameterChanges() },
+  { id: "spec-discard-btn",     text: "放弃修改",         action: () => discardPendingParameterChanges() },
+  { id: "spec-accept-rec-btn",  text: "接受推荐值",       action: () => acceptAllRecommendations() },
+  { id: "spec-ready-btn",       text: "准备就绪",         action: () => transitionSpec("ready") },
+  { id: "spec-confirm-btn",     text: "确认实验版本",     action: () => transitionSpec("confirmed") },
+  { id: "spec-compile-btn",     text: "生成 Case",        action: () => compileSpec() },
+  { id: "spec-submit-btn",      text: "提交运行",         action: () => submitSpec() },
+  { id: "spec-run-status-btn",  text: "查看运行状态",     action: () => showRunStatus() },
+  { id: "spec-report-btn",      text: "查看分析报告",     action: () => showAnalysisReport() },
+  { id: "spec-capability-btn",  text: "查看缺失能力",     action: () => showMissingCapabilities() },
+  { id: "spec-clone-btn",       text: "修改参数（创建新版本）", action: () => cloneSpec() },
+  { id: "spec-error-btn",       text: "查看错误",         action: () => showErrorDetails() },
+  { id: "spec-back-draft-btn",  text: "回到草案",         action: () => backToDraft() },
+  { id: "spec-revalidate-btn",  text: "重新校验",         action: () => revalidateSpec() },
+];
+
+function buildWorkflowStepper() {
+  const stepper = byId("workflow-stepper");
+  if (!stepper) return;
+  stepper.innerHTML = "";
+
+  for (const step of WORKFLOW_STEPS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "wf-step";
+    btn.id = "wf-" + step.id;
+    btn.textContent = step.text;
+    btn.dataset.originalId = step.id;
+    btn.addEventListener("click", () => {
+      if (btn.disabled) return;
+      step.action();
+    });
+    stepper.append(btn);
+  }
+}
+
+function updateWorkflowStepper(spec) {
+  const stepper = byId("workflow-stepper");
+  if (!stepper) return;
+
+  if (!spec) {
+    stepper.hidden = true;
+    return;
+  }
+  stepper.hidden = false;
+
+  const status = spec.status;
+  const editable = isSpecEditable(spec);
+  const hasPendingChanges = pendingParameterChanges.size > 0;
+  const actions = getWorkbenchActions(status);
+
+  // Build a set of visible button IDs
+  const visibleIds = new Set();
+  if (actions.primaryId) visibleIds.add(actions.primaryId);
+  actions.secondary.forEach(s => visibleIds.add(s.id));
+
+  // Special cases always visible depending on state
+  if (status === "failed") {
+    visibleIds.add("spec-error-btn");
+    visibleIds.add("spec-back-draft-btn");
+  }
+  if (status === "awaiting_code_approval") {
+    visibleIds.add("spec-capability-btn");
+  }
+
+  // Compile button special handling
+  if (specCompiling) visibleIds.add("spec-compile-btn");
+
+  // Determine the "current active" step based on status
+  const activeStepMap = {
+    draft: "spec-apply-btn",
+    ready: "spec-confirm-btn",
+    confirmed: "spec-compile-btn",
+    compiling: "spec-compile-btn",
+    compiled: "spec-submit-btn",
+    running: "spec-run-status-btn",
+    completed: "spec-report-btn",
+    awaiting_code_approval: "spec-capability-btn",
+    failed: "spec-error-btn",
+    rejected: "spec-error-btn",
+  };
+  const activeId = activeStepMap[status] || null;
+
+  // Determine completed steps (steps before the active one that are in the normal flow)
+  const flowOrder = [
+    "spec-save-btn", "spec-apply-btn", "spec-discard-btn", "spec-accept-rec-btn",
+    "spec-ready-btn", "spec-confirm-btn", "spec-compile-btn", "spec-submit-btn",
+    "spec-run-status-btn", "spec-report-btn",
+  ];
+  const activeIdx = flowOrder.indexOf(activeId);
+
+  for (const step of WORKFLOW_STEPS) {
+    const btn = byId("wf-" + step.id);
+    if (!btn) continue;
+
+    const isVisible = visibleIds.has(step.id);
+    btn.style.display = isVisible ? "" : "none";
+
+    if (!isVisible) continue;
+
+    // Reset classes
+    btn.classList.remove("wf-active", "wf-completed", "wf-danger");
+    btn.disabled = false;
+
+    // Set active
+    if (step.id === activeId) {
+      btn.classList.add("wf-active");
+    }
+
+    // Set completed
+    const stepIdx = flowOrder.indexOf(step.id);
+    if (activeIdx >= 0 && stepIdx >= 0 && stepIdx < activeIdx) {
+      btn.classList.add("wf-completed");
+    }
+
+    // Danger state for error
+    if (step.id === "spec-error-btn" && (status === "failed" || status === "rejected")) {
+      btn.classList.add("wf-danger");
+      if (step.id === activeId) btn.classList.add("wf-active");
+    }
+
+    // Apply/discard disabled based on pending changes
+    if (step.id === "spec-apply-btn" || step.id === "spec-discard-btn") {
+      btn.disabled = !editable || !hasPendingChanges;
+    }
+
+    // Compile button during compilation
+    if (step.id === "spec-compile-btn" && specCompiling) {
+      btn.disabled = true;
+      btn.textContent = "正在编译...";
+    } else if (step.id === "spec-compile-btn") {
+      btn.textContent = "生成 Case";
+    }
+
+    // Back to draft only visible when failed or rejected
+    if (step.id === "spec-back-draft-btn") {
+      btn.style.display = (status === "failed" || status === "rejected") ? "" : "none";
+    }
+
+    // Revalidate only in ready state
+    if (step.id === "spec-revalidate-btn") {
+      btn.style.display = (status === "ready") ? "" : "none";
+    }
+  }
+}
+
 function getWorkbenchActions(status) {
   const actions = {
     primary: null,
@@ -1683,6 +1839,9 @@ function updateSpecControls(spec) {
   if (spec && status === "confirmed") {
     runPreCheck(spec);
   }
+
+  // Sync vertical workflow stepper
+  updateWorkflowStepper(spec);
 }
 
 function updateDisabledReason(spec) {
@@ -1857,8 +2016,11 @@ function renderSpecWorkbench(spec) {
   propagation.hidden = true;
   card.append(propagation);
 
+  // Hidden action buttons (kept in DOM for existing code references, but not visible — use vertical stepper instead)
   const actions = document.createElement("div");
   actions.className = "spec-actions card-actions";
+  actions.style.display = "none";
+  actions.id = "spec-actions-hidden";
   const saveBtn = document.createElement("button");
   saveBtn.type = "button";
   saveBtn.className = "button button-quiet";
@@ -1954,6 +2116,11 @@ function renderSpecWorkbench(spec) {
   actions.append(saveBtn, applyBtn, discardBtn, acceptRecBtn, readyBtn, confirmBtn, compileBtn, submitBtn, runStatusBtn, reportBtn, capabilityBtn, cloneBtn, errorBtn, backDraftBtn, revalidateBtn);
   card.append(actions);
 
+  // Build vertical workflow stepper (once)
+  if (!byId("wf-spec-save-btn")) {
+    buildWorkflowStepper();
+  }
+
   const disabledReason = document.createElement("div");
   disabledReason.className = "spec-disabled-reason";
   disabledReason.id = "spec-disabled-reason";
@@ -1961,6 +2128,7 @@ function renderSpecWorkbench(spec) {
   card.append(disabledReason);
 
   updateSpecControls(spec);
+  updateWorkflowStepper(spec);
 
   const taskHost = byId("task-card-host");
   if (stream && taskHost) stream.insertBefore(card, taskHost);
@@ -3557,547 +3725,4 @@ async function restoreActiveOperation() {
 }
 
 async function restoreActiveExperiment() {
-  const projectId = localStorage.getItem(storageKeys.projectId);
-  const planId = localStorage.getItem(storageKeys.planId);
-  const caseId = localStorage.getItem(storageKeys.caseId);
-  const targetId = localStorage.getItem(storageKeys.targetId);
-  const specId = localStorage.getItem(storageKeys.specId);
-  try {
-    if (projectId) {
-      currentProject = await requestJson(`/api/projects/${projectId}`);
-    } else {
-      const response = await fetch("/api/projects/recent");
-      if (response.status === 404) return;
-      if (!response.ok) throw new Error(`API 返回 ${response.status}`);
-      currentProject = await response.json();
-      persist(storageKeys.projectId, currentProject.project_id);
-    }
-    if (currentProject?.question) showResearchQuestion(currentProject.question);
-    if (planId) {
-      if (currentPlan?.plan_id !== planId) {
-        currentPlan = await requestPlan(planId);
-      }
-      const planOwnerMatches = currentPlan.project_id === currentProject.project_id;
-      const restoredPlan = planOwnerMatches
-        ? restoredPlanForProject(currentPlan, currentProject)
-        : null;
-      if (!restoredPlan) {
-        currentPlan = null;
-        currentCompilation = null;
-        currentSpec = null;
-        localStorage.removeItem(storageKeys.planId);
-        localStorage.removeItem(storageKeys.caseId);
-        localStorage.removeItem(storageKeys.specId);
-        updateContext();
-        appendConversation(
-          "assistant",
-          "已检测到上次实验的过期草稿，已自动清理，不会影响当前实验。",
-          "workflow-event",
-        );
-        return;
-      }
-      currentPlan = restoredPlan;
-      if (workflowMode === "legacy" && !renderedPlanRefs.has(planId)) renderPlanCard(currentPlan);
-      const approvedArtifact = currentProject.approved_artifacts?.[planId];
-      if (approvedArtifact) {
-        currentCompilation = {
-          plan_id: planId,
-          plan_version: approvedArtifact.plan_version,
-          archive_sha256: approvedArtifact.archive_sha256,
-        };
-        const preview = $("[data-compile-preview]");
-        if (preview) {
-          preview.textContent = `已恢复 Gate 2 批准绑定：${approvedArtifact.archive_sha256}`;
-        }
-      }
-    }
-    if (specId && currentProject) {
-      try {
-        currentSpec = await requestJson(
-          `/api/projects/${currentProject.project_id}/experiment-specs/${specId}`,
-        );
-        if (currentSpec && ["draft", "ready", "confirmed", "compiling"].includes(currentSpec.status)) {
-          renderSpecWorkbench(currentSpec);
-        }
-      } catch {
-        currentSpec = null;
-        localStorage.removeItem(storageKeys.specId);
-      }
-    }
-    if (targetId) {
-      selectedTarget = targetId;
-      if (targetSelect) targetSelect.value = targetId;
-    }
-    updateContext();
-    const savedSessionId = localStorage.getItem(storageKeys.researchSessionId);
-    if (savedSessionId) {
-      try {
-        const sessionResponse = await fetch(`/api/research-sessions/${savedSessionId}`);
-        if (sessionResponse.ok) {
-          const session = await sessionResponse.json();
-          currentResearchSession = { session_id: savedSessionId, ...session };
-          if (session && session.type) handleResearchTurnResult(session);
-        }
-      } catch {
-        // 忽略研究会话恢复失败
-      }
-    }
-    const jobId = caseId ? currentProject.external_jobs?.[caseId] : null;
-    if (!jobId || !planId || !caseId || !targetId) return;
-    appendConversation("assistant", `已恢复远程任务 ${jobId}，不会重复提交。`, "workflow-event");
-    await startPolling(() => pollPlannedExperiment(
-      jobId,
-      targetId,
-      currentProject.project_id,
-      planId,
-      caseId,
-    ));
-  } catch (error) {
-    renderError("恢复实验", error);
-  }
-}
-
-async function configureModel() {
-  const state = byId("model-config-state");
-  const apiKey = modelApiKey?.value.trim() || "";
-  if (!apiKey) {
-    if (state) state.textContent = "请输入 API Key；密钥只发送到本机服务进程内存。";
-    return;
-  }
-  try {
-    await requestJson("/api/model-configurations", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        provider: modelProvider.value,
-        model: modelId.value.trim(),
-        api_key: apiKey,
-      }),
-    });
-    if (state) state.textContent = "模型连接成功。";
-    await loadModelConfiguration();
-  } catch (error) {
-    if (state) state.textContent = `模型配置失败：${error.message}`;
-  } finally {
-    modelApiKey.value = "";
-  }
-}
-
-async function validateCustomCase() {
-  const file = byId("custom-case-file")?.files?.[0];
-  const output = byId("custom-case-result");
-  validatedCustomCase = null;
-  const submit = byId("submit-custom-case");
-  if (submit) submit.disabled = true;
-  if (!file) {
-    if (output) output.textContent = "请先选择 tar.gz 算例归档；尚未提交。";
-    return;
-  }
-  try {
-    validatedCustomCase = await requestJson("/api/custom-cases/validate", {
-      method: "POST",
-      headers: { "Content-Type": "application/gzip" },
-      body: file,
-    });
-    if (output) output.textContent = `安全校验通过，归档摘要 ${validatedCustomCase.archive_sha256}；尚未提交。`;
-    if (submit) submit.disabled = !selectedTarget;
-  } catch (error) {
-    if (output) output.textContent = `安全校验拒绝：${error.message}；尚未提交。`;
-  }
-}
-
-async function submitCustomCase() {
-  const file = byId("custom-case-file")?.files?.[0];
-  const output = byId("custom-case-result");
-  if (!canStartExperiment(activeTask)) {
-    const warning = "已有实验正在运行，请等待当前任务结束后再提交自定义算例。";
-    if (output) output.textContent = warning;
-    setStatus(warning);
-    return;
-  }
-  if (!validatedCustomCase) {
-    if (output) output.textContent = "必须先通过当前归档的安全校验。";
-    return;
-  }
-  if (!file || !selectedTarget) return;
-  try {
-    const customSubmitEndpoint = "/api/custom-cases/submit";
-    const params = new URLSearchParams({
-      target_id: selectedTarget,
-      experiment_name: byId("custom-experiment-name")?.value.trim() || "custom-openfoam",
-    });
-    const job = await requestJson(`${customSubmitEndpoint}?${params}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/gzip" },
-      body: file,
-    });
-    if (!job.job_id) throw new Error("提交响应缺少 Job ID；尚不能确认已提交。 ");
-    renderTaskCard({
-      phase: phaseFromJob(job),
-      jobId: job.job_id,
-      pid: job.pid,
-      targetId: selectedTarget,
-      lastUpdated: new Date().toLocaleString(),
-    });
-    if (output) output.textContent = `自定义算例已获得 Job ID：${job.job_id}`;
-    startPolling(() => pollCustomCase(job.job_id, selectedTarget));
-  } catch (error) {
-    renderError("自定义算例提交", error, {
-      phase: "failed",
-      targetId: selectedTarget,
-      lastUpdated: new Date().toLocaleString(),
-    });
-  }
-}
-
-async function pollCustomCase(jobId, targetId) {
-  const query = `target_id=${encodeURIComponent(targetId)}`;
-  try {
-    const job = await requestJson(`/api/custom-cases/${jobId}?${query}`);
-    const phase = phaseFromJob(job);
-    renderTaskCard({
-      phase,
-      jobId,
-      pid: job.pid,
-      error: job.error,
-      targetId,
-      lastUpdated: new Date().toLocaleString(),
-    });
-    if (phase === "failed" || phase === "cancelled") return;
-    if (job.state === "succeeded") {
-      const collection = await requestJson(`/api/custom-cases/${jobId}/results?${query}`);
-      renderResultsCard(collection, { source: "legacy_custom" });
-      return;
-    }
-    schedulePoll(() => pollCustomCase(jobId, targetId));
-  } catch (error) {
-    renderTaskCard({
-      phase: activeTask?.phase || "submitted",
-      jobId,
-      targetId,
-      pid: activeTask?.pid,
-      warning: `状态查询暂时失败：${error.message}。将自动重试。`,
-      lastUpdated: new Date().toLocaleString(),
-    });
-    schedulePoll(() => pollCustomCase(jobId, targetId));
-  }
-}
-
-function openDialog(id) {
-  const dialog = byId(id);
-  if (dialog?.showModal) dialog.showModal();
-}
-
-// === Workstation Management ===
-
-async function loadWorkstationStatus(skipTextUpdate = false) {
-  try {
-    const data = await requestJson("/api/workstation/status");
-    const indicator = document.querySelector("#workstation-status .ws-indicator");
-    const text = document.querySelector("#workstation-status .ws-text");
-    const details = document.getElementById("workstation-details");
-
-    if (data.connected) {
-      indicator.dataset.state = "connected";
-      if (!skipTextUpdate) text.textContent = "已连接";
-      details.hidden = false;
-      document.getElementById("ws-host").textContent = data.host || "-";
-      document.getElementById("ws-foam").textContent = data.foam_version || "-";
-      document.getElementById("ws-cpu").textContent = data.cpu_count ? data.cpu_count + " 核" : "-";
-      document.getElementById("ws-mem").textContent = data.memory_gb ? data.memory_gb.toFixed(1) + " GB" : "-";
-      document.getElementById("ws-disk").textContent = data.disk_free_gb ? data.disk_free_gb.toFixed(1) + " GB" : "-";
-    } else {
-      indicator.dataset.state = "disconnected";
-      if (!skipTextUpdate) {
-        if (data.error) {
-          text.textContent = "连接失败: " + data.error;
-        } else if (!data.host) {
-          text.textContent = "未配置工作站";
-        } else {
-          text.textContent = "未连接";
-        }
-      }
-      details.hidden = true;
-    }
-    return data;
-  } catch (e) {
-    const indicator = document.querySelector("#workstation-status .ws-indicator");
-    const text = document.querySelector("#workstation-status .ws-text");
-    if (indicator) indicator.dataset.state = "disconnected";
-    if (!skipTextUpdate && text) text.textContent = "状态未知: " + (e.message || "网络错误");
-    return null;
-  }
-}
-
-async function reconnectWorkstation() {
-  const btn = document.getElementById("ws-reconnect");
-  const text = document.querySelector("#workstation-status .ws-text");
-  if (btn) btn.disabled = true;
-  if (text) text.textContent = "重连中...";
-
-  try {
-    const data = await requestJson("/api/workstation/reconnect", { method: "POST" });
-    if (data.connected) {
-      if (text) text.textContent = "已连接";
-    } else {
-      // If not configured, auto-open the configuration dialog
-      if (!data.host || data.error === "No workstation target configured") {
-        if (text) text.textContent = "未配置工作站";
-        openWorkstationConfigDialog();
-        return;
-      }
-      const reason = data.error || "连接被拒绝";
-      if (text) text.textContent = "重连失败: " + reason;
-    }
-    // Refresh details but don't overwrite the error text we just set
-    await loadWorkstationStatus(true);
-  } catch (e) {
-    if (text) text.textContent = "重连失败: " + (e.message || "网络错误");
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
-
-async function testWorkstationSsh() {
-  const btn = document.getElementById("ws-test-ssh");
-  const text = document.querySelector("#workstation-status .ws-text");
-  if (btn) btn.disabled = true;
-  if (text) text.textContent = "测试中...";
-
-  try {
-    const data = await requestJson("/api/workstation/test-ssh", { method: "POST" });
-    if (data.success) {
-      if (text) text.textContent = "SSH 连接成功";
-    } else {
-      if (text) text.textContent = "SSH 失败: " + (data.error || "未知错误");
-    }
-    // Refresh details but don't overwrite the status text we just set
-    await loadWorkstationStatus(true);
-  } catch (e) {
-    if (text) text.textContent = "测试失败: " + (e.message || "网络错误");
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
-
-// Auto-detect SSH keys and pre-fill the configuration dialog
-async function openWorkstationConfigDialog() {
-  const dialog = document.getElementById("workstation-settings");
-  if (!dialog) return;
-  const state = document.getElementById("ws-config-state");
-  if (state) state.textContent = "正在探测 SSH 密钥和已知主机...";
-
-  try {
-    const detected = await requestJson("/api/workstation/detect");
-    // Pre-fill fields
-    const keyInput = document.getElementById("ws-input-key");
-    const khInput = document.getElementById("ws-input-knownhosts");
-    const hostInput = document.getElementById("ws-input-host");
-    const hint = document.getElementById("ws-ssh-dir-hint");
-    if (hint && detected.ssh_dir) hint.textContent = detected.ssh_dir;
-    if (keyInput && detected.identity_file) keyInput.value = detected.identity_file;
-    if (khInput && detected.known_hosts_file) khInput.value = detected.known_hosts_file;
-    // Populate host suggestions from known_hosts
-    const datalist = document.getElementById("ws-host-suggestions");
-    if (datalist && detected.detected_hosts) {
-      datalist.innerHTML = "";
-      detected.detected_hosts.forEach((h) => {
-        const opt = document.createElement("option");
-        opt.value = h;
-        datalist.appendChild(opt);
-      });
-    }
-    if (state) {
-      if (detected.identity_file) {
-        state.textContent = "已探测到密钥: " + detected.identity_file;
-      } else {
-        state.textContent = "未探测到 SSH 密钥，请手动填写路径";
-      }
-    }
-  } catch (e) {
-    if (state) state.textContent = "探测失败: " + (e.message || "网络错误");
-  }
-
-  dialog.showModal();
-}
-
-async function saveWorkstationConfig() {
-  const btn = document.getElementById("ws-save-config");
-  const state = document.getElementById("ws-config-state");
-  const host = document.getElementById("ws-input-host")?.value.trim();
-  const username = document.getElementById("ws-input-user")?.value.trim();
-  const port = parseInt(document.getElementById("ws-input-port")?.value || "22", 10);
-  const identity_file = document.getElementById("ws-input-key")?.value.trim() || "";
-  const known_hosts_file = document.getElementById("ws-input-knownhosts")?.value.trim() || "";
-
-  if (!host || !username) {
-    if (state) state.textContent = "请填写工作站 IP 和用户名";
-    return;
-  }
-
-  if (btn) btn.disabled = true;
-  if (state) state.textContent = "保存配置并连接中...";
-
-  try {
-    const data = await requestJson("/api/workstation/configure", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ host, username, port, identity_file, known_hosts_file }),
-    });
-    if (data.connected) {
-      if (state) state.textContent = "连接成功! " + (data.foam_version || "");
-      const dialog = document.getElementById("workstation-settings");
-      setTimeout(() => dialog?.close(), 1500);
-      await loadWorkstationStatus();
-    } else {
-      if (state) state.textContent = "配置已保存，但连接失败: " + (data.error || "未知原因");
-    }
-  } catch (e) {
-    if (state) state.textContent = "配置失败: " + (e.message || "网络错误");
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
-
-function bindEvents() {
-  const composer = byId("experiment-composer") || byId("research-form");
-  composer?.addEventListener("submit", designExperimentFromPrompt);
-  if (designButton && (designButton.type !== "submit" || designButton.form !== composer)) {
-    designButton.addEventListener("click", designExperimentFromPrompt);
-  }
-  promptInput?.addEventListener("input", refreshComposer);
-  targetSelect?.addEventListener("change", () => {
-    selectedTarget = targetSelect.value;
-    persist(storageKeys.targetId, selectedTarget);
-    updateContext();
-    refreshComposer();
-  });
-  modelProvider?.addEventListener("change", () => {
-    if (!modelId) return;
-    const current = modelId.value.trim();
-    const allDefaults = Object.values(modelDefaults);
-    const isEmpty = !current;
-    const isOtherProviderDefault = allDefaults.includes(current) && current !== modelDefaults[modelProvider.value];
-    if (isEmpty || isOtherProviderDefault) {
-      modelId.value = modelDefaults[modelProvider.value] || "";
-    }
-  });
-  byId("configure-model")?.addEventListener("click", configureModel);
-  byId("custom-case-file")?.addEventListener("change", () => {
-    validatedCustomCase = null;
-    const submit = byId("submit-custom-case");
-    if (submit) submit.disabled = true;
-    const output = byId("custom-case-result");
-    if (output) output.textContent = "文件已更换，请重新执行安全校验。";
-  });
-  byId("validate-custom-case")?.addEventListener("click", validateCustomCase);
-  byId("submit-custom-case")?.addEventListener("click", submitCustomCase);
-  byId("open-model-settings")?.addEventListener("click", () => openDialog("model-settings"));
-  byId("open-target-settings")?.addEventListener("click", () => openDialog("target-settings"));
-  byId("ws-reconnect")?.addEventListener("click", reconnectWorkstation);
-  byId("ws-test-ssh")?.addEventListener("click", testWorkstationSsh);
-  byId("ws-configure")?.addEventListener("click", openWorkstationConfigDialog);
-  byId("ws-save-config")?.addEventListener("click", saveWorkstationConfig);
-  byId("open-custom-case")?.addEventListener("click", () => openDialog("custom-case-drawer"));
-  byId("cancel-operation")?.addEventListener("click", cancelActiveOperation);
-  byId("retry-operation")?.addEventListener("click", retryActiveOperation);
-  const staticPostprocessButton = byId("view-postprocess");
-  const staticPostprocessRoot = byId("postprocess-results");
-  if (staticPostprocessButton && staticPostprocessRoot) {
-    bindPostprocessButton(staticPostprocessButton, staticPostprocessRoot);
-  }
-  startNewExperiment?.addEventListener("click", resetResearchSession);
-  document.querySelectorAll("[data-open-dialog]").forEach((button) => {
-    button.addEventListener("click", () => openDialog(button.dataset.openDialog));
-  });
-  document.querySelectorAll("[data-prompt]").forEach((button) => {
-    button.addEventListener("click", () => {
-      if (promptInput) promptInput.value = button.dataset.prompt || "";
-      refreshComposer();
-      promptInput?.focus();
-    });
-  });
-  document.querySelectorAll("[data-close-dialog]").forEach((button) => {
-    button.addEventListener("click", () => button.closest("dialog")?.close());
-  });
-  window.addEventListener("beforeunload", () => {
-    window.clearTimeout(pollTimer);
-    stopOperationPolling();
-  });
-}
-
-async function init() {
-  bindEvents();
-  loadSystemVersion();
-  const modelLoad = loadModelConfiguration().catch((error) => {
-    renderError("模型配置", error);
-  });
-  const operationRecovery = restoreActiveOperation().catch((error) => {
-    renderError("恢复实验设计", error);
-  });
-  const experimentRecovery = restoreActiveExperiment().catch((error) => {
-    renderError("恢复实验", error);
-  });
-  loadExecutionTargets().catch((error) => {
-    renderError("执行平台", error);
-  });
-  loadWorkstationStatus();
-  setInterval(loadWorkstationStatus, 60000);
-  await Promise.all([operationRecovery, modelLoad, experimentRecovery]);
-  refreshComposer();
-}
-
-init();
-
-// =============================================================
-// New API functions for experiment-specs endpoints (Commit 11)
-// =============================================================
-
-/**
- * Ingest OpenFOAM results from a case directory.
- * Replaces the old /experiment-plans/{id}/submit endpoint.
- * @deprecated The old submit endpoint is deprecated; use this instead.
- */
-async function ingestExperimentResults(projectId, experimentId, casePath) {
-  console.info("[NEW API] Calling /experiment-specs/{id}/ingest");
-  return requestJson(
-    `/api/projects/${projectId}/experiment-specs/${experimentId}/ingest`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ case_path: casePath }),
-    },
-  );
-}
-
-/**
- * Analyze ingested experiment results.
- * Replaces the old /experiment-plans/{id}/analysis endpoint.
- * @deprecated The old analysis endpoint is deprecated; use this instead.
- */
-async function analyzeSpecResults(projectId, experimentId) {
-  console.info("[NEW API] Calling /experiment-specs/{id}/analyze");
-  return requestJson(
-    `/api/projects/${projectId}/experiment-specs/${experimentId}/analyze`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    },
-  );
-}
-
-/**
- * Generate a scientific report from analyzed results.
- * Replaces the old /experiment-plans/{id}/results endpoint.
- * @deprecated The old results endpoint is deprecated; use this instead.
- */
-async function generateScientificReport(projectId, experimentId) {
-  console.info("[NEW API] Calling /experiment-specs/{id}/scientific-report");
-  return requestJson(
-    `/api/projects/${projectId}/experiment-specs/${experimentId}/scientific-report`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-    },
-  );
-}
+  const projectId = localStorage.getItem(storageKeys.projectId)

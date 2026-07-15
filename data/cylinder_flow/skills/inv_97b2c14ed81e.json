@@ -1,0 +1,106 @@
+{
+  "invocation_id": "inv_97b2c14ed81e",
+  "skill_id": "fluid.intent_to_spec",
+  "skill_version": "1.0",
+  "entrypoint": "<lambda>",
+  "input": {
+    "user_text": "二维圆柱绕流，圆柱直径0.1m，来流速度1.0m/s，Re=200，水深2m，左速度入口，右压力出口。"
+  },
+  "output": {
+    "scene": {
+      "dimension": "2D",
+      "flow_type": "external_flow",
+      "confidence": 0.95
+    },
+    "geometry": {
+      "domain": {
+        "length": {
+          "value": 2,
+          "unit": "m"
+        },
+        "height": {
+          "value": 2,
+          "unit": "m"
+        }
+      },
+      "objects": [
+        {
+          "id": "cylinder_1",
+          "type": "cylinder",
+          "radius": {
+            "value": 0.05,
+            "unit": "m"
+          },
+          "center": {
+            "x": {
+              "value": 1.0,
+              "unit": "m"
+            },
+            "y": {
+              "value": 1.0,
+              "unit": "m"
+            }
+          }
+        }
+      ]
+    },
+    "physics": {
+      "fluid_model": "incompressible_newtonian",
+      "density": {
+        "value": 1000,
+        "unit": "kg/m3",
+        "source": "MODEL_INFERRED"
+      },
+      "kinematic_viscosity": {
+        "value": 0.00089,
+        "unit": "m2/s"
+      },
+      "reynolds_number": {
+        "value": 200
+      },
+      "inlet_velocity": {
+        "value": 1.0,
+        "unit": "m/s"
+      }
+    },
+    "boundaries": [
+      {
+        "name": "left",
+        "type": "velocity_inlet",
+        "details": {}
+      },
+      {
+        "name": "right",
+        "type": "pressure_outlet",
+        "details": {}
+      },
+      {
+        "name": "top",
+        "type": "open_boundary",
+        "details": {}
+      },
+      {
+        "name": "bottom",
+        "type": "no_slip_wall",
+        "details": {}
+      }
+    ],
+    "research_goals": [
+      "研究圆柱绕流特性"
+    ],
+    "requested_metrics": [
+      "drag_coefficient",
+      "lift_coefficient",
+      "vorticity",
+      "shedding_frequency"
+    ],
+    "missing_fields": [],
+    "ambiguities": [],
+    "unsupported_capabilities": []
+  },
+  "status": "PASSED",
+  "evidence": [],
+  "started_at": "2026-07-15T03:40:29.678297+00:00",
+  "finished_at": "2026-07-15T03:40:57.780377+00:00",
+  "error": null
+}

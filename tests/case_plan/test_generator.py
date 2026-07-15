@@ -276,6 +276,22 @@ class TestPlanGeneration:
         assert plan.numerics_plan["deltaT"] == 1.0
         assert plan.numerics_plan["steady"] is True
 
+    def test_numerics_plan_normalises_compile_ready_time_control(self) -> None:
+        draft = _make_confirmed_draft(
+            numerics={
+                "time_control": {
+                    "end_time": 20,
+                    "delta_t": 0.005,
+                    "write_interval": 50,
+                }
+            }
+        )
+        plan = CasePlanGenerator().generate(draft)
+
+        assert plan.numerics_plan["endTime"] == 20
+        assert plan.numerics_plan["deltaT"] == 0.005
+        assert plan.numerics_plan["writeInterval"] == 50
+
     def test_numerics_plan_defaults_steady(self) -> None:
         draft = _make_confirmed_draft(numerics={})
         plan = CasePlanGenerator().generate(draft)

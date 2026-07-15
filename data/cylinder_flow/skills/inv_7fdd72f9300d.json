@@ -1,0 +1,133 @@
+{
+  "invocation_id": "inv_7fdd72f9300d",
+  "skill_id": "fluid.intent_to_spec",
+  "skill_version": "1.0",
+  "entrypoint": "<lambda>",
+  "input": {
+    "user_text": "模拟二维圆柱绕流，圆柱半径0.2米，圆心位于y=2.0m处，来流速度1.5m/s，流体为空气（运动粘度1.5e-5 m²/s），计算域大小为长20米宽4米，在圆柱下游放置一个矩形障碍物，宽度0.3米高度0.05米，计算总时长1秒，监测圆柱阻力系数、升力系数和涡脱落频率"
+  },
+  "output": {
+    "scene": {
+      "dimension": "2D",
+      "flow_type": "external_flow",
+      "confidence": 0.95
+    },
+    "geometry": {
+      "domain": {
+        "length": {
+          "value": 20,
+          "unit": "m"
+        },
+        "height": {
+          "value": 4,
+          "unit": "m"
+        }
+      },
+      "objects": [
+        {
+          "id": "cylinder_1",
+          "type": "cylinder",
+          "radius": {
+            "value": 0.2,
+            "unit": "m"
+          },
+          "center": {
+            "x": {
+              "value": 0,
+              "unit": "m"
+            },
+            "y": {
+              "value": 2.0,
+              "unit": "m"
+            }
+          }
+        },
+        {
+          "id": "rectangular_obstacle",
+          "type": "rectangle",
+          "width": {
+            "value": 0.3,
+            "unit": "m"
+          },
+          "height": {
+            "value": 0.05,
+            "unit": "m"
+          },
+          "center": {
+            "x": {
+              "value": 20,
+              "unit": "m"
+            },
+            "y": {
+              "value": 2.0,
+              "unit": "m"
+            }
+          }
+        }
+      ]
+    },
+    "physics": {
+      "fluid_model": "incompressible_newtonian",
+      "density": {
+        "value": 1.225,
+        "unit": "kg/m3",
+        "source": "USER_EXPLICIT"
+      },
+      "kinematic_viscosity": {
+        "value": 1.5e-05,
+        "unit": "m2/s"
+      },
+      "reynolds_number": {
+        "value": 0
+      },
+      "inlet_velocity": {
+        "value": 1.5,
+        "unit": "m/s"
+      }
+    },
+    "boundaries": [
+      {
+        "name": "left",
+        "type": "velocity_inlet",
+        "details": {}
+      },
+      {
+        "name": "right",
+        "type": "pressure_outlet",
+        "details": {}
+      },
+      {
+        "name": "top",
+        "type": "open_boundary",
+        "details": {}
+      },
+      {
+        "name": "bottom",
+        "type": "no_slip_wall",
+        "details": {}
+      }
+    ],
+    "research_goals": [
+      "研究目标1",
+      "研究目标2"
+    ],
+    "requested_metrics": [
+      "drag_coefficient",
+      "lift_coefficient",
+      "vorticity",
+      "shedding_frequency"
+    ],
+    "missing_fields": [
+      "domain.height.value"
+    ],
+    "ambiguities": [
+      "自由出流"
+    ],
+    "unsupported_capabilities": []
+  },
+  "status": "PASSED",
+  "evidence": [],
+  "started_at": "2026-07-14T14:33:17.418795+00:00",
+  "finished_at": "2026-07-14T14:33:51.681533+00:00",
+  "error": null
+}

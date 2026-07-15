@@ -113,9 +113,27 @@ class InputRouter:
                 should_call_llm=False,
             )
 
+        # If the user already selected a study that needs clarification,
+        # treat their message as a clarification answer (not a new selection).
+        # But only if the message looks like a short reply (not a full
+        # research description with physics keywords).
         if (
             session.status is DraftSessionStatus.BATCH_REVIEW
-            and (_contains_any(message, _SELECTION_KEYWORDS) or _contains_non_ascii(message))
+            and session.selected_study_id
+            and len(message) < 100
+            and not _contains_any(message, _NEW_RESEARCH_KEYWORDS)
+        ):
+            return InputRoute(
+                input_type="clarification_answer",
+                intent="ANSWER_CLARIFICATION",
+                confidence=0.9,
+                reason="User already selected a study; treating message as clarification.",
+                should_call_llm=False,
+            )
+
+        if (
+            session.status is DraftSessionStatus.BATCH_REVIEW
+            and _contains_any(message, _SELECTION_KEYWORDS)
         ):
             return InputRoute(
                 input_type="study_selection",
@@ -143,6 +161,25 @@ class InputRouter:
                 intent="NEW_RESEARCH",
                 confidence=0.9,
                 reason="Message contains a numbered study list.",
+                should_call_llm=True,
+            )
+
+        # In BATCH_REVIEW, long messages with physics keywords are new research.
+        _PHYSICS_KEYWORDS = (
+            "流场", "流体", "圆柱", "管道", "雷诺数", "边界", "壁面",
+            "流速", "压力", "湍流", "涡", "入口", "出口", "仿真",
+            "cylinder", "flow", "reynolds", "turbulen", "boundary",
+            "velocity", "pressure", "inlet", "outlet", "simulation",
+        )
+        if (
+            len(message) > 50
+            and _contains_any(message, _PHYSICS_KEYWORDS)
+        ):
+            return InputRoute(
+                input_type="new_research_request",
+                intent="NEW_RESEARCH",
+                confidence=0.9,
+                reason="Long message with physics keywords — treating as new research.",
                 should_call_llm=True,
             )
 

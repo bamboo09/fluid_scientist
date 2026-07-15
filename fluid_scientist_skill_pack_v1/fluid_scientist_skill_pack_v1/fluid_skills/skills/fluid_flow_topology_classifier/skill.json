@@ -1,0 +1,11 @@
+{
+  "skill_id": "fluid.flow_topology.classifier",
+  "version": "1.0.0",
+  "category": "fluid_mechanics",
+  "summary": "从边界和驱动方式判断入口出口、周期强迫、开放域等拓扑。",
+  "entrypoint": "fluid_skills.runtime.topology:classify_flow_topology",
+  "deterministic": true,
+  "dependencies": [],
+  "platform": null,
+  "validation_status": "CANDIDATE"
+}

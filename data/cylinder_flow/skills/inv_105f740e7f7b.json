@@ -1,0 +1,126 @@
+{
+  "invocation_id": "inv_105f740e7f7b",
+  "skill_id": "fluid.intent_to_spec",
+  "skill_version": "1.0",
+  "entrypoint": "<lambda>",
+  "input": {
+    "user_text": "在二维流场中，长20米，宽8米，圆柱半径0.1m，圆心位于流场正中央，来流速度1.0m/s，Re=200。下壁面贴附一个高2m、宽4m的矩形凸起，位于圆柱正下方。左为速度入口，右为压力出口，上自由出流，下壁面无滑移。"
+  },
+  "output": {
+    "scene": {
+      "dimension": "2D",
+      "flow_type": "external_flow",
+      "confidence": 0.95
+    },
+    "geometry": {
+      "domain": {
+        "length": {
+          "value": 20,
+          "unit": "m"
+        },
+        "height": {
+          "value": 8,
+          "unit": "m"
+        }
+      },
+      "objects": [
+        {
+          "id": "cylinder_1",
+          "type": "cylinder",
+          "radius": {
+            "value": 0.1,
+            "unit": "m"
+          },
+          "center": {
+            "x": {
+              "value": 0,
+              "unit": "m"
+            },
+            "y": {
+              "value": 0,
+              "unit": "m"
+            }
+          }
+        },
+        {
+          "id": "rectangular_riser",
+          "type": "rectangle",
+          "height": {
+            "value": 2,
+            "unit": "m"
+          },
+          "width": {
+            "value": 4,
+            "unit": "m"
+          },
+          "center": {
+            "x": {
+              "value": 0,
+              "unit": "m"
+            },
+            "y": {
+              "value": -2,
+              "unit": "m"
+            }
+          }
+        }
+      ]
+    },
+    "physics": {
+      "fluid_model": "incompressible_newtonian",
+      "density": {
+        "value": 0,
+        "unit": "kg/m3",
+        "source": "UNKNOWN"
+      },
+      "kinematic_viscosity": {
+        "value": 0,
+        "unit": "m2/s"
+      },
+      "reynolds_number": {
+        "value": 200
+      },
+      "inlet_velocity": {
+        "value": 1.0,
+        "unit": "m/s"
+      }
+    },
+    "boundaries": [
+      {
+        "name": "left",
+        "type": "velocity_inlet",
+        "details": {}
+      },
+      {
+        "name": "right",
+        "type": "pressure_outlet",
+        "details": {}
+      },
+      {
+        "name": "top",
+        "type": "free_slip",
+        "details": {}
+      },
+      {
+        "name": "bottom",
+        "type": "no_slip_wall",
+        "details": {}
+      }
+    ],
+    "research_goals": [],
+    "requested_metrics": [],
+    "missing_fields": [
+      "research_goals",
+      "requested_metrics",
+      "kinematic_viscosity",
+      "density"
+    ],
+    "ambiguities": [],
+    "unsupported_capabilities": []
+  },
+  "status": "PASSED",
+  "evidence": [],
+  "started_at": "2026-07-15T08:22:16.069017+00:00",
+  "finished_at": "2026-07-15T08:22:59.549038+00:00",
+  "error": null
+}

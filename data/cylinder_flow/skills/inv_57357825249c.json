@@ -1,0 +1,116 @@
+{
+  "invocation_id": "inv_57357825249c",
+  "skill_id": "fluid.intent_to_spec",
+  "skill_version": "1.0",
+  "entrypoint": "<lambda>",
+  "input": {
+    "user_text": "二维长方形水流场，长300m，高25m，上边界施加向右切向应力，两侧周期，下壁无滑移；下壁中央有正弦凸起，高5m、宽20m；分析指定截面平均流速。"
+  },
+  "output": {
+    "scene": {
+      "dimension": "2D",
+      "flow_type": "external_flow",
+      "confidence": 0.9
+    },
+    "geometry": {
+      "domain": {
+        "length": {
+          "value": 300,
+          "unit": "m"
+        },
+        "height": {
+          "value": 25,
+          "unit": "m"
+        }
+      },
+      "objects": [
+        {
+          "id": "bump_1",
+          "type": "sinusoidal_bump",
+          "height": {
+            "value": 5,
+            "unit": "m"
+          },
+          "width": {
+            "value": 20,
+            "unit": "m"
+          },
+          "center": {
+            "x": {
+              "value": 0,
+              "unit": "m"
+            },
+            "y": {
+              "value": 0,
+              "unit": "m"
+            }
+          }
+        }
+      ]
+    },
+    "physics": {
+      "fluid_model": "incompressible_newtonian",
+      "density": {
+        "value": 1000,
+        "unit": "kg/m3",
+        "source": "USER_EXPLICIT"
+      },
+      "kinematic_viscosity": {
+        "value": 0,
+        "unit": "m2/s",
+        "source": "UNKNOWN"
+      },
+      "reynolds_number": {
+        "value": 0,
+        "source": "UNKNOWN"
+      },
+      "inlet_velocity": {
+        "value": 0,
+        "unit": "m/s",
+        "source": "UNKNOWN"
+      }
+    },
+    "boundaries": [
+      {
+        "name": "top",
+        "type": "shear_stress_inlet",
+        "details": {
+          "direction": "right"
+        }
+      },
+      {
+        "name": "left",
+        "type": "periodic_boundary",
+        "details": {}
+      },
+      {
+        "name": "right",
+        "type": "periodic_boundary",
+        "details": {}
+      },
+      {
+        "name": "bottom",
+        "type": "no_slip_wall",
+        "details": {}
+      }
+    ],
+    "research_goals": [
+      "analyze average velocity at specified section"
+    ],
+    "requested_metrics": [
+      "average_velocity"
+    ],
+    "missing_fields": [
+      "kinematic_viscosity",
+      "reynolds_number",
+      "inlet_velocity"
+    ],
+    "ambiguities": [],
+    "unsupported_capabilities": []
+  },
+  "status": "PASSED",
+  "evidence": [],
+  "started_at": "2026-07-15T09:31:20.148402+00:00",
+  "finished_at": "2026-07-15T09:31:47.446041+00:00",
+  "error": null
+}

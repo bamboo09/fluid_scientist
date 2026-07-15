@@ -1,0 +1,11 @@
+{
+  "skill_id": "postprocess.flow_visualization",
+  "version": "1.0.0",
+  "category": "postprocess",
+  "summary": "生成白名单 PlotSpec，绑定 run_id 和 spec_version。",
+  "entrypoint": "fluid_skills.runtime.visualization:build_plot_spec",
+  "deterministic": true,
+  "dependencies": [],
+  "platform": null,
+  "validation_status": "CANDIDATE"
+}

@@ -139,8 +139,4 @@ def test_pipeline_does_not_silently_fallback_without_explicit_mock(monkeypatch, 
     monkeypatch.delenv("FLUID_SCIENTIST_LLM_MODE", raising=False)
     pipeline = V5WorkflowPipeline(work_root=work_root)
 
-    state = pipeline.run("Study turbulent channel flow and report velocity profile.")
-
-    assert state.current_stage == "failed"
-    assert state.failure["failed_stage"] == "understanding"
-    assert state.failure["internal_details"]["fallback_used"] is False
+    stat
