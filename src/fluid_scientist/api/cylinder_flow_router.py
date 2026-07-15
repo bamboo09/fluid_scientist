@@ -1924,6 +1924,24 @@ async def create_draft(request: DraftRequest) -> DraftResponse:
     _auditor = AmbiguityAndConflictAuditor()
     _audit_result = _auditor.audit(spec, request.user_text, derivation_result=_derivation_result)
 
+    # Run semantic fidelity guard — verify user intent is preserved
+    from fluid_scientist.intent.semantic_fidelity_guard import SemanticFidelityGuard
+    _fidelity_guard = SemanticFidelityGuard()
+    _fidelity_result = _fidelity_guard.check_spec(spec, request.user_text)
+
+    # Add blocking violations from fidelity guard
+    for v in _fidelity_result.violations:
+        existing_codes = [i.get("code") for i in spec.blocking_issues if isinstance(i, dict)]
+        if v.code not in existing_codes:
+            spec.blocking_issues.append({
+                "code": v.code,
+                "message": v.message,
+                "category": "SEMANTIC_FIDELITY",
+                "severity": v.severity,
+                "field_path": v.field_path,
+                "evidence": v.evidence,
+            })
+
     # Add blocking issues from audit
     for issue in _audit_result.blocking_issues:
         # Avoid duplicates
