@@ -2726,8 +2726,29 @@ class ExecutionOrchestrator:
                 result.smoke_test_report = smoke_report
 
                 if smoke_report["status"] == "FAILED":
-                    result.warnings.append("Smoke test failed — proceeding with full run anyway")
-                    logger.warning("[%s] Smoke test failed", job_id)
+                    # BLOCK: Do NOT proceed with full run when smoke test fails
+                    result.status = "FAILED"
+                    result.error = "Smoke test failed — full run blocked to prevent wasted computation"
+                    result.warnings.append("Smoke test FAILED — full run BLOCKED (P3 fix)")
+                    logger.error("[%s] Smoke test failed — blocking full run", job_id)
+
+                    # Classify the error for potential repair
+                    try:
+                        from fluid_scientist.repair.error_classifier import OpenFOAMErrorClassifier
+                        classifier = OpenFOAMErrorClassifier()
+                        smoke_log = smoke_report.get("output_tail", "")
+                        errors = classifier.classify(smoke_log, stage="smoke")
+                        if errors:
+                            primary = classifier.get_primary_error(errors)
+                            result.warnings.append(
+                                f"Error classified: {primary.category.value} — {primary.error_message}"
+                            )
+                            result.smoke_test_report["classified_errors"] = [e.to_dict() for e in errors]
+                    except Exception as cls_err:
+                        logger.warning("[%s] Error classification failed: %s", job_id, cls_err)
+
+                    result.elapsed_seconds = time.time() - t_start
+                    return result
                 else:
                     logger.info("[%s] Smoke test passed", job_id)
             else:
