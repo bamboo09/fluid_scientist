@@ -57,6 +57,7 @@ from fluid_scientist.intent.conflict_resolver import (
     LLMCandidateExtractor,
     RegexCandidateExtractor,
 )
+from fluid_scientist.skills.skill_resolver import SkillResolver
 
 router = APIRouter(prefix="/api/v5/cylinder-flow", tags=["cylinder-flow-2d"])
 
@@ -152,8 +153,17 @@ def _llm_structured_parse(user_text: str, session_id: str = "") -> dict:
     """Call LLM to parse user input into structured experiment spec.
 
     Returns the parsed JSON dict. Raises HTTPException on failure.
+    Skill prompt fragments are injected into the system prompt for domain-specific guidance.
     """
     llm = _require_llm_client()
+
+    # Inject skill prompt fragments into system prompt
+    _skill_resolver = SkillResolver()
+    skill_injection = _skill_resolver.build_prompt_injection(
+        user_text=user_text,
+        stage="intent",
+    )
+    full_system_prompt = _LLM_PARSE_SYSTEM_PROMPT + skill_injection
 
     output_schema = {
         "type": "object",
@@ -174,11 +184,11 @@ def _llm_structured_parse(user_text: str, session_id: str = "") -> dict:
     parsed, record = llm.call(
         purpose="study_decomposition",
         prompt_name="cyl_flow_structured_parse",
-        system_prompt=_LLM_PARSE_SYSTEM_PROMPT,
+        system_prompt=full_system_prompt,
         user_message=user_text,
         output_schema=output_schema,
         session_id=session_id,
-        prompt_version="cyl-parse-v1",
+        prompt_version="cyl-parse-v2-with-skills",
     )
 
     if not record.success:

@@ -1,0 +1,26 @@
+skill_id: fluid.spatial_reasoning
+name: "空间关系推理技能"
+description: "验证和保持用户描述的空间关系"
+stage: geometry
+priority: 82
+enabled: true
+version: "1.0"
+selection_keywords:
+  - 正下方
+  - 贴附
+  - 正中央
+  - 位于
+  - below
+  - above
+  - centered
+  - attached
+prompt_fragment: |
+  ## 空间关系规则
+  - "位于圆柱正下方" → obstacle.center_x == cylinder.center_x
+  - "贴附下壁面" → obstacle底部y=0
+  - "正中央" → cylinder.center_x == domain.length / 2
+  - "距下壁Xm" → cylinder.center_y == X + radius
+  - 空间关系必须在compiled case中保持
+  - 空间关系冲突（如"距下壁2m"和"正中央"给出不同y）必须检测并报告
+compiler_hooks:
+  enforce_spatial_relations: "true"

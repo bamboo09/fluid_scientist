@@ -1,0 +1,21 @@
+skill_id: fluid.intent_to_spec
+name: "意图到Spec转换技能"
+description: "将用户自然语言意图转换为结构化实验规格"
+stage: intent
+priority: 85
+enabled: true
+version: "1.0"
+selection_keywords:
+  - 绕流
+  - 流场
+  - 入口
+  - 出口
+  - 雷诺
+  - Reynolds
+prompt_fragment: |
+  ## 意图转换规则
+  - 提取用户明确表达的物理参数，不猜测不补默认
+  - 几何实体数量必须与用户描述一致
+  - 空间关系（正下方、贴附、正中央）必须保留到spec
+  - 可推导参数（nu=U*D/Re）不要列为missing
+  - 边界条件歧义（如"自由出流"）必须标记并给出选项

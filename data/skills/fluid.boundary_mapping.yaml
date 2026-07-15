@@ -1,0 +1,28 @@
+skill_id: fluid.boundary_mapping
+name: "边界条件映射技能"
+description: "将语义边界条件映射到OpenFOAM边界类型"
+stage: physics
+priority: 80
+enabled: true
+version: "1.0"
+selection_keywords:
+  - 速度入口
+  - 压力出口
+  - 自由出流
+  - 无滑移
+  - 周期
+  - inlet
+  - outlet
+  - no-slip
+  - periodic
+prompt_fragment: |
+  ## 边界条件映射规则
+  - "速度入口" → velocity inlet (fixedValue U, zeroGradient p)
+  - "压力出口" → pressure outlet (zeroGradient U, fixedValue p=0)
+  - "自由出流" → 提供选项：symmetry/slip/freestream/open_boundary
+  - "无滑移壁面" → no-slip wall (fixedValue U=(0,0,0))
+  - "周期边界" → cyclic (必须成对出现)
+  - 2D问题front/back必须为empty
+  - 禁止将"自由出流"直接设为no_slip_wall
+compiler_hooks:
+  boundary_mapping_strategy: "semantic_to_openfoam"

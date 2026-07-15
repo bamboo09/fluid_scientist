@@ -1,0 +1,22 @@
+skill_id: fluid.error_diagnosis
+name: "错误诊断技能"
+description: "诊断OpenFOAM执行错误并提供修复建议"
+stage: repair
+priority: 75
+enabled: true
+version: "1.0"
+selection_keywords:
+  - error
+  - failed
+  - NaN
+  - diverge
+  - Courant
+prompt_fragment: |
+  ## 错误诊断规则
+  - NaN: 检查nu是否为0、边界条件是否矛盾、网格质量
+  - CFL过高: 减小deltaT或启用adjustTimeStep maxCo=0.5
+  - 边界条件不匹配: 检查0/文件夹patch名与polyMesh/boundary一致
+  - 网格错误: 检查blockMeshDict vertices/blocks/boundary定义
+  - 语法错误: 检查分号、大括号、关键词拼写
+  - 修复不得改变用户原始物理设置
+  - 修复后必须通过验证（syntax → mesh → smoke）才能重试

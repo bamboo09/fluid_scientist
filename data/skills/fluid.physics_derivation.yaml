@@ -1,0 +1,23 @@
+skill_id: fluid.physics_derivation
+name: "物理参数推导技能"
+description: "自动推导可计算的物理参数"
+stage: physics
+priority: 75
+enabled: true
+version: "1.0"
+selection_keywords:
+  - Re
+  - 雷诺
+  - 黏度
+  - viscosity
+  - nu
+prompt_fragment: |
+  ## 物理推导规则
+  - nu = U * D / Re (当U, D, Re已知时)
+  - D = 2 * R (直径半径互推)
+  - reference_length = D (力系数参考长度)
+  - reference_area = D * 1 (2D单位展向面积)
+  - St ≈ 0.198 * (1 - 19.7/Re) (圆柱涡脱落Strouhal数经验公式, Re<200)
+  - delta_t估算: delta_t < 0.5 * delta_x / U (CFL条件)
+  - 推导出的参数标记为FORMULA_DERIVED，不向用户提问
+  - 推导链变更时必须重新计算所有依赖值

@@ -1,0 +1,30 @@
+skill_id: fluid.metric_spec_builder
+name: "观测指标构建技能"
+description: "根据研究目标配置数据采集和后处理指标"
+stage: postprocess
+priority: 78
+enabled: true
+version: "1.0"
+selection_keywords:
+  - 阻力
+  - 升力
+  - 涡街
+  - 涡脱落
+  - Cd
+  - Cl
+  - Strouhal
+  - 频率
+  - drag
+  - lift
+prompt_fragment: |
+  ## 观测指标规则
+  - "升阻力系数" → forceCoeffs functionObject (Cd, Cl time series)
+  - "涡脱落频率" → FFT/PSD analysis on Cl time series → Strouhal number
+  - "涡街形态" → vorticity field output at regular intervals
+  - "平均流速" → fieldAverage or surfaceFieldValue
+  - forceCoeffs必须在仿真前配置，不能事后补
+  - 写间隔writeInterval必须足够记录时间序列
+  - 参考长度=l_ref=D, 参考面积=A_ref=D*1, 参考速度=U_ref=U_inlet
+compiler_hooks:
+  configure_force_coeffs: "true"
+  configure_vorticity_output: "true"

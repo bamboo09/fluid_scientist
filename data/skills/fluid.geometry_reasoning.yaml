@@ -1,0 +1,37 @@
+skill_id: fluid.geometry_reasoning
+name: "几何推理技能"
+description: "识别和归一化用户描述的几何形状，确保语义忠实性"
+stage: geometry
+priority: 90
+enabled: true
+version: "1.0"
+selection_keywords:
+  - 三角
+  - 矩形
+  - 圆柱
+  - 余弦
+  - 正弦
+  - 凸起
+  - obstacle
+  - cylinder
+  - triangle
+  - rectangle
+selection_geometry:
+  - triangle
+  - rectangle
+  - cylinder
+  - cosine_bell
+  - half_sine
+prompt_fragment: |
+  ## 几何推理规则
+  - 用户说"三角" → type="triangle"，禁止替换为cosine_bell
+  - 用户说"矩形" → type="rectangle"，禁止替换为triangle
+  - 用户说"余弦凸起" → type="cosine_bell"，仅作为底部轮廓
+  - 用户说"正弦凸起" → type="half_sine"，仅作为底部轮廓
+  - 用户说"圆柱" → type="cylinder"
+  - 未知形状 → type="unknown"，触发clarification
+  - 禁止将任何几何类型替换为最接近的已知类型
+  - 几何维度必须精确保持用户指定的值，不得缩放
+compiler_hooks:
+  enforce_semantic_type: "true"
+  prevent_geometry_substitution: "true"

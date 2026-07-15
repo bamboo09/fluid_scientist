@@ -1,0 +1,26 @@
+skill_id: fluid.postprocess_config
+name: "后处理配置技能"
+description: "配置仿真前数据采集和后处理脚本"
+stage: postprocess
+priority: 65
+enabled: true
+version: "1.0"
+selection_keywords:
+  - 后处理
+  - 可视化
+  - 流线
+  - 涡量
+  - postprocess
+  - visualize
+prompt_fragment: |
+  ## 后处理配置规则
+  - forceCoeffs: 在controlDict中配置，记录Cd/Cl时间序列
+  - vorticity: 使用functionObject `vorticity` 或后处理脚本计算
+  - streamlines: 使用paraview或foamStreamLines
+  - FFT分析: 对Cl时间序列做FFT提取主频→St=f*D/U
+  - 截面平均流速: surfaceFieldValue over plane
+  - 所有functionObject必须在controlDict中预配置
+  - writeInterval必须足够: 至少100个时间步记录
+compiler_hooks:
+  configure_postprocess: "true"
+  fft_analysis: "true"

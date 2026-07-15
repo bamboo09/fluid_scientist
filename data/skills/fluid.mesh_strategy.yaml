@@ -1,0 +1,29 @@
+skill_id: fluid.mesh_strategy
+name: "网格策略技能"
+description: "根据几何和物理条件选择网格生成策略"
+stage: mesh
+priority: 70
+enabled: true
+version: "1.0"
+selection_keywords:
+  - 网格
+  - mesh
+  - blockMesh
+  - snappyHexMesh
+selection_geometry:
+  - cylinder
+  - triangle
+  - rectangle
+prompt_fragment: |
+  ## 网格策略规则
+  - 圆柱绕流: blockMesh背景网格 + snappyHexMesh加密圆柱周围
+  - 圆柱周围加密: 至少20 cells/diameter
+  - 尾流区域加密: 圆柱下游5D范围内
+  - 三角障碍: snappyHexMesh STL面加密
+  - 矩形障碍: blockMesh顶点定义或snappyHexMesh
+  - 底部凸起: blockMesh底面顶点修改
+  - y+ < 1 for laminar, y+ ~ 30 for turbulent wall functions
+  - 网格连续性: 避免急剧size ratio变化
+compiler_hooks:
+  mesh_refinement_cylinder: "20_cells_per_diameter"
+  mesh_refinement_wake: "5D_downstream"

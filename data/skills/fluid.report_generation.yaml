@@ -1,0 +1,21 @@
+skill_id: fluid.report_generation
+name: "报告生成技能"
+description: "基于仿真结果生成结构化科学报告"
+stage: report
+priority: 60
+enabled: true
+version: "1.0"
+selection_keywords:
+  - 报告
+  - 分析
+  - report
+  - analysis
+prompt_fragment: |
+  ## 报告生成规则
+  - 报告必须基于实际仿真结果，不得编造数据
+  - Cd/Cl: 从forceCoeffs时间序列提取平均值和振幅
+  - St: 从Cl时间序列FFT分析提取主频
+  - 涡街形态: 从涡量场快照描述
+  - 报告包含: 实验设置、网格信息、数值方法、结果、物理分析、结论
+  - 必须标注数据来源（forceCoeffs日志、场数据等）
+  - 物理一致性检查: Cd与Re的经验值对比、St与经验公式对比

@@ -1,0 +1,27 @@
+skill_id: fluid.solver_selection
+name: "求解器选择技能"
+description: "根据物理条件选择OpenFOAM求解器和离散格式"
+stage: solver
+priority: 72
+enabled: true
+version: "1.0"
+selection_keywords:
+  - 层流
+  - 湍流
+  - laminar
+  - turbulent
+  - piso
+  - pimple
+  - simple
+prompt_fragment: |
+  ## 求解器选择规则
+  - Re < 2300 (层流): pisoFoam或foamRun -solver incompressibleFluid
+  - Re > 2300 (湍流): pimpleFoam + k-omega SST turbulence model
+  - 2D问题: 使用empty front/back边界
+  - 时间离散: backward (二阶) for transient, Euler for smoke test
+  - 空间离散: linear (二阶) for convection, Gauss linear for gradient
+  - 压力-速度耦合: PISO (transient) or SIMPLE (steady)
+  - CFL条件: maxCo=0.5 for pimpleFoam, maxCo=0.8 for pisoFoam
+compiler_hooks:
+  default_solver: "incompressibleFluid"
+  default_turbulence: "laminar"
