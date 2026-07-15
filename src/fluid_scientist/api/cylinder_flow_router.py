@@ -52,6 +52,11 @@ from fluid_scientist.cylinder_flow_2d import (
     ModelPolicy,
     ProvenanceField,
 )
+from fluid_scientist.intent.conflict_resolver import (
+    ConflictResolver,
+    LLMCandidateExtractor,
+    RegexCandidateExtractor,
+)
 
 router = APIRouter(prefix="/api/v5/cylinder-flow", tags=["cylinder-flow-2d"])
 
@@ -474,6 +479,8 @@ class DraftResponse(BaseModel):
     non_blocking_assumptions: list[dict] = Field(default_factory=list)
     derived_value_issues: list[dict] = Field(default_factory=list)
     audit_issues: list[dict] = Field(default_factory=list)
+    # New: intent candidate set for traceability
+    intent_candidates: dict[str, Any] | None = None
     error: str | None = None
 
 
@@ -1854,8 +1861,41 @@ async def create_draft(request: DraftRequest) -> DraftResponse:
         input_data={"user_text": request.user_text, "result": run_result},
     )
 
+    # --- Intent candidate extraction and conflict resolution ---
+    # Extract independent candidates from regex pipeline and LLM
+    regex_extractor = RegexCandidateExtractor()
+    llm_extractor = LLMCandidateExtractor()
+    regex_cands = regex_extractor.extract(spec, request.user_text)
+    llm_cands = llm_extractor.extract(llm_parsed, request.user_text)
+
+    # Resolve conflicts between regex and LLM candidates
+    resolver = ConflictResolver()
+    candidate_set = resolver.resolve(regex_cands, llm_cands, request.user_text)
+
+    # Handle duplicate entity conflicts (e.g., sine bump creating both rectangle and bump)
+    for conflict in candidate_set.conflicts:
+        if conflict.conflict_type.value == "duplicate_entity":
+            if conflict.resolution == "keep_bottom_profile_remove_rectangle":
+                # Disable rectangle when bump is the intended geometry
+                spec.rectangle.enabled = False
+                spec.rectangle.width_m = ProvenanceField(
+                    value=None, source=FieldSource.SYSTEM_DEFAULT,
+                    status=FieldStatus.UNRESOLVED, reason="Removed: duplicate with bottom_profile",
+                )
+                spec.rectangle.height_m = ProvenanceField(
+                    value=None, source=FieldSource.SYSTEM_DEFAULT,
+                    status=FieldStatus.UNRESOLVED, reason="Removed: duplicate with bottom_profile",
+                )
+        elif conflict.conflict_type.value == "semantic_type_conflict" and conflict.severity.value == "blocking":
+            # Add blocking conflicts to spec
+            spec.blocking_issues.append({
+                "code": "CANDIDATE_CONFLICT",
+                "message": f"Regex and LLM disagree on {conflict.field_path}: regex={conflict.regex_value}, llm={conflict.llm_value}",
+                "conflict": conflict.to_dict(),
+            })
+
     # --- Apply LLM-extracted values over regex output ---
-    # LLM takes precedence for semantic fields
+    # LLM takes precedence for semantic fields (with is_resolved() guards)
     _skill_executor.execute(
         skill_id="fluid.metric_spec_builder",
         entrypoint_fn=lambda data: _apply_llm_to_spec(data["spec"], data["llm_parsed"], data["user_text"]),
@@ -2028,6 +2068,7 @@ async def create_draft(request: DraftRequest) -> DraftResponse:
             "success": spec._llm_call_records[-1]["success"] if hasattr(spec, '_llm_call_records') and spec._llm_call_records else None,
         } if hasattr(spec, '_llm_call_records') and spec._llm_call_records else None,
         skill_summary=_skill_executor.summary(),
+        intent_candidates=candidate_set.to_dict(),
     )
 
 
