@@ -61,8 +61,49 @@ from fluid_scientist.skills.skill_resolver import SkillResolver
 
 router = APIRouter(prefix="/api/v5/cylinder-flow", tags=["cylinder-flow-2d"])
 
-# In-memory store (production would use database)
+# In-memory store (backed by SQLite for persistence across restarts)
 _spec_store: dict[str, CylinderFlow2DExperimentSpecV1] = {}
+
+# SQLite persistence layer
+from fluid_scientist.persistence.store import get_persistence as _get_persistence
+
+def _persist_spec(spec_id: str, spec: Any, session_id: str = "", user_input: str = "") -> None:
+    """Save spec to both in-memory store and SQLite."""
+    _spec_store[spec_id] = spec
+    try:
+        _get_persistence().save_spec(spec_id, spec, session_id, user_input)
+    except Exception as _e:
+        pass  # Non-fatal: in-memory store still works
+
+def _load_spec(spec_id: str) -> CylinderFlow2DExperimentSpecV1 | None:
+    """Load spec from in-memory store, fallback to SQLite."""
+    spec = _spec_store.get(spec_id)
+    if spec is not None:
+        return spec
+    # Fallback: try SQLite
+    try:
+        spec_dict = _get_persistence().load_spec(spec_id)
+        if spec_dict:
+            spec = CylinderFlow2DExperimentSpecV1(**spec_dict)
+            _spec_store[spec_id] = spec  # Warm the cache
+            return spec
+    except Exception:
+        pass
+    return None
+
+# Recover specs from SQLite on startup
+try:
+    _recovered = _get_persistence().recover_all_specs()
+    for _sid, _sdict in _recovered.items():
+        try:
+            _spec_store[_sid] = CylinderFlow2DExperimentSpecV1(**_sdict)
+        except Exception:
+            pass
+    if _recovered:
+        import logging as _logging
+        _logging.getLogger(__name__).info("Recovered %d specs from SQLite", len(_recovered))
+except Exception:
+    pass
 
 
 # ---------------------------------------------------------------------------
@@ -2052,7 +2093,7 @@ async def create_draft(request: DraftRequest) -> DraftResponse:
     # Store the spec
     spec_id = f"spec_{uuid.uuid4().hex[:12]}"
     spec.experiment_id = spec_id
-    _spec_store[spec_id] = spec
+    _persist_spec(spec_id, spec)
 
     # Store LLM call record on spec for traceability
     llm_client = _get_llm_client()
@@ -2118,7 +2159,7 @@ async def create_draft(request: DraftRequest) -> DraftResponse:
 @router.post("/revalidate", response_model=DraftResponse)
 async def revalidate_spec(request: RevalidateRequest) -> DraftResponse:
     """Re-validate an existing spec after changes."""
-    spec = _spec_store.get(request.spec_id)
+    spec = _load_spec(request.spec_id)
     if spec is None and request.spec is not None:
         spec = CylinderFlow2DExperimentSpecV1(**request.spec)
     if spec is None:
@@ -2133,7 +2174,7 @@ async def revalidate_spec(request: RevalidateRequest) -> DraftResponse:
     new_spec = run_result.spec
     new_spec.experiment_id = spec.experiment_id
     new_spec.spec_version = spec.spec_version + 1
-    _spec_store[request.spec_id] = new_spec
+    _persist_spec(request.spec_id, new_spec)
 
     return DraftResponse(
         success=True,
@@ -2157,13 +2198,13 @@ async def modify_spec(request: ModifyRequest) -> DraftResponse:
     the modification_text are changed. All previously confirmed values
     (USER_CONFIRMED source) are preserved. Derived fields are re-derived.
     """
-    spec = _spec_store.get(request.spec_id)
+    spec = _load_spec(request.spec_id)
     if spec is None:
         # Recovery: re-run pipeline from user_input if provided
         if request.user_input:
             pipeline_recovery = CylinderFlow2DV1Pipeline()
             spec = pipeline_recovery.run(request.user_input).spec
-            _spec_store[request.spec_id] = spec
+            _persist_spec(request.spec_id, spec)
         else:
             return DraftResponse(
                 success=False,
@@ -2329,7 +2370,7 @@ async def modify_spec(request: ModifyRequest) -> DraftResponse:
     if spec.user_input_text:
         spec.user_input_text = spec.user_input_text + "\n[修改] " + mod_text
 
-    _spec_store[request.spec_id] = spec
+    _persist_spec(request.spec_id, spec)
 
     return DraftResponse(
         success=True,
@@ -2367,14 +2408,14 @@ async def confirm_spec(request: ConfirmRequest) -> ConfirmResponse:
     If there are blocking issues, returns NEEDS_CLARIFICATION with
     user-facing questions.
     """
-    spec = _spec_store.get(request.spec_id)
+    spec = _load_spec(request.spec_id)
     if spec is None:
         # Recovery: if user_input is provided, re-run pipeline to restore spec
         if request.user_input:
             pipeline = CylinderFlow2DV1Pipeline()
             run_result = pipeline.run(request.user_input)
             spec = run_result.spec
-            _spec_store[request.spec_id] = spec
+            _persist_spec(request.spec_id, spec)
         else:
             return ConfirmResponse(
                 success=False,
@@ -2514,7 +2555,7 @@ async def confirm_spec(request: ConfirmRequest) -> ConfirmResponse:
     if request.max_courant is not None:
         spec.simulation.max_courant_number = request.max_courant
 
-    _spec_store[request.spec_id] = spec
+    _persist_spec(request.spec_id, spec)
 
     return ConfirmResponse(
         success=True,
@@ -2528,7 +2569,7 @@ async def confirm_spec(request: ConfirmRequest) -> ConfirmResponse:
 @router.get("/{spec_id}", response_model=DraftResponse)
 async def get_spec(spec_id: str) -> DraftResponse:
     """Read a stored spec by ID."""
-    spec = _spec_store.get(spec_id)
+    spec = _load_spec(spec_id)
     if spec is None:
         return DraftResponse(
             success=False,
@@ -2584,7 +2625,7 @@ _execution_store: dict[str, dict] = {}
 @router.post("/compile", response_model=CompileResponse)
 async def compile_spec(request: CompileRequest) -> CompileResponse:
     """Compile a confirmed spec into OpenFOAM case files."""
-    spec = _spec_store.get(request.spec_id)
+    spec = _load_spec(request.spec_id)
     if spec is None:
         return CompileResponse(
             success=False,
@@ -2694,7 +2735,7 @@ async def execute_case(request: ExecuteRequest) -> ExecuteResponse:
             error=f"Compiled case not found: {request.job_id}",
         )
 
-    spec = _spec_store.get(compiled["spec_id"])
+    spec = _load_spec(compiled["spec_id"])
     if spec is None:
         return ExecuteResponse(
             success=False,
@@ -2801,7 +2842,7 @@ async def resume_run(job_id: str, request: ResumeRunRequest):
     if compiled is None:
         return {"success": False, "error": "Compiled case not found"}
 
-    spec = _spec_store.get(compiled.get("spec_id", ""))
+    spec = _load_spec(compiled.get("spec_id", ""))
     if spec is None:
         return {"success": False, "error": "Original spec not found"}
 
@@ -2946,14 +2987,14 @@ def _unwrap_pf(pf: Any, default: Any = None) -> Any:
 
 def _load_spec(spec_id: str) -> CylinderFlow2DExperimentSpecV1 | None:
     """Load a spec from memory cache, falling back to JSON persistence."""
-    spec = _spec_store.get(spec_id)
+    spec = _load_spec(spec_id)
     if spec is not None:
         return spec
     session = _session_store.load(spec_id)
     if session and "spec" in session:
         try:
             spec = CylinderFlow2DExperimentSpecV1(**session["spec"])
-            _spec_store[spec_id] = spec
+            _persist_spec(spec_id, spec)
             return spec
         except Exception:
             return None
@@ -3626,7 +3667,7 @@ async def confirm_plan(
     # Freeze the spec
     spec.draft_status = DraftStatus.SPEC_CONFIRMED
     spec.spec_version += 1
-    _spec_store[spec_id] = spec
+    _persist_spec(spec_id, spec)
 
     # Generate compile preview
     preview = _generate_compile_preview(spec)
