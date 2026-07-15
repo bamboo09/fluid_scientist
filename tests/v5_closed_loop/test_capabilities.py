@@ -60,13 +60,13 @@ def make_mock_spec(
     identically without importing the full model graph.
     """
     observables = [
-        SimpleNamespace(observable_type=_enum_like(ot))
+        SimpleNamespace(type=_enum_like(ot))
         for ot in (observable_types or [])
     ]
 
     boundaries = SimpleNamespace()
-    for name in ("left", "right", "top", "bottom"):
-        btype = (boundary_types or {}).get(name)
+    for name in ("left", "right", "top", "bottom_flat"):
+        btype = (boundary_types or {}).get(name.replace("_flat", ""))
         if btype:
             setattr(boundaries, name, SimpleNamespace(semantic_type=_enum_like(btype)))
         else:
@@ -83,7 +83,7 @@ def make_mock_spec(
         has_rectangle=has_rectangle,
         has_bottom_profile=has_bottom_profile,
         bottom_profile=bottom_profile,
-        fluid=SimpleNamespace(fluid_model=fluid_model),
+        fluid=SimpleNamespace(type=_enum_like(fluid_model)),
         observables=observables,
         boundaries=boundaries,
         blocking_issues=blocking_issues or [],

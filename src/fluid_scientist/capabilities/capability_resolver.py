@@ -113,7 +113,11 @@ class CapabilityResolver:
                 result.unsupported.append(f"geometry:{bp_type}")
 
         # Check physics
-        fluid_model = spec.fluid.fluid_model if hasattr(spec, "fluid") else "unknown"
+        fluid_model = "unknown"
+        if hasattr(spec, "fluid") and spec.fluid is not None:
+            fluid_type_field = getattr(spec.fluid, "type", None)
+            if fluid_type_field is not None:
+                fluid_model = fluid_type_field.value if hasattr(fluid_type_field, "value") else str(fluid_type_field)
         if fluid_model in SUPPORTED_PHYSICS or fluid_model == "unknown":
             result.supported.append(f"physics:{fluid_model}")
         else:
@@ -121,7 +125,8 @@ class CapabilityResolver:
 
         # Check observables
         for obs in spec.observables:
-            obs_type = obs.observable_type.value
+            obs_type_field = getattr(obs, "type", None)
+            obs_type = obs_type_field.value if hasattr(obs_type_field, "value") else str(obs_type_field)
             if obs_type in SUPPORTED_OBSERVABLES:
                 result.supported.append(f"observable:{obs_type}")
             else:
@@ -129,14 +134,15 @@ class CapabilityResolver:
 
         # Check boundaries
         bc = spec.boundaries
-        for boundary_name in ("left", "right", "top", "bottom"):
+        for boundary_name in ("left", "right", "top", "bottom_flat"):
             b = getattr(bc, boundary_name, None)
-            if b and b.semantic_type:
-                btype = b.semantic_type.value
+            if b and getattr(b, "semantic_type", None):
+                btype = b.semantic_type.value if hasattr(b.semantic_type, "value") else str(b.semantic_type)
+                display_name = boundary_name.replace("_flat", "")
                 if btype in SUPPORTED_BOUNDARIES:
-                    result.supported.append(f"boundary:{boundary_name}:{btype}")
+                    result.supported.append(f"boundary:{display_name}:{btype}")
                 else:
-                    result.unsupported.append(f"boundary:{boundary_name}:{btype}")
+                    result.unsupported.append(f"boundary:{display_name}:{btype}")
 
         # Check for truly unsupported features (from LLM unsupported_capabilities)
         if hasattr(spec, "blocking_issues"):
