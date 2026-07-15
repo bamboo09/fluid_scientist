@@ -476,7 +476,7 @@ class SemanticFidelityGuard:
             )
 
         # Check bottom wall consistency
-        bottom_type = bc.bottom.semantic_type.value if bc.bottom.semantic_type else None
+        bottom_type = bc.bottom_flat.semantic_type.value if bc.bottom_flat.semantic_type else None
         if "无滑移" in user_text or "no-slip" in user_text.lower() or "no_slip" in user_text.lower():
             if bottom_type and bottom_type != "no_slip_wall":
                 result.add_violation(

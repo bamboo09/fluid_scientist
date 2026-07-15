@@ -388,15 +388,16 @@ class LLMReportGenerator:
 
         # Try LLM report generation
         client = llm_client or self._llm_client
+        used_llm = False
         if client is not None:
-            report = self._call_llm_for_report(client, summary, validation)
+            report, used_llm = self._call_llm_for_report(client, summary, validation)
         else:
             # Fallback: rule-based report (no LLM)
             report = self._rule_based_report(summary, validation)
 
         report["physics_validation"] = validation.to_dict()
         report["result_summary"] = summary
-        report["report_source"] = "llm" if client else "rule_based"
+        report["report_source"] = "llm" if used_llm else "rule_based"
         return report
 
     def _call_llm_for_report(
@@ -404,8 +405,13 @@ class LLMReportGenerator:
         llm_client: Any,
         summary: dict[str, Any],
         validation: PhysicsValidationResult,
-    ) -> dict[str, Any]:
-        """Call LLM to generate report from structured summary."""
+    ) -> tuple[dict[str, Any], bool]:
+        """Call LLM to generate report from structured summary.
+
+        Returns:
+            Tuple of (report_dict, used_llm). used_llm is True only when the
+            LLM call succeeded and its output was used.
+        """
         user_message = (
             f"## 仿真结果摘要\n```json\n{json.dumps(summary, ensure_ascii=False, indent=2)}\n```\n\n"
             f"## 物理验证结果\n```json\n{json.dumps(validation.to_dict(), ensure_ascii=False, indent=2)}\n```\n\n"
@@ -431,13 +437,13 @@ class LLMReportGenerator:
             )
 
             if record.success:
-                return parsed
+                return parsed, True
             else:
-                return self._rule_based_report(summary, validation)
+                return self._rule_based_report(summary, validation), False
 
         except Exception as e:
             logger.error("LLM report generation failed: %s", e)
-            return self._rule_based_report(summary, validation)
+            return self._rule_based_report(summary, validation), False
 
     def _rule_based_report(
         self,

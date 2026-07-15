@@ -220,10 +220,10 @@ class RegexCandidateExtractor:
                 source_span=_find_in_text(user_text, ["上", "顶", "top"]),
                 confidence=0.85,
             ))
-        if bc.bottom.source != "SYSTEM_DEFAULT" or bc.bottom.semantic_type:
+        if bc.bottom_flat.source != "SYSTEM_DEFAULT" or bc.bottom_flat.semantic_type:
             candidates.append(ExtractionCandidate(
                 field_path="boundary.bottom",
-                value=bc.bottom.semantic_type.value if bc.bottom.semantic_type else "unknown",
+                value=bc.bottom_flat.semantic_type.value if bc.bottom_flat.semantic_type else "unknown",
                 source=CandidateSource.REGEX,
                 source_span=_find_in_text(user_text, ["下", "底", "bottom", "wall"]),
                 confidence=0.9,
