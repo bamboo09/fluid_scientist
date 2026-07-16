@@ -1,0 +1,167 @@
+version: 1
+generated_at: "2026-07-16T00:00:00+08:00"
+policy:
+  copied_third_party_files: []
+  third_party_scripts_executed: false
+sources:
+  - id: openai-skills-docs
+    repository: "https://developers.openai.com/codex/build-skills"
+    commit: "NOT_APPLICABLE_OFFICIAL_WEB_DOCUMENT"
+    license: "Official documentation; no repository license asserted"
+    adoption_level: "A"
+    reviewed_paths: ["build-skills", "api/docs/guides/tools-skills", "blog/eval-skills"]
+    copied_files: []
+    adapted_concepts: ["front matter", "progressive disclosure", "description routing", "instruction-only default", "eval design"]
+    prohibited_content: ["product-runtime capability assumptions", "long verbatim documentation"]
+    reviewed_at: "2026-07-16"
+  - id: openfoam-foundation-13
+    repository: "https://github.com/OpenFOAM/OpenFOAM-13"
+    commit: "18870c24d21c6b982e2cdec27b2f59738cca5f90"
+    license: "GPL-3.0-or-later"
+    adoption_level: "A facts; no code copying"
+    reviewed_paths: ["applications/solvers/foamRun/foamRun.C", "applications/modules/incompressibleFluid/", "tutorials/incompressibleFluid/cylinder/", "etc/caseDicts/annotated/decomposeParDict"]
+    copied_files: []
+    adapted_concepts: ["Foundation 13 solver modules", "case dictionaries", "function-object dependencies", "decomposition vocabulary"]
+    prohibited_content: ["source-code copying", "unverified commands"]
+    reviewed_at: "2026-07-16"
+  - id: hpc-openfoam
+    repository: "https://github.com/SciMate-AI/HPC-Skills"
+    commit: "4ea8069188d931875121cdd418d7a26e60f47152"
+    license: "MIT"
+    adoption_level: "A documentation; B scripts/HPC"
+    reviewed_paths: ["skills/hpc-openfoam/SKILL.md", "skills/hpc-openfoam/references/"]
+    copied_files: []
+    adapted_concepts: ["progressive reference structure", "solver/field checks", "mesh/numerics/function-object troubleshooting"]
+    prohibited_content: ["shell assets", "scheduler scripts", "paths", "credentials", "version-specific commands"]
+    reviewed_at: "2026-07-16"
+  - id: foam-agent
+    repository: "https://github.com/csml-rpi/Foam-Agent"
+    commit: "cfde3847be548e4264a1455dd77774794e00ee81"
+    license: "MIT"
+    adoption_level: "B architecture; C eval inspiration"
+    reviewed_paths: ["README.md", "src/", "foambench_main.py"]
+    copied_files: []
+    adapted_concepts: ["hierarchical multi-index retrieval", "dependency-aware generation", "bounded error classification", "composable responsibilities"]
+    prohibited_content: ["runtime", "API configuration", "prompts", "automatic fix code", "v10 templates"]
+    reviewed_at: "2026-07-16"
+  - id: ai-cfd-scientist
+    repository: "https://github.com/csml-rpi/AI-CFD-Scientist"
+    commit: "b7fa924c834ccfd81c67788b7d6b2e3c9ff13514"
+    license: "UNKNOWN_NO_LICENSE_FILE_FOUND"
+    adoption_level: "A concepts only; B architecture"
+    reviewed_paths: ["README.md", "cfd-skills/cfd-mesh-gate/SKILL.md", "cfd-skills/cfd-analyze/SKILL.md", "cfd-skills/cfd-cross-analyze/SKILL.md"]
+    copied_files: []
+    adapted_concepts: ["baseline-first", "mesh gate", "silent-failure review", "artifact contracts", "evidence-bound writing"]
+    prohibited_content: ["code", "prompts", "runtime", "source modification workflow", "model configuration"]
+    reviewed_at: "2026-07-16"
+  - id: openfoam-claude-suite
+    repository: "https://github.com/swtbkim/openfoam-claude-suite"
+    commit: "3863d6d917c2e70f0f433264b8a853fbe9635ea1"
+    license: "MIT"
+    adoption_level: "A responsibility/checklists; B diagnostic flow"
+    reviewed_paths: ["skills/of-sim/SKILL.md", "skills/of-post/SKILL.md", "skills/of-doctor/SKILL.md", "skills/of-setup/SKILL.md"]
+    copied_files: []
+    adapted_concepts: ["setup/sim/post/doctor separation", "evidence collection order", "two-attempt stop", "result report structure"]
+    prohibited_content: ["v2412 templates", "scripts", "WSL assumptions", "installation logic", "background execution"]
+    reviewed_at: "2026-07-16"
+  - id: mechanical-engineering-research-skill
+    repository: "https://github.com/hanhuark/mechanical-engineering-research-skill"
+    commit: "07accf8d0d8859ba9626b1385d32f493cae85a62"
+    license: "MIT"
+    adoption_level: "A"
+    reviewed_paths: ["skills/mechanical-engineering-research/SKILL.md", "skills/mechanical-engineering-research/references/"]
+    copied_files: []
+    adapted_concepts: ["assumption-first review", "applicability limits", "uncertainty", "evidence/inference separation", "reproducibility"]
+    prohibited_content: ["unrelated mechanical domains", "claims of execution"]
+    reviewed_at: "2026-07-16"
+  - id: sim-cli
+    repository: "https://github.com/svd-ai-lab/sim-cli"
+    commit: "ec46ee4ff9c5ae207671e722cc1fc18841179f54"
+    license: "Apache-2.0"
+    adoption_level: "B"
+    reviewed_paths: ["src/sim/_skills/sim-cli/SKILL.md", "README.md", "NOTICE"]
+    copied_files: []
+    adapted_concepts: ["small typed operation surface", "version/profile probe", "acceptance not exit code", "replayable evidence"]
+    prohibited_content: ["runtime replacement", "production dependency", "server control"]
+    reviewed_at: "2026-07-16"
+  - id: sim-plugin-openfoam
+    repository: "https://github.com/svd-ai-lab/sim-plugin-openfoam"
+    commit: "c53b4f362c9b06c985393a777365a9f48fa00710"
+    license: "Apache-2.0"
+    adoption_level: "B"
+    reviewed_paths: ["src/sim_plugin_openfoam/_skills/openfoam/SKILL.md", "README.md"]
+    copied_files: []
+    adapted_concepts: ["doctor/check/execute/inspect separation", "artifact history", "closed tool surface"]
+    prohibited_content: ["plugin execution", "dependency installation", "solver wrappers"]
+    reviewed_at: "2026-07-16"
+  - id: metaopenfoam
+    repository: "https://github.com/Terry-cyx/MetaOpenFOAM"
+    commit: "1b6365760b1325d81ff0d0e25c9a5ae9acd6ae9a"
+    license: "GPL-3.0"
+    adoption_level: "C"
+    reviewed_paths: ["README.md", "README_en.md"]
+    copied_files: []
+    adapted_concepts: ["historical multi-agent comparison", "benchmark task taxonomy"]
+    prohibited_content: ["code", "templates", "install scripts", "current-best-practice status"]
+    reviewed_at: "2026-07-16"
+  - id: autocfd-nl2foam
+    repository: "https://github.com/YYgroup/AutoCFD"
+    commit: "5f1196b228910cab4bb5978e158dfcb55bb5a33f"
+    license: "GPL-3.0"
+    adoption_level: "C eval ideas; D data/code copying"
+    reviewed_paths: ["README.md", "LICENSE", "Benchmark file inventory"]
+    copied_files: []
+    adapted_concepts: ["natural-language/config separation", "generator/verifier/runner/corrector roles", "diverse eval dimensions"]
+    prohibited_content: ["dataset", "chain-of-thought", "benchmark text", "code", "templates"]
+    reviewed_at: "2026-07-16"
+  - id: chatcfd
+    repository: "NO_OFFICIAL_CODE_REPOSITORY_IDENTIFIED"
+    commit: "NOT_AVAILABLE_PAPER_ONLY"
+    license: "UNKNOWN"
+    adoption_level: "B paper concepts; D code/data"
+    reviewed_paths: ["arXiv:2506.02019", "DOI:10.1002/aidi.202500174"]
+    copied_files: []
+    adapted_concepts: ["structured setup extraction", "configuration validation", "error reflection", "unseen-case evaluation"]
+    prohibited_content: ["code", "prompts", "data", "unverified repository claims"]
+    reviewed_at: "2026-07-16"
+  - id: foamlib
+    repository: "https://github.com/gerlero/foamlib"
+    commit: "2f582563baa171fb77ff07fed80a16d75ba7a655"
+    license: "GPL-3.0"
+    adoption_level: "B interfaces; D direct dependency/copy"
+    reviewed_paths: ["README.md", "LICENSE.txt", "pyproject.toml"]
+    copied_files: []
+    adapted_concepts: ["structured parser principle", "typed case/field API", "avoid regex replacement"]
+    prohibited_content: ["source copying", "vendoring", "dependency promise"]
+    reviewed_at: "2026-07-16"
+  - id: classy-blocks
+    repository: "https://github.com/damogranlabs/classy_blocks"
+    commit: "a48d9e54b3ba6cf2e38cbefb5936ac659e1f2f01"
+    license: "MIT"
+    adoption_level: "A knowledge; B dependency"
+    reviewed_paths: ["README.md", "LICENSE", "examples/", "tests/"]
+    copied_files: []
+    adapted_concepts: ["structured parametric blockMesh", "block/face/edge composition", "geometry recipes"]
+    prohibited_content: ["dependency assumption", "arbitrary Python generation", "force-fit complex geometry"]
+    reviewed_at: "2026-07-16"
+  - id: fluidfoam
+    repository: "https://github.com/fluiddyn/fluidfoam"
+    commit: "0ddf40650988870ea178cb30a1ce873eb7ecbbbb"
+    license: "GPL-3.0-or-later"
+    adoption_level: "C concepts; D copying/dependency"
+    reviewed_paths: ["README.md", "LICENSE"]
+    copied_files: []
+    adapted_concepts: ["field/time/coordinate organization for post-processing"]
+    prohibited_content: ["implementation copying", "dependency promise", "vendoring"]
+    reviewed_at: "2026-07-16"
+  - id: openfoam-mcp-server
+    repository: "https://github.com/webworn/openfoam-mcp-server"
+    commit: "8d14e2031146e4130d4e9f500146379dad19eb49"
+    license: "Apache-2.0"
+    adoption_level: "C discovery; D execution/install"
+    reviewed_paths: ["README.md", "CFD_PROJECT_GUIDE.md", "LICENSE", "tool/schema inventory"]
+    copied_files: []
+    adapted_concepts: ["typed parameter extraction", "diagnostic question patterns", "confidence reporting"]
+    prohibited_content: ["server execution", "install scripts", "arbitrary shell", "credentials", "marketplace claims"]
+    reviewed_at: "2026-07-16"
+
