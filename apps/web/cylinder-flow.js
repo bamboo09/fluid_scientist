@@ -345,6 +345,33 @@
       ]));
     }
 
+    // Triangle obstacle
+    const tri = spec.triangle || {};
+    if (tri.enabled) {
+      viewer.appendChild(section("三角障碍物", [
+        fieldRow("类型", "三角形", "inferred"),
+        fieldRow("底宽", pvNum(tri.base_width_m, "m"), "inferred"),
+        fieldRow("高度", pvNum(tri.height_m, "m"), "inferred"),
+        fieldRow("中心 X", pvNum(tri.center_x_m, "m"), "inferred"),
+        tri.apex_direction ? fieldRow("尖端方向", tri.apex_direction, "inferred") : null,
+        tri.relation_to_cylinder ? fieldRow("与圆柱关系", tri.relation_to_cylinder, "inferred") : null,
+      ]));
+    }
+
+    // Trapezoid obstacle
+    const trap = spec.trapezoid || {};
+    if (trap.enabled) {
+      viewer.appendChild(section("梯形障碍物", [
+        fieldRow("类型", "梯形", "inferred"),
+        fieldRow("上底", pvNum(trap.top_width_m, "m"), "inferred"),
+        fieldRow("下底", pvNum(trap.bottom_width_m, "m"), "inferred"),
+        fieldRow("高度", pvNum(trap.height_m, "m"), "inferred"),
+        fieldRow("中心 X", pvNum(trap.center_x_m, "m"), "inferred"),
+        trap.solver_representation ? fieldRow("求解器表示", trap.solver_representation, "inferred") : null,
+        trap.relation_to_cylinder ? fieldRow("与圆柱关系", trap.relation_to_cylinder, "inferred") : null,
+      ]));
+    }
+
     // Fluid
     const fluid = spec.fluid || {};
     viewer.appendChild(section("流体属性", [
@@ -1091,6 +1118,15 @@
       const tw = tri.base_width_m && tri.base_width_m.value != null ? `${tri.base_width_m.value}m` : "?";
       const th = tri.height_m && tri.height_m.value != null ? `${tri.height_m.value}m` : "?";
       summaryList.push(`三角形障碍物: 底宽${tw} × 高${th} (尖端${tri.apex_direction || "向上"})`);
+    }
+
+    // Trapezoid obstacle
+    const trap = spec.trapezoid || {};
+    if (trap.enabled) {
+      const tw = trap.top_width_m && trap.top_width_m.value != null ? `${trap.top_width_m.value}m` : "?";
+      const bw = trap.bottom_width_m && trap.bottom_width_m.value != null ? `${trap.bottom_width_m.value}m` : "?";
+      const th = trap.height_m && trap.height_m.value != null ? `${trap.height_m.value}m` : "?";
+      summaryList.push(`梯形障碍物: 上底${tw} × 下底${bw} × 高${th} (${trap.solver_representation || "parametric_polygon"})`);
     }
 
     // Bottom profile
