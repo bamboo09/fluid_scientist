@@ -311,6 +311,9 @@ class PatchExecutor:
         value: Any,
     ) -> None:
         """Append *value* to the array at *path* if not already present."""
+        # Strip the /- append sentinel so _resolve_parent returns the array container.
+        if path.endswith("/-"):
+            path = path[:-2]
         parent, key = self._resolve_parent(spec, path)
         if parent is None:
             raise PatchApplicationError(f"Path '{path}' not found in spec.")

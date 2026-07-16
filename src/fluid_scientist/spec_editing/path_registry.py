@@ -121,6 +121,7 @@ _ENTITY_PATH_META: dict[str, dict[str, Any]] = {
 _APPEND_ARRAY_PATHS: dict[str, dict[str, Any]] = {
     "/observations/probes": {"value_schema": {"type": "object"}, "mutable": True, "risk_level": "low"},
     "/observations/targets": {"value_schema": {"type": "object"}, "mutable": True, "risk_level": "low"},
+    "/observations/postprocessing": {"value_schema": {"type": "string"}, "mutable": True, "risk_level": "low"},
     "/boundaries/conditions": {"value_schema": {"type": "object"}, "mutable": True, "risk_level": "high"},
     "/mesh/refinement_regions": {"value_schema": {"type": "object"}, "mutable": True, "risk_level": "medium"},
     "/study/research_questions": {"value_schema": {"type": "string"}, "mutable": True, "risk_level": "low"},
@@ -272,6 +273,21 @@ class PathRegistry:
                     risk_level=arr_meta.get("risk_level", "low"),  # type: ignore[arg-type]
                     dependency_tags={"array_append"},
                 )
+
+        # 4. Indexed array element path (e.g. /boundaries/conditions/0/bc_type).
+        for array_path, arr_meta in _APPEND_ARRAY_PATHS.items():
+            prefix = array_path + "/"
+            if path.startswith(prefix):
+                remainder = path[len(prefix):]
+                first_segment = remainder.split("/", 1)[0] if remainder else ""
+                if first_segment.isdigit():
+                    return PathMetadata(
+                        json_pointer=path,
+                        value_schema={},
+                        mutable=True,
+                        risk_level=arr_meta.get("risk_level", "medium"),  # type: ignore[arg-type]
+                        dependency_tags=set(),
+                    )
 
         return None
 

@@ -168,8 +168,8 @@ class PatchValidator:
         errors: list[str] = []
         schema_type = value_schema.get("type", "object")
 
-        # append_unique is only valid on arrays.
-        if op.op == "append_unique" and schema_type != "array":
+        # append_unique is only valid on arrays (or array-append /- paths).
+        if op.op == "append_unique" and schema_type != "array" and not op.path.endswith("/-"):
             errors.append(
                 f"Operation 'append_unique' is only valid on array fields, "
                 f"but '{op.path}' has type '{schema_type}'."

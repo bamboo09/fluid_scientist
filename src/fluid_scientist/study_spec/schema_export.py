@@ -222,7 +222,7 @@ class SchemaExporter:
              risk_level="medium", unit_dimension="length",
              dependency_tags=["mesh_resolution", "domain_bounds"])
         _add("/geometry/domain/dimensions", value_type="string", required=True,
-             risk_level="high", mutable=False,
+             risk_level="high", mutable=True,
              dependency_tags=["boundary_config", "solver"])
 
         # --- Boundaries ---
@@ -231,7 +231,7 @@ class SchemaExporter:
 
         # --- Numerics: time control ---
         _add("/numerics/time/mode", value_type="string", required=True,
-             risk_level="high", mutable=False,
+             risk_level="high", mutable=True,
              dependency_tags=["solver", "discretization"])
         _add("/numerics/time/start_time", value_type="object", risk_level="medium",
              unit_dimension="time", dependency_tags=["duration"])
@@ -284,6 +284,8 @@ class SchemaExporter:
              dependency_tags=["postprocessing", "analysis"])
         _add("/observations/probes", value_type="array", risk_level="low",
              dependency_tags=["postprocessing", "analysis"])
+        _add("/observations/postprocessing", value_type="array", risk_level="low",
+             dependency_tags=["analysis"])
 
         # --- Execution ---
         _add("/execution/target_id", value_type="string", required=True,
