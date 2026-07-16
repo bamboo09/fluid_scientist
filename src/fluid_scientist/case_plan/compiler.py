@@ -29,13 +29,20 @@ from fluid_scientist.case_plan.models import (
 _BC_TYPE_MAP: dict[str, dict[str, str]] = {
     "inlet": {"U": "fixedValue", "p": "zeroGradient"},
     "inlet_velocity": {"U": "fixedValue", "p": "zeroGradient"},
+    "velocity_inlet": {"U": "fixedValue", "p": "zeroGradient"},
     "outlet": {"U": "zeroGradient", "p": "fixedValue"},
     "outlet_pressure": {"U": "zeroGradient", "p": "fixedValue"},
+    "pressure_outlet": {"U": "zeroGradient", "p": "fixedValue"},
     "outlet_advective": {"U": "advective", "p": "advective"},
     "wall": {"U": "noSlip", "p": "zeroGradient"},
     "no_slip": {"U": "noSlip", "p": "zeroGradient"},
+    "no_slip_wall": {"U": "noSlip", "p": "zeroGradient"},
     "free_slip": {"U": "slip", "p": "zeroGradient"},
+    "free_slip_wall": {"U": "slip", "p": "zeroGradient"},
+    "symmetry": {"U": "symmetry", "p": "symmetry"},
     "periodic": {"U": "cyclic", "p": "cyclic"},
+    "empty_2d": {"U": "empty", "p": "empty"},
+    "empty": {"U": "empty", "p": "empty"},
 }
 
 # Map common patch names to blockMeshDict hex face vertex indices.
@@ -173,23 +180,51 @@ class NativeCaseCompiler:
         }
 
         # Include functionObjects from the measurement plan.
-        functions = self._build_functions(measurement)
+        available_patches = set(case_plan.boundary_condition_plan.keys())
+        functions = self._build_functions(measurement, available_patches)
         if functions:
             control_dict["functions"] = functions
 
         return control_dict
 
     def _build_functions(
-        self, measurement: MeasurementPlanSpec
+        self, measurement: MeasurementPlanSpec, available_patches: set[str] | None = None
     ) -> dict[str, dict[str, Any]]:
         """Build the ``functions`` block from the measurement plan.
 
         Function object IDs are sanitized to be valid OpenFOAM dictionary
         keywords (no spaces, special chars). Duplicate names are disambiguated.
+
+        Function objects that reference patches not present in
+        ``available_patches`` are skipped to avoid solver failures.
         """
         functions: dict[str, dict[str, Any]] = {}
         used_names: set[str] = set()
+        # Types that require specific configuration keys to be present,
+        # or that need a format we don't fully support yet.
+        _REQUIRED_CONFIG: dict[str, list[str]] = {
+            "probes": ["probeLocations"],
+        }
+        # Types we skip entirely because the output format is incompatible
+        _UNSUPPORTED_TYPES = {"fieldAverage"}
         for fo in measurement.function_objects:
+            # Skip function objects whose patches don't exist in the mesh
+            if available_patches and fo.patches:
+                if not any(p in available_patches for p in fo.patches):
+                    continue
+            # Skip unsupported function object types
+            fo_type = fo.function_object_type or ""
+            if fo_type in _UNSUPPORTED_TYPES:
+                continue
+            # Skip function objects missing required configuration keys
+            required_keys = _REQUIRED_CONFIG.get(fo_type, [])
+            config = fo.configuration or {}
+            if required_keys:
+                missing = [
+                    k for k in required_keys if not config.get(k)
+                ]
+                if missing:
+                    continue
             # Sanitize: replace spaces and special chars with underscores
             raw_id = fo.function_object_id or "probe"
             safe_id = "".join(c if c.isalnum() or c == "_" else "_" for c in raw_id)
@@ -349,6 +384,12 @@ class NativeCaseCompiler:
         length = float(geo["length"])
         height = float(geo["height"])
         width = float(geo.get("width", 0.0))
+        # For 2D cases, width may be 0 or unset.  Use a small non-zero
+        # extrusion depth so blockMesh vertices are non-degenerate.
+        if width == 0.0:
+            width = float(geo.get("spanwise", 0.1))
+            if width == 0.0:
+                width = 0.1
 
         cells_x = int(mesh.get("cells_x", 50))
         cells_y = int(mesh.get("cells_y", 50))
@@ -402,10 +443,14 @@ class NativeCaseCompiler:
             face_key = patch_name.lower()
             faces = _PATCH_FACE_MAP.get(face_key, [])
             patch_type = "patch"
-            if bc_type in ("wall", "no_slip"):
+            if bc_type in ("wall", "no_slip", "no_slip_wall"):
                 patch_type = "wall"
+            elif bc_type in ("free_slip", "free_slip_wall", "symmetry"):
+                patch_type = "symmetry" if bc_type == "symmetry" else "patch"
             elif bc_type == "periodic":
                 patch_type = "cyclic"
+            elif bc_type in ("empty_2d", "empty"):
+                patch_type = "empty"
             elif bc_type in ("front", "frontandback", "back") or face_key in (
                 "front",
                 "frontandback",
@@ -521,6 +566,10 @@ class NativeCaseCompiler:
             return {"type": "cyclic"}
         if bc_name == "advective":
             return {"type": "advective"}
+        if bc_name == "empty":
+            return {"type": "empty"}
+        if bc_name == "symmetry":
+            return {"type": "symmetry"}
         return {"type": "zeroGradient"}
 
     # ------------------------------------------------------------------
@@ -563,6 +612,10 @@ class NativeCaseCompiler:
             return {"type": "cyclic"}
         if bc_name == "advective":
             return {"type": "advective"}
+        if bc_name == "empty":
+            return {"type": "empty"}
+        if bc_name == "symmetry":
+            return {"type": "symmetry"}
         return {"type": "zeroGradient"}
 
 
