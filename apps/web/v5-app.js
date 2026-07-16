@@ -66,6 +66,8 @@ const API = {
   getJobStatus: (jobId) => api(`/api/v5/jobs/${jobId}`),
   cancelJob: (jobId) => api(`/api/v5/jobs/${jobId}/cancel`, { method: "POST" }),
   getJobResults: (jobId) => api(`/api/v5/jobs/${jobId}/results`),
+  getPostprocessResults: (jobId) => api(`/api/v5/jobs/${jobId}/postprocess`),
+  visualizationUrl: (jobId, filename) => `/api/v5/jobs/${jobId}/visualizations/${filename}`,
   // Codex V5 Pipeline fast-path endpoints (Codex-specific, retained from v5-pipeline.js).
   // The backend PipelineRunRequest expects `user_description` (see v5_router.py).
   runPipeline: (userDescription) => api("/api/v5/pipeline/run", { method: "POST", body: JSON.stringify({ user_description: userDescription }) }),
@@ -281,6 +283,15 @@ function renderMessageExtra(msg) {
   // Codex V5 Pipeline result card (one-click compile-ready generation)
   if (msg.pipeline) {
     extras.push(renderPipelineCard(msg.pipeline));
+  }
+  // Post-processing results panel
+  if (msg.postprocess) {
+    const ppHtml = renderPostprocessPanel(msg);
+    if (ppHtml) {
+      const container = el("div", {});
+      container.innerHTML = ppHtml;
+      extras.push(container);
+    }
   }
   // Error
   if (msg.error) {
@@ -608,15 +619,6 @@ async function createNewSession() {
 async function sendUserMessage(text) {
   const msg = text.trim();
   if (!msg) return;
-
-  // Warn if model is not configured
-  if (!state.modelConfigured) {
-    addMessage("user", msg);
-    addMessage("system", "模型尚未配置，请先点击右上角配置模型（如 glm/glm-4-flash），否则系统将使用规则提取研究参数，精度有限。");
-    addMessage("assistant", "请先配置模型后再发送研究需求，这样系统能更准确地理解你的研究问题。点击右上角「模型」区域进行配置。");
-    return;
-  }
-
   addMessage("user", msg);
   byId("research-input").value = "";
 
@@ -699,21 +701,6 @@ async function processAction(action) {
       }
       break;
     }
-    case "draft_ready": {
-      if (action.draft) {
-        state.draft = action.draft;
-        addMessage("assistant", `实验草案已生成（版本 v${action.draft.version}）。请在右侧查看结构化方案。\n\n你可以通过对话提出修改（如"将雷诺数改为5000"），修改将通过提案确认后才生效。`);
-        renderAll();
-      }
-      break;
-    }
-    case "draft_failed": {
-      const stage = action.stage || "";
-      const msg = action.message || "未知错误";
-      addMessage("system", `生成草案失败: ${msg}`);
-      addMessage("assistant", `草案生成流程在「${stage}」阶段失败：${msg}\n\n请尝试补充更多研究细节后重试，或检查模型配置。`);
-      break;
-    }
     default:
       console.log("Unknown action:", action);
   }
@@ -721,19 +708,15 @@ async function processAction(action) {
 
 async function selectStudy(study) {
   state.selectedStudy = study;
-  // Try to get batch_id from state.batch, or fall back to the study's own batch_id
-  const batchId = state.batch?.batch_id || study.batch_id;
+  const batchId = state.batch?.batch_id;
   if (!batchId) {
-    addMessage("system", "无法确定批次 ID，请重新描述您的研究需求");
+    addMessage("system", "无法确定批次 ID，请刷新页面重试");
     return;
   }
-
-  addMessage("user", `选择研究任务: ${study.title?.slice(0, 50) || study.study_id}`);
-  addMessage("assistant", "正在生成实验草案...");
-
   try {
+    addMessage("user", `选择研究任务: ${study.title?.slice(0, 50) || study.study_id}`);
+    addMessage("assistant", "正在生成实验草案...");
     const result = await API.selectStudy(batchId, state.sessionId, study.study_id);
-
     if (result.type === "pipeline_failed" || !result.draft) {
       const failMsg = result.failure?.message || result.failure?.user_facing_message || "未知错误";
       const failStage = result.failure?.failed_stage || result.current_stage || "";
@@ -747,14 +730,7 @@ async function selectStudy(study) {
   } catch (e) {
     addMessage("system", `生成草案失败: ${e.message}`, { error: e.message });
     if (e.status === 422 && e.detail?.blocking_issues) {
-      const issues = e.detail.blocking_issues;
-      const questions = issues
-        .filter(i => i.suggested_question || i.issue)
-        .map(i => i.suggested_question || i.issue);
-      let msg = "该研究暂不可生成草案，需要补充以下信息：\n";
-      questions.forEach((q, i) => { msg += `${i + 1}. ${q}\n`; });
-      msg += "\n请在下方输入框中补充这些信息，然后重新描述您的研究需求。";
-      addMessage("assistant", msg);
+      addMessage("assistant", `该研究暂不可生成草案：${e.detail.blocking_issues.map(i => i.message || JSON.stringify(i)).join("；")}`);
     }
   }
 }
@@ -1026,13 +1002,163 @@ async function cancelJob() {
 
 async function fetchJobResults() {
   if (!state.job?.job_id) return;
+  const jobId = state.job.job_id;
   try {
-    const results = await API.getJobResults(state.job.job_id);
-    addMessage("assistant", `结果已获取。${JSON.stringify(results).slice(0, 200)}...`, { results });
+    addMessage("assistant", "正在获取后处理结果...");
+    renderAll();
+    const results = await API.getPostprocessResults(jobId);
+    const analysis = results.analysis || {};
+    const visualizations = results.visualizations || [];
+    const metrics = analysis.metrics || [];
+    const sciAnalysis = analysis.scientific_analysis || {};
+    const simSummary = analysis.simulation_data_summary || {};
+
+    // Build result summary text
+    let summaryParts = [];
+    if (simSummary.converged !== undefined) {
+      summaryParts.push(simSummary.converged ? "✓ 求解收敛" : "✗ 未收敛");
+    }
+    if (simSummary.end_time) {
+      summaryParts.push(`终了时间: ${simSummary.end_time}`);
+    }
+    if (metrics.length > 0) {
+      summaryParts.push(`${metrics.length} 个指标`);
+    }
+    if (visualizations.length > 0) {
+      summaryParts.push(`${visualizations.length} 个可视化`);
+    }
+    const summaryText = summaryParts.length > 0
+      ? `后处理完成: ${summaryParts.join(" · ")}`
+      : "后处理完成";
+
+    addMessage("assistant", summaryText, { postprocess: { results, analysis, visualizations } });
     renderAll();
   } catch (e) {
-    addMessage("system", `获取结果失败: ${e.message}`, { error: e.message });
+    // Fallback to basic results
+    try {
+      const results = await API.getJobResults(jobId);
+      addMessage("assistant", `结果已获取。${JSON.stringify(results).slice(0, 200)}...`, { results });
+      renderAll();
+    } catch (e2) {
+      addMessage("system", `获取结果失败: ${e2.message}`, { error: e2.message });
+    }
   }
+}
+
+function renderPostprocessPanel(data) {
+  if (!data?.postprocess) return "";
+  const pp = data.postprocess;
+  const analysis = pp.analysis || {};
+  const visualizations = pp.visualizations || [];
+  const metrics = analysis.metrics || [];
+  const sciAnalysis = analysis.scientific_analysis || {};
+  const simSummary = analysis.simulation_data_summary || {};
+  const jobId = state.job?.job_id || "";
+
+  let html = '<div class="postprocess-panel">';
+
+  // --- Metrics table ---
+  if (metrics.length > 0) {
+    html += '<div class="pp-section"><h4>指标计算结果</h4><table class="pp-table">';
+    html += '<tr><th>指标</th><th>值</th><th>单位</th><th>置信度</th></tr>';
+    for (const m of metrics) {
+      const val = typeof m.value === "number" ? m.value.toPrecision(4) : m.value;
+      const conf = m.confidence || "—";
+      const unit = m.unit || "—";
+      const name = m.metric_id || m.name || m.metric_name || "—";
+      html += `<tr><td>${name}</td><td>${val}</td><td>${unit}</td><td>${conf}</td></tr>`;
+    }
+    html += '</table></div>';
+  }
+
+  // --- Scientific analysis ---
+  if (sciAnalysis.direct_facts || sciAnalysis.physical_interpretation) {
+    html += '<div class="pp-section"><h4>科学分析</h4>';
+    if (sciAnalysis.direct_facts) {
+      html += '<div class="pp-subsection"><b>直接事实</b><ul>';
+      const facts = Array.isArray(sciAnalysis.direct_facts) ? sciAnalysis.direct_facts : [sciAnalysis.direct_facts];
+      for (const f of facts) {
+        html += `<li>${typeof f === "string" ? f : JSON.stringify(f)}</li>`;
+      }
+      html += '</ul></div>';
+    }
+    if (sciAnalysis.physical_interpretation) {
+      html += '<div class="pp-subsection"><b>物理诠释</b><ul>';
+      const interp = Array.isArray(sciAnalysis.physical_interpretation) ? sciAnalysis.physical_interpretation : [sciAnalysis.physical_interpretation];
+      for (const f of interp) {
+        html += `<li>${typeof f === "string" ? f : JSON.stringify(f)}</li>`;
+      }
+      html += '</ul></div>';
+    }
+    if (sciAnalysis.recommendations) {
+      html += '<div class="pp-subsection"><b>后续建议</b><ul>';
+      const recs = Array.isArray(sciAnalysis.recommendations) ? sciAnalysis.recommendations : [sciAnalysis.recommendations];
+      for (const r of recs) {
+        html += `<li>${typeof r === "string" ? r : JSON.stringify(r)}</li>`;
+      }
+      html += '</ul></div>';
+    }
+    html += '</div>';
+  }
+
+  // --- Visualizations ---
+  if (visualizations.length > 0) {
+    html += '<div class="pp-section"><h4>可视化结果</h4>';
+    // Group by type
+    const lineCharts = visualizations.filter(v => v.type === "line_chart");
+    const contours = visualizations.filter(v => v.type === "contour");
+    const animations = visualizations.filter(v => v.type === "animation");
+
+    if (lineCharts.length > 0) {
+      html += '<div class="viz-group"><h5>线图</h5><div class="viz-gallery">';
+      for (const v of lineCharts) {
+        const url = API.visualizationUrl(jobId, v.filename);
+        html += `<div class="viz-item"><img src="${url}" alt="${v.title}" loading="lazy" /><div class="viz-caption">${v.title}</div></div>`;
+      }
+      html += '</div></div>';
+    }
+
+    if (contours.length > 0) {
+      html += '<div class="viz-group"><h5>云图</h5><div class="viz-gallery">';
+      for (const v of contours) {
+        const url = API.visualizationUrl(jobId, v.filename);
+        html += `<div class="viz-item"><img src="${url}" alt="${v.title}" loading="lazy" /><div class="viz-caption">${v.title}</div></div>`;
+      }
+      html += '</div></div>';
+    }
+
+    if (animations.length > 0) {
+      html += '<div class="viz-group"><h5>动图</h5><div class="viz-gallery">';
+      for (const v of animations) {
+        const url = API.visualizationUrl(jobId, v.filename);
+        html += `<div class="viz-item"><img src="${url}" alt="${v.title}" /><div class="viz-caption">${v.title}</div></div>`;
+      }
+      html += '</div></div>';
+    }
+
+    html += '</div>';
+  }
+
+  // --- Simulation summary ---
+  if (simSummary && Object.keys(simSummary).length > 0) {
+    html += '<div class="pp-section"><h4>仿真摘要</h4><table class="pp-table">';
+    for (const [k, v] of Object.entries(simSummary)) {
+      if (k === "warnings") continue;
+      html += `<tr><td>${k}</td><td>${v}</td></tr>`;
+    }
+    html += '</table>';
+    if (simSummary.warnings && simSummary.warnings.length > 0) {
+      html += '<div class="pp-warnings"><b>警告:</b><ul>';
+      for (const w of simSummary.warnings) {
+        html += `<li>${w}</li>`;
+      }
+      html += '</ul></div>';
+    }
+    html += '</div>';
+  }
+
+  html += '</div>';
+  return html;
 }
 
 // ---- Codex V5 Pipeline fast-path (compile-ready case generation) ----

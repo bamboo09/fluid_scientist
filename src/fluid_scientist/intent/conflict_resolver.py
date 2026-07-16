@@ -491,10 +491,18 @@ class ConflictResolver:
 
         llm_by_path: dict[str, list[ExtractionCandidate]] = {}
         for c in llm_candidates:
-            # Normalize geometry object paths to obstacle.type for comparison
+            # Normalize geometry object paths to obstacle.type for comparison.
+            # BUT: skip cylinder objects — the cylinder is the primary obstacle
+            # handled separately by the pipeline. Only non-cylinder objects
+            # (triangle, rectangle, etc.) should map to obstacle.type, since
+            # obstacle.type refers to the bottom-profile secondary obstacle.
             path = c.field_path
             if path.startswith("geometry.objects."):
-                # Map to obstacle.type for conflict detection
+                obj_type = _normalize_geometry_type(c.value)
+                if obj_type == "cylinder":
+                    # Don't map cylinder to obstacle.type — it's the primary obstacle
+                    continue
+                # Map non-cylinder objects to obstacle.type for conflict detection
                 path = "obstacle.type"
             llm_by_path.setdefault(path, []).append(c)
 

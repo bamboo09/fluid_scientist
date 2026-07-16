@@ -1178,11 +1178,17 @@ def _apply_llm_to_spec(spec, llm_parsed: dict, user_text: str) -> None:
             # LLM often defaults to 0 when it can't find the value.
             cx_val = cx.get("value")
             cx_evidence = cx.get("evidence_text", "")
+            existing_x_field = spec.cylinder.center_x_m
+            existing_x_is_explicit = (
+                existing_x_field is not None
+                and existing_x_field.source == FieldSource.USER_EXPLICIT
+                and existing_x_field.is_resolved()
+            )
             user_mentions_x = any(kw in user_text for kw in [
                 "x=", "x=", "横坐标", "流向位置", "距入口",
                 "center_x", "centre_x", "x坐标",
             ])
-            if cx_val is not None and (cx_val != 0 or user_mentions_x):
+            if cx_val is not None and (cx_val != 0 or user_mentions_x) and not existing_x_is_explicit:
                 spec.cylinder.center_x_m = ProvenanceField(
                     value=float(cx_val),
                     source=FieldSource.MODEL_RECOMMENDED,
@@ -1198,10 +1204,16 @@ def _apply_llm_to_spec(spec, llm_parsed: dict, user_text: str) -> None:
                 })
             cy_val = cy.get("value")
             cy_evidence = cy.get("evidence_text", "")
-            # Only override pipeline value if LLM has a non-zero value or
-            # the pipeline didn't extract a value at all
-            existing_y = spec.cylinder.center_y_m.value if spec.cylinder.center_y_m else None
-            if cy_val is not None and (cy_val != 0 or existing_y is None):
+            # Only override pipeline value if LLM has a non-zero value AND
+            # the pipeline didn't already extract a USER_EXPLICIT value
+            existing_y_field = spec.cylinder.center_y_m
+            existing_y = existing_y_field.value if existing_y_field else None
+            existing_y_is_explicit = (
+                existing_y_field is not None
+                and existing_y_field.source == FieldSource.USER_EXPLICIT
+                and existing_y_field.is_resolved()
+            )
+            if cy_val is not None and (cy_val != 0 or existing_y is None) and not existing_y_is_explicit:
                 spec.cylinder.center_y_m = ProvenanceField(
                     value=float(cy_val),
                     source=FieldSource.MODEL_RECOMMENDED,
@@ -3043,20 +3055,8 @@ def _unwrap_pf(pf: Any, default: Any = None) -> Any:
     return pf if pf is not None else default
 
 
-def _load_spec(spec_id: str) -> CylinderFlow2DExperimentSpecV1 | None:
-    """Load a spec from memory cache, falling back to JSON persistence."""
-    spec = _load_spec(spec_id)
-    if spec is not None:
-        return spec
-    session = _session_store.load(spec_id)
-    if session and "spec" in session:
-        try:
-            spec = CylinderFlow2DExperimentSpecV1(**session["spec"])
-            _persist_spec(spec_id, spec)
-            return spec
-        except Exception:
-            return None
-    return None
+# NOTE: _load_spec is already defined at line 79. The duplicate below was
+# removed because it called itself recursively, causing RecursionError.
 
 
 def _run_confirmation_chain(spec: CylinderFlow2DExperimentSpecV1) -> None:
