@@ -1691,13 +1691,14 @@ class CylinderFlow2DV1Pipeline:
         return result if result else None
 
     def _extract_end_time(self, text: str) -> float | None:
-        """Extract simulation end time: 仿真时间2秒, end_time=2, simulation time 2s."""
+        """Extract simulation end time: 仿真时间2秒, 仿真时间设为15秒, end_time=2."""
         patterns = [
-            r"仿真时间\s*[=为是]?\s*(\d+\.?\d*)\s*秒?",
-            r"仿真时间\s*[=为是]?\s*(\d+\.?\d*)\s*s\b",
-            r"模拟时间\s*[=为是]?\s*(\d+\.?\d*)\s*秒?",
+            r"仿真时间\s*(?:设为|设置为|为|是|=)?\s*(\d+\.?\d*)\s*秒?",
+            r"仿真时间\s*(?:设为|设置为|为|是|=)?\s*(\d+\.?\d*)\s*s\b",
+            r"模拟时间\s*(?:设为|设置为|为|是|=)?\s*(\d+\.?\d*)\s*秒?",
+            r"计算时间\s*(?:设为|设置为|为|是|=)?\s*(\d+\.?\d*)\s*秒?",
             r"[Ee]nd[_\s]*[Tt]ime\s*=\s*(\d+\.?\d*)",
-            r"计算时间\s*[=为是]?\s*(\d+\.?\d*)\s*秒?",
+            r"运行时间\s*(?:设为|设置为|为|是|=)?\s*(\d+\.?\d*)\s*秒?",
         ]
         for p in patterns:
             m = re.search(p, text)
