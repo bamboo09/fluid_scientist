@@ -1922,8 +1922,11 @@ def _semantic_coverage_check(spec, user_text: str) -> dict:
             unmapped.append({"claim": f"圆心距下壁面{y_val}m", "reason": "center_y_m is null"})
 
     # 4. Inlet velocity
-    vel_match = _regex.search(r'(?:来流速度|入口速度|速度)\s*[:=]?\s*([\d.]+)\s*m/s', user_text)
-    if vel_match:
+    # Use finditer to get the LAST match — modifications are appended to user_input_text,
+    # so the last match reflects the user's latest intent.
+    vel_matches = list(_regex.finditer(r'(?:来流速度|入口速度|速度)\s*[:=为]?\s*([\d.]+)\s*m/s', user_text))
+    if vel_matches:
+        vel_match = vel_matches[-1]  # Last match = latest modification
         v_val = float(vel_match.group(1))
         spec_v = spec.boundaries.left.inlet_velocity
         if spec_v is not None and abs(spec_v - v_val) < 1e-6:
@@ -1932,14 +1935,30 @@ def _semantic_coverage_check(spec, user_text: str) -> dict:
             unmapped.append({"claim": f"来流速度{v_val}m/s", "reason": f"inlet_velocity={spec_v}"})
 
     # 5. Reynolds number
-    re_match = _regex.search(r'Re\s*[:=]?\s*([\d.]+)', user_text)
-    if re_match:
+    # Use finditer to get the LAST match for the same reason.
+    re_matches = list(_regex.finditer(r'Re\s*[:=为]?\s*([\d.]+)', user_text))
+    if re_matches:
+        re_match = re_matches[-1]  # Last match = latest modification
         re_val = float(re_match.group(1))
         spec_re = spec.estimate_reynolds()
         if spec_re is not None and abs(spec_re - re_val) / max(re_val, 1) < 0.05:
             mapped.append({"claim": f"Re={re_val}", "field": "reynolds_number"})
         else:
-            unmapped.append({"claim": f"Re={re_val}", "reason": f"estimated Re={spec_re}"})
+            # Check if the Re mismatch is a derived consequence of inlet velocity modification.
+            # When U is modified, Re = U*D/nu changes even though the user didn't explicitly change Re.
+            # In this case, the mismatch is expected and should not block confirmation.
+            mod_lines = [line for line in user_text.split("\n") if line.strip().startswith("[修改]")]
+            velocity_modified = any(
+                kw in line for line in mod_lines
+                for kw in ["速度", "velocity", "来流", "入口"]
+            )
+            if velocity_modified:
+                mapped.append({
+                    "claim": f"Re={re_val} (派生变化：入口速度已修改，Re随之变化为{spec_re:.0f})",
+                    "field": "reynolds_number",
+                })
+            else:
+                unmapped.append({"claim": f"Re={re_val}", "reason": f"estimated Re={spec_re}"})
 
     # 6. Rectangle obstacle
     if any(kw in user_text for kw in ["矩形", "rectangle", "rectangular"]):
