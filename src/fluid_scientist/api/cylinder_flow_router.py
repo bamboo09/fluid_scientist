@@ -1199,8 +1199,8 @@ def _apply_llm_to_spec(spec, llm_parsed: dict, user_text: str) -> None:
                     confidence=float(cx.get("confidence", 0.9)),
                     reason=f"LLM提取: {cx_evidence}",
                 )
-            else:
-                # Missing x coordinate — add blocking issue
+            elif not existing_x_is_explicit and not spec.cylinder.center_x_m.is_resolved():
+                # Missing x coordinate — add blocking issue only if truly unresolved
                 spec.blocking_issues.append({
                     "code": "CYLINDER_CENTER_X_MISSING",
                     "message": "圆柱x坐标缺失，无法确定圆柱在流向方向的位置。建议圆心距入口至少5D，下游保留至少15D。",

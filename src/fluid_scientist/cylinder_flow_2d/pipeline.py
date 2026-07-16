@@ -296,6 +296,40 @@ class CylinderFlow2DV1Pipeline:
             else:
                 facts.append(f"用户提到了圆柱距壁面 {wall_dist} m（语义待确认）")
 
+        # Extract "正中央" / "居中" / "中央" — user explicitly says cylinder is centered
+        # This sets center_x = domain_length/2 as USER_EXPLICIT
+        # If center_y is not yet resolved AND no wall distance was given, also set center_y = domain_height/2
+        center_phrases = ["正中央", "流场中央", "流场中心", "位于中央", "位于中心",
+                          "水平居中", "水平中心", "居中放置", "正中"]
+        user_says_centered = any(p in user_text for p in center_phrases)
+        if user_says_centered:
+            domain_l = spec.domain.length_m.value
+            domain_h = spec.domain.height_m.value
+            # Set center_x = domain_length / 2 (horizontal centering)
+            if domain_l is not None and domain_l > 0 and not spec.cylinder.center_x_m.is_resolved():
+                cx = domain_l / 2.0
+                facts.append(f"用户指定'位于流场正中央'，圆心x = 域长/2 = {cx} m")
+                spec.cylinder.center_x_m = ProvenanceField(
+                    value=cx,
+                    source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED,
+                    confidence=0.95,
+                    reason="用户明确指定'位于流场正中央'，水平居中",
+                )
+            # Only set center_y from "正中央" if no wall distance was given
+            if (domain_h is not None and domain_h > 0
+                    and not spec.cylinder.center_y_m.is_resolved()
+                    and wall_dist is None):
+                cy = domain_h / 2.0
+                facts.append(f"用户指定'位于流场正中央'，圆心y = 域高/2 = {cy} m")
+                spec.cylinder.center_y_m = ProvenanceField(
+                    value=cy,
+                    source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED,
+                    confidence=0.8,
+                    reason="用户指定'位于流场正中央'，垂直居中（无距壁面信息）",
+                )
+
         # Extract inlet velocity
         inlet_v = self._extract_inlet_velocity(user_text)
         if inlet_v is not None:
