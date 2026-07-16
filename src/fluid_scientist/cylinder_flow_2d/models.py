@@ -607,6 +607,10 @@ class CylinderFlow2DExperimentSpecV1(BaseModel):
         return self.triangle.enabled and self.triangle.base_width_m.is_resolved()
 
     @property
+    def has_trapezoid(self) -> bool:
+        return self.trapezoid.enabled and self.trapezoid.bottom_width_m.is_resolved()
+
+    @property
     def has_bottom_profile(self) -> bool:
         return self.bottom_profile.enabled and self.bottom_profile.profile_type != BumpProfileType.FLAT
 

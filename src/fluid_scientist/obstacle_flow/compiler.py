@@ -26,6 +26,8 @@ from fluid_scientist.obstacle_flow.boundary_validator import BoundaryCombination
 from fluid_scientist.obstacle_flow.geometry import (
     BumpProfileGenerator,
     CylinderGeometryBuilder,
+    TrapezoidGeometry,
+    TrapezoidGeometryBuilder,
 )
 from fluid_scientist.obstacle_flow.mesh import ObstacleFlowMeshBackend
 from fluid_scientist.obstacle_flow.models import (
@@ -44,6 +46,7 @@ from fluid_scientist.obstacle_flow.models import (
     PressureGradientUnit,
     SimulationSpec,
     TemporalType,
+    TrapezoidSpec,
     TurbulenceModel,
 )
 
@@ -165,6 +168,7 @@ class ObstacleFlowCompiler:
         self._boundary_validator = BoundaryCombinationValidator()
         self._bump_gen = BumpProfileGenerator()
         self._cyl_builder = CylinderGeometryBuilder()
+        self._trap_builder = TrapezoidGeometryBuilder()
 
     def compile(
         self, spec: ObstacleFlowExperimentSpecV1
@@ -198,6 +202,11 @@ class ObstacleFlowCompiler:
             files["constant/triSurface/rectangle.stl"] = mesh_manifest.rectangle_stl
         if mesh_manifest.triangle_stl is not None:
             files["constant/triSurface/triangle.stl"] = mesh_manifest.triangle_stl
+        # Trapezoid geometry (if present)
+        if spec.has_trapezoid:
+            trap_geom = self._trap_builder.build(spec.trapezoids[0])
+        if mesh_manifest.trapezoid_stl is not None:
+            files["constant/triSurface/trapezoid.stl"] = mesh_manifest.trapezoid_stl
 
         # Field files
         is_turbulent = spec.is_turbulent
@@ -366,6 +375,13 @@ class ObstacleFlowCompiler:
             lines.append("        type            noSlip;")
             lines.append("    }")
 
+        # Trapezoid (if present)
+        if spec.has_trapezoid:
+            lines.append("    trapezoid")
+            lines.append("    {")
+            lines.append("        type            noSlip;")
+            lines.append("    }")
+
         # frontAndBack
         lines.append("    frontAndBack")
         lines.append("    {")
@@ -481,6 +497,13 @@ class ObstacleFlowCompiler:
             lines.append("        type            zeroGradient;")
             lines.append("    }")
 
+        # Trapezoid
+        if spec.has_trapezoid:
+            lines.append("    trapezoid")
+            lines.append("    {")
+            lines.append("        type            zeroGradient;")
+            lines.append("    }")
+
         # frontAndBack
         lines.append("    frontAndBack")
         lines.append("    {")
@@ -578,6 +601,11 @@ class ObstacleFlowCompiler:
             lines.append("    {")
             lines.append("        type            kqRWallFunction;\n        value           uniform 0;")
             lines.append("    }")
+        if spec.has_trapezoid:
+            lines.append("    trapezoid")
+            lines.append("    {")
+            lines.append("        type            kqRWallFunction;\n        value           uniform 0;")
+            lines.append("    }")
         lines.append("    frontAndBack")
         lines.append("    {")
         lines.append("        type            empty;")
@@ -633,6 +661,11 @@ class ObstacleFlowCompiler:
             lines.append("    {")
             lines.append("        type            omegaWallFunction;\n        value           uniform 0;")
             lines.append("    }")
+        if spec.has_trapezoid:
+            lines.append("    trapezoid")
+            lines.append("    {")
+            lines.append("        type            omegaWallFunction;\n        value           uniform 0;")
+            lines.append("    }")
         lines.append("    frontAndBack")
         lines.append("    {")
         lines.append("        type            empty;")
@@ -674,6 +707,11 @@ class ObstacleFlowCompiler:
             lines.append("    }")
         if spec.has_triangle:
             lines.append("    triangle")
+            lines.append("    {")
+            lines.append("        type            nutkWallFunction;\n        value           uniform 0;")
+            lines.append("    }")
+        if spec.has_trapezoid:
+            lines.append("    trapezoid")
             lines.append("    {")
             lines.append("        type            nutkWallFunction;\n        value           uniform 0;")
             lines.append("    }")
@@ -869,6 +907,8 @@ class ObstacleFlowCompiler:
                 patches.append("rectangle")
             if spec.has_triangle:
                 patches.append("triangle")
+            if spec.has_trapezoid:
+                patches.append("trapezoid")
             lines.append(f"        patches         ({' '.join(patches)});")
             lines.append("        rho             rhoInf;")
             lines.append(f"        rhoInf          {_fmt(rho)};")
@@ -1212,7 +1252,7 @@ class ObstacleFlowCompiler:
     ) -> tuple[str, ...]:
         """Determine preprocessing steps needed."""
         steps = ["blockMesh"]
-        if spec.has_cylinder or spec.has_rectangle or spec.has_triangle:
+        if spec.has_cylinder or spec.has_rectangle or spec.has_triangle or spec.has_trapezoid:
             steps.append("snappyHexMesh")
         steps.append("checkMesh")
         return tuple(steps)

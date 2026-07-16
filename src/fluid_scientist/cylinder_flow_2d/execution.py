@@ -99,6 +99,7 @@ from fluid_scientist.obstacle_flow.models import (
     TemporalType as ObsTemporalType,
     TimeMode as ObsTimeMode,
     TriangleSpec as ObsTriangleSpec,
+    TrapezoidSpec as ObsTrapezoidSpec,
     TurbulenceModel,
 )
 
@@ -290,6 +291,7 @@ class SpecAdapter:
         cylinders = self._adapt_cylinders(spec)
         rectangles = self._adapt_rectangles(spec)
         triangles = self._adapt_triangles(spec)
+        trapezoids = self._adapt_trapezoid(spec)
         flow_definition = self._adapt_flow_definition(spec)
         boundaries = self._adapt_boundaries(spec)
         inlet_profile = self._adapt_inlet_profile(spec)
@@ -308,6 +310,7 @@ class SpecAdapter:
             cylinders=cylinders,
             rectangles=rectangles,
             triangles=triangles,
+            trapezoids=trapezoids,
             flow_definition=flow_definition,
             boundaries=boundaries,
             inlet_profile=inlet_profile,
@@ -554,6 +557,46 @@ class SpecAdapter:
                 base_width=base_width,
                 height=height,
                 apex_direction=tri.apex_direction,
+                thickness=domain_thickness,
+            )
+        ]
+
+    def _adapt_trapezoid(self, spec: CylinderFlow2DExperimentSpecV1) -> list[ObsTrapezoidSpec]:
+        """Adapt trapezoid obstacle from cylinder flow spec to obstacle flow spec."""
+        if not spec.trapezoid.enabled:
+            return []
+
+        trap = spec.trapezoid
+        top_width = _unwrap(trap.top_width_m)
+        bottom_width = _unwrap(trap.bottom_width_m)
+        height = _unwrap(trap.height_m)
+        center_x = _unwrap(trap.center_x_m)
+
+        # If trapezoid center_x is not set, use cylinder center_x
+        if center_x is None and spec.has_cylinder:
+            center_x = _unwrap(spec.cylinder.center_x_m)
+
+        # Trapezoid is wall-attached: wide base at y=0
+        center_y = 0.0
+
+        # If dimensions are missing, cannot proceed
+        if top_width is None or bottom_width is None or height is None:
+            logger.warning(
+                "Trapezoid dimensions missing (top_width=%s, bottom_width=%s, height=%s) — skipping",
+                top_width, bottom_width, height,
+            )
+            return []
+
+        domain_thickness = _unwrap(spec.domain.thickness_m, 1.0)
+
+        return [
+            ObsTrapezoidSpec(
+                trapezoid_id="trapezoid_1",
+                center_x=center_x if center_x is not None else 0.0,
+                center_y=center_y,
+                top_width=top_width,
+                bottom_width=bottom_width,
+                height=height,
                 thickness=domain_thickness,
             )
         ]

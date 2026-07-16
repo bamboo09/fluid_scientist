@@ -29,6 +29,8 @@ from fluid_scientist.obstacle_flow.geometry import (
     RectangleGeometryBuilder,
     TriangleGeometry,
     TriangleGeometryBuilder,
+    TrapezoidGeometry,
+    TrapezoidGeometryBuilder,
 )
 from fluid_scientist.obstacle_flow.models import (
     BoundaryType,
@@ -38,6 +40,7 @@ from fluid_scientist.obstacle_flow.models import (
     DomainSpec,
     ObstacleFlowExperimentSpecV1,
     TriangleSpec,
+    TrapezoidSpec,
 )
 
 
@@ -50,6 +53,7 @@ class MeshManifest:
     cylinder_stl: str | None = None
     rectangle_stl: str | None = None
     triangle_stl: str | None = None
+    trapezoid_stl: str | None = None
     has_cylinder: bool = False
     has_bump: bool = False
     n_blocks: int = 1
@@ -84,6 +88,7 @@ class ObstacleFlowMeshBackend:
         self._cyl_builder = CylinderGeometryBuilder()
         self._rect_builder = RectangleGeometryBuilder()
         self._tri_builder = TriangleGeometryBuilder()
+        self._trap_builder = TrapezoidGeometryBuilder()
 
     def generate(
         self,
@@ -107,12 +112,13 @@ class ObstacleFlowMeshBackend:
             spec, domain, params, bump_profile, is_periodic
         )
 
-        # Generate snappyHexMeshDict and STL files if cylinder, rectangle, or triangle present
+        # Generate snappyHexMeshDict and STL files if cylinder, rectangle, triangle, or trapezoid present
         snappy_dict: str | None = None
         cylinder_stl: str | None = None
         rectangle_stl: str | None = None
         triangle_stl: str | None = None
-        if spec.has_cylinder or spec.has_rectangle or spec.has_triangle:
+        trapezoid_stl: str | None = None
+        if spec.has_cylinder or spec.has_rectangle or spec.has_triangle or spec.has_trapezoid:
             cyl_geom: CylinderGeometry | None = None
             if spec.has_cylinder:
                 cyl_geom = self._cyl_builder.build(spec.cylinders[0])
@@ -122,8 +128,11 @@ class ObstacleFlowMeshBackend:
             tri_geom: TriangleGeometry | None = None
             if spec.has_triangle:
                 tri_geom = self._tri_builder.build(spec.triangles[0])
+            trap_geom: TrapezoidGeometry | None = None
+            if spec.has_trapezoid:
+                trap_geom = self._trap_builder.build(spec.trapezoids[0])
             snappy_dict = self._generate_snappy_hex_mesh_dict(
-                spec, cyl_geom, params, is_periodic, rect_geom, tri_geom
+                spec, cyl_geom, params, is_periodic, rect_geom, tri_geom, trap_geom
             )
             if cyl_geom is not None:
                 cylinder_stl = self._generate_cylinder_stl(cyl_geom, domain.thickness_m)
@@ -131,6 +140,8 @@ class ObstacleFlowMeshBackend:
                 rectangle_stl = self._generate_rectangle_stl(rect_geom)
             if tri_geom is not None:
                 triangle_stl = self._generate_triangle_stl(tri_geom)
+            if trap_geom is not None:
+                trapezoid_stl = self._generate_trapezoid_stl(trap_geom)
 
         n_blocks = self._count_blocks(spec, bump_profile)
         expected_cells = params.n_layers_x * params.n_layers_y * params.n_layers_z
@@ -141,6 +152,7 @@ class ObstacleFlowMeshBackend:
             cylinder_stl=cylinder_stl,
             rectangle_stl=rectangle_stl,
             triangle_stl=triangle_stl,
+            trapezoid_stl=trapezoid_stl,
             has_cylinder=spec.has_cylinder,
             has_bump=spec.has_bump,
             n_blocks=n_blocks,
@@ -580,8 +592,9 @@ class ObstacleFlowMeshBackend:
         is_periodic: bool,
         rect: RectangleGeometry | None = None,
         tri: TriangleGeometry | None = None,
+        trap: TrapezoidGeometry | None = None,
     ) -> str:
-        """Generate snappyHexMeshDict for cylinder and/or rectangle and/or triangle refinement."""
+        """Generate snappyHexMeshDict for cylinder and/or rectangle and/or triangle and/or trapezoid refinement."""
         domain = spec.domain
 
         # Refinement region around cylinder
@@ -611,6 +624,15 @@ class ObstacleFlowMeshBackend:
             tri_x_max = tri.bbox_x_max + tri_refine_dist
             tri_y_min = max(0, tri.bbox_y_min - tri_refine_dist)
             tri_y_max = min(domain.height_m, tri.bbox_y_max + tri_refine_dist)
+
+        # Refinement region around trapezoid
+        trap_x_min = trap_y_min = trap_x_max = trap_y_max = 0.0
+        if trap is not None:
+            trap_refine_dist = max(trap.bottom_width, trap.height) * 1.5
+            trap_x_min = trap.bbox_x_min - trap_refine_dist
+            trap_x_max = trap.bbox_x_max + trap_refine_dist
+            trap_y_min = max(0, trap.bbox_y_min - trap_refine_dist)
+            trap_y_max = min(domain.height_m, trap.bbox_y_max + trap_refine_dist)
 
         lines: list[str] = []
         lines.append("/*--------------------------------*- C++ -*----------------------------------*\\")
@@ -653,6 +675,12 @@ class ObstacleFlowMeshBackend:
             lines.append("        type triSurfaceMesh;")
             lines.append('        file "triangle.stl";')
             lines.append("    }")
+        if trap is not None:
+            lines.append("    trapezoid")
+            lines.append("    {")
+            lines.append("        type triSurfaceMesh;")
+            lines.append('        file "trapezoid.stl";')
+            lines.append("    }")
         if cyl is not None:
             lines.append("    refinementBox")
             lines.append("    {")
@@ -673,6 +701,13 @@ class ObstacleFlowMeshBackend:
             lines.append("        type searchableBox;")
             lines.append(f"        min ({self._fmt(tri_x_min)} {self._fmt(tri_y_min)} 0);")
             lines.append(f"        max ({self._fmt(tri_x_max)} {self._fmt(tri_y_max)} {self._fmt(domain.thickness_m)});")
+            lines.append("    }")
+        if trap is not None:
+            lines.append("    trapezoidRefinementBox")
+            lines.append("    {")
+            lines.append("        type searchableBox;")
+            lines.append(f"        min ({self._fmt(trap_x_min)} {self._fmt(trap_y_min)} 0);")
+            lines.append(f"        max ({self._fmt(trap_x_max)} {self._fmt(trap_y_max)} {self._fmt(domain.thickness_m)});")
             lines.append("    }")
         lines.append("};")
         lines.append("")
@@ -709,6 +744,12 @@ class ObstacleFlowMeshBackend:
             lines.append(f"            level ({params.cylinder_refinement_level} {params.cylinder_refinement_level});")
             lines.append("            patchInfo { type wall; }")
             lines.append("        }")
+        if trap is not None:
+            lines.append("        trapezoid")
+            lines.append("        {")
+            lines.append(f"            level ({params.cylinder_refinement_level} {params.cylinder_refinement_level});")
+            lines.append("            patchInfo { type wall; }")
+            lines.append("        }")
         lines.append("    }")
         lines.append("")
         lines.append("    refinementRegions")
@@ -731,6 +772,12 @@ class ObstacleFlowMeshBackend:
             lines.append(f"            mode inside;")
             lines.append(f"            levels (({params.cylinder_refinement_level - 1} {params.cylinder_refinement_level - 1}));")
             lines.append("        }")
+        if trap is not None:
+            lines.append("        trapezoidRefinementBox")
+            lines.append("        {")
+            lines.append(f"            mode inside;")
+            lines.append(f"            levels (({params.cylinder_refinement_level - 1} {params.cylinder_refinement_level - 1}));")
+            lines.append("        }")
         lines.append("    }")
         lines.append("")
         if cyl is not None:
@@ -742,6 +789,9 @@ class ObstacleFlowMeshBackend:
         elif tri is not None:
             inside_x = tri.center_x
             inside_y = tri.bbox_y_max + tri.height
+        elif trap is not None:
+            inside_x = trap.center_x
+            inside_y = trap.bbox_y_max + trap.height
         else:
             inside_x = domain.length_m / 2
             inside_y = domain.height_m / 2
@@ -960,6 +1010,82 @@ class ObstacleFlowMeshBackend:
             lines.append("    endloop")
             lines.append("  endfacet")
         lines.append("endsolid triangle")
+        return "\n".join(lines)
+
+    def _generate_trapezoid_stl(
+        self, trap: TrapezoidGeometry
+    ) -> str:
+        """Generate a trapezoidal prism STL surface for snappyHexMesh.
+
+        Creates a closed prism (8 vertices, 12 triangles) as a trapezoidal
+        STL mesh, extruded in z for the 2D thickness.
+
+        Vertices (bottom face at z0, top face at z1):
+          0: bottom-left   (v0)     4: top-left   (v0)
+          1: bottom-right  (v1)     5: top-right  (v1)
+          2: top-right     (v2)     6: top-right  (v2)
+          3: top-left      (v3)     7: top-left   (v3)
+
+        Faces:
+          - Bottom (2 triangles, normal -z)
+          - Top (2 triangles, normal +z)
+          - Base side (2 triangles, normal -y, the wide bottom edge)
+          - Top side (2 triangles, normal +y, the narrow top edge)
+          - Left slope (2 triangles, normal -x approx)
+          - Right slope (2 triangles, normal +x approx)
+        """
+        z0 = 0.0
+        z1 = trap.thickness
+
+        # 8 vertices: 4 bottom + 4 top
+        verts = [
+            (trap.v0[0], trap.v0[1], z0),  # 0: bottom-left bottom
+            (trap.v1[0], trap.v1[1], z0),  # 1: bottom-right bottom
+            (trap.v2[0], trap.v2[1], z0),  # 2: top-right bottom
+            (trap.v3[0], trap.v3[1], z0),  # 3: top-left bottom
+            (trap.v0[0], trap.v0[1], z1),  # 4: bottom-left top
+            (trap.v1[0], trap.v1[1], z1),  # 5: bottom-right top
+            (trap.v2[0], trap.v2[1], z1),  # 6: top-right top
+            (trap.v3[0], trap.v3[1], z1),  # 7: top-left top
+        ]
+
+        # 12 triangles
+        triangles = [
+            # Bottom (normal -z)
+            ((0.0, 0.0, -1.0), 0, 3, 2),
+            ((0.0, 0.0, -1.0), 0, 2, 1),
+            # Top (normal +z)
+            ((0.0, 0.0, 1.0), 4, 5, 6),
+            ((0.0, 0.0, 1.0), 4, 6, 7),
+            # Base side (bottom edge, normal -y)
+            ((0.0, -1.0, 0.0), 0, 1, 5),
+            ((0.0, -1.0, 0.0), 0, 5, 4),
+            # Top side (narrow top edge, normal +y)
+            ((0.0, 1.0, 0.0), 3, 7, 6),
+            ((0.0, 1.0, 0.0), 3, 6, 2),
+            # Left slope (normal -x approx)
+            ((-1.0, 0.0, 0.0), 0, 4, 7),
+            ((-1.0, 0.0, 0.0), 0, 7, 3),
+            # Right slope (normal +x approx)
+            ((1.0, 0.0, 0.0), 1, 2, 6),
+            ((1.0, 0.0, 0.0), 1, 6, 5),
+        ]
+
+        lines: list[str] = []
+        lines.append("solid trapezoid")
+        for normal, i0, i1, i2 in triangles:
+            nx, ny, nz = normal
+            v0 = verts[i0]
+            v1 = verts[i1]
+            v2 = verts[i2]
+            lines.append(f"  facet normal {nx:.6e} {ny:.6e} {nz:.6e}")
+            lines.append("    outer loop")
+            lines.append(f"      vertex {v0[0]:.6e} {v0[1]:.6e} {v0[2]:.6e}")
+            lines.append(f"      vertex {v1[0]:.6e} {v1[1]:.6e} {v1[2]:.6e}")
+            lines.append(f"      vertex {v2[0]:.6e} {v2[1]:.6e} {v2[2]:.6e}")
+            lines.append("    endloop")
+            lines.append("  endfacet")
+        lines.append("endsolid trapezoid")
         return "\n".join(lines)
 
     def _compute_spline_points(
