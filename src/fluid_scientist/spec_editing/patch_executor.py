@@ -568,6 +568,17 @@ class PatchExecutor:
         touched_paths: set[str] = set()
         for op in patch.operations:
             touched_paths.add(op.path)
+            # For append operations (path ends with /-), the parent array
+            # path is also allowed, since new items at any index are expected.
+            if op.path.endswith("/-"):
+                parent = op.path[:-2]
+                touched_paths.add(parent)
+            # For remove operations on array indices, subsequent elements
+            # shift down, so the entire parent array is considered touched.
+            if op.op == "remove":
+                parts = op.path.rsplit("/", 1)
+                if len(parts) == 2 and parts[1].isdigit():
+                    touched_paths.add(parts[0])
 
         # Always-allowed changes.
         always_allowed = {

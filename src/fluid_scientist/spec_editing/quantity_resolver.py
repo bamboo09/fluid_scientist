@@ -89,11 +89,23 @@ class QuantityResolver:
         if not isinstance(value, dict):
             return value
 
-        if "operator" not in value:
-            # A plain dict value (e.g. a Quantity dict) — return as-is.
-            return value
+        # Direct expression: {"operator": "multiply", "path": "...", "factor": 0.5}
+        if "operator" in value:
+            return self._resolve_expression(value, current_spec, path)
 
-        return self._resolve_expression(value, current_spec, path)
+        # Nested expression (Quantity-style): {"expression": {"operator": ...}}
+        if "expression" in value and isinstance(value["expression"], dict):
+            resolved = self._resolve_expression(
+                value["expression"], current_spec, path
+            )
+            # Return a copy with the resolved value and cleared expression
+            result = dict(value)
+            result["value"] = resolved
+            result.pop("expression", None)
+            return result
+
+        # A plain dict value (e.g. a Quantity dict) — return as-is.
+        return value
 
     # ------------------------------------------------------------------
     # Internal: expression resolution

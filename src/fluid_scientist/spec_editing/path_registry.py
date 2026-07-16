@@ -128,6 +128,7 @@ _APPEND_ARRAY_PATHS: dict[str, dict[str, Any]] = {
     "/validation/checks": {"value_schema": {"type": "string"}, "mutable": True, "risk_level": "low"},
     "/initial_conditions": {"value_schema": {"type": "object"}, "mutable": True, "risk_level": "medium"},
     "/numerics/time/statistics_windows": {"value_schema": {"type": "object"}, "mutable": True, "risk_level": "medium"},
+    "/geometry/relations": {"value_schema": {"type": "object"}, "mutable": True, "risk_level": "medium"},
 }
 
 
@@ -260,7 +261,18 @@ class PathRegistry:
                 dependency_tags={"geometry"},
             )
 
-        # 3. Array-append path.
+        # 3. Relation placeholder path: /geometry/relations/{relation_id}
+        if path.startswith("/geometry/relations/"):
+            # Any sub-path under /geometry/relations/{id} is mutable
+            return PathMetadata(
+                json_pointer=path,
+                value_schema={"type": "object"},
+                mutable=True,
+                risk_level="medium",
+                dependency_tags={"geometry", "placement"},
+            )
+
+        # 4. Array-append path.
         append_info = self._normalise_append_path(path)
         if append_info is not None:
             base, _remaining = append_info
