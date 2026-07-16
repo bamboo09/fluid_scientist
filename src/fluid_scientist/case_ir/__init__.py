@@ -34,6 +34,26 @@ Typical flow::
     )
 """
 
+from fluid_scientist.case_ir.capability_requirements import (
+    CapabilityRequirement,
+    CapabilityRequirementGraph,
+    RequirementStatus,
+)
+from fluid_scientist.case_ir.geometry_ast import (
+    BooleanNode,
+    CircleNode,
+    CosineBellNode,
+    GeometryAST,
+    GeometryASTBuilder,
+    GeometryNode,
+    ImportedNode,
+    PolygonNode,
+    PrimitiveNode,
+    RectangleNode,
+    TransformNode,
+    TriangleNode,
+)
+from fluid_scientist.case_ir.geometry_to_case_ir import StudySpecToCaseIRConverter
 from fluid_scientist.case_ir.models import (
     Ambiguity,
     Assumption,
@@ -59,16 +79,29 @@ from fluid_scientist.case_ir.models import (
     ResolvedCapability,
     UnresolvedRequirement,
 )
+from fluid_scientist.case_ir.semantic_fidelity import (
+    SemanticFidelityChecker,
+    SemanticFidelityReport,
+)
 
 __all__ = [
     "Ambiguity",
     "Assumption",
+    "BooleanNode",
     "BoundaryIntent",
+    "CapabilityRequirement",
+    "CapabilityRequirementGraph",
+    "CircleNode",
     "CompositionPlan",
+    "CosineBellNode",
     "DerivedConstraint",
     "Entity",
     "ExtensionSpecRef",
     "FieldSpec",
+    "GeometryAST",
+    "GeometryASTBuilder",
+    "GeometryNode",
+    "ImportedNode",
     "InitialConditionIntent",
     "Interface",
     "Material",
@@ -78,10 +111,19 @@ __all__ = [
     "OperatingStage",
     "ParameterValue",
     "PhysicsIntent",
+    "PolygonNode",
+    "PrimitiveNode",
+    "RectangleNode",
     "Region",
     "Relation",
     "RequestedCaseIR",
+    "RequirementStatus",
     "ResolvedCaseIR",
     "ResolvedCapability",
+    "SemanticFidelityChecker",
+    "SemanticFidelityReport",
+    "StudySpecToCaseIRConverter",
+    "TransformNode",
+    "TriangleNode",
     "UnresolvedRequirement",
 ]
