@@ -51,6 +51,11 @@ class CylinderFlow2DSceneRouter:
         "圆柱", "圆形障碍物", "圆形物体",
         "cylinder", "circular body", "circular obstacle",
         "凸起", "bump", "底面凸起", "壁面凸起",
+        # Also support other obstacle types that use the same pipeline
+        "三角", "三角形", "triangle",
+        "矩形", "rectangle", "长方形",
+        "梯形", "trapezoid",
+        "障碍物", "obstacle", "障碍",
     ]
 
     FLOW_KEYWORDS = [

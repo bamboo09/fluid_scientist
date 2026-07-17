@@ -1019,9 +1019,46 @@ def _apply_clarification(spec: Any, question_id: str, answer: str) -> None:
 
     elif question_id == "cylinder_type":
         if "不是" in answer or "清除" in answer:
-            spec.has_cylinder = False
-        else:
-            spec.has_cylinder = True
+            # has_cylinder is a read-only @property based on radius/diameter being resolved.
+            # To "clear" the cylinder, unset radius and diameter fields.
+            spec.cylinder.radius_m = ProvenanceField(
+                value=None, source=FieldSource.SYSTEM_DERIVED,
+                status=FieldStatus.UNRESOLVED, confidence=0.0,
+                reason="用户确认不是圆柱",
+            )
+            spec.cylinder.diameter_m = ProvenanceField(
+                value=None, source=FieldSource.SYSTEM_DERIVED,
+                status=FieldStatus.UNRESOLVED, confidence=0.0,
+                reason="用户确认不是圆柱",
+            )
+            spec.cylinder.characteristic_dimension_m = ProvenanceField(
+                value=None, source=FieldSource.SYSTEM_DERIVED,
+                status=FieldStatus.UNRESOLVED, confidence=0.0,
+                reason="用户确认不是圆柱",
+            )
+            spec.cylinder.center_x_m = ProvenanceField(
+                value=None, source=FieldSource.SYSTEM_DERIVED,
+                status=FieldStatus.UNRESOLVED, confidence=0.0,
+                reason="用户确认不是圆柱",
+            )
+            spec.cylinder.center_y_m = ProvenanceField(
+                value=None, source=FieldSource.SYSTEM_DERIVED,
+                status=FieldStatus.UNRESOLVED, confidence=0.0,
+                reason="用户确认不是圆柱",
+            )
+            # Remove all cylinder-related blocking issues since user confirmed no cylinder
+            spec.blocking_issues = [
+                i for i in spec.blocking_issues
+                if i.get("code") not in (
+                    "CYLINDER_TYPE_MISSING",
+                    "CYLINDER_DIMENSION_TRULY_MISSING",
+                    "CYLINDER_DIMENSION_MISSING",
+                    "CYLINDER_CENTER_X_NULL",
+                    "CYLINDER_CENTER_X_MISSING",
+                    "CYLINDER_POSITION_CONFLICT",
+                )
+            ]
+        # If "是圆柱", do nothing — has_cylinder is already True if radius/diameter were parsed
 
     elif question_id == "flow_topology":
         topology_map = {
@@ -2741,6 +2778,8 @@ async def confirm_spec(request: ConfirmRequest) -> ConfirmResponse:
 
     # 9. Critic
     critic = CylinderFlow2DCritic()
+    # Clear previously accumulated blocking issues before re-evaluation
+    spec.blocking_issues = []
     critic.review(spec, spec.user_input_text or "")
 
     # 10. Coverage checker

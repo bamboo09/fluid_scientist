@@ -65,11 +65,11 @@ class CylinderFlow2DDraftReadinessEvaluator:
         """Collect all blocking issues. Returns empty list if none."""
         issues: list[dict] = []
 
-        # 1. Cylinder type must exist (or bump profile must be enabled)
-        if not spec.has_cylinder and not spec.has_bottom_profile:
+        # 1. Cylinder type must exist (or bump profile / triangle / rectangle must be enabled)
+        if not spec.has_cylinder and not spec.has_bottom_profile and not spec.has_triangle and not spec.has_rectangle and not spec.has_trapezoid:
             issues.append({
                 "code": "CYLINDER_TYPE_MISSING",
-                "message": "圆柱类型未指定，请描述圆柱或圆形障碍物，或设置底面凸起。",
+                "message": "障碍物类型未指定，请描述圆柱、三角凸起、矩形障碍物等，或设置底面凸起。",
                 "severity": "blocking",
             })
 
@@ -189,12 +189,19 @@ class CylinderFlow2DDraftReadinessEvaluator:
         self, spec: CylinderFlow2DExperimentSpecV1
     ) -> bool:
         """Check if the minimum requirements for any status are met."""
-        # Cylinder type exists
-        if not spec.has_cylinder:
+        # At least one obstacle type must exist (cylinder, triangle, rectangle, etc.)
+        has_any_obstacle = (
+            spec.has_cylinder
+            or spec.has_bottom_profile
+            or spec.has_triangle
+            or spec.has_rectangle
+            or spec.has_trapezoid
+        )
+        if not has_any_obstacle:
             return False
 
-        # Characteristic dimension exists or is derivable
-        if spec.get_characteristic_dimension() is None:
+        # Characteristic dimension exists or is derivable (only for cylinder)
+        if spec.has_cylinder and spec.get_characteristic_dimension() is None:
             return False
 
         # Flow topology is resolved

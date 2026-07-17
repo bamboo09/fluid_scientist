@@ -73,8 +73,8 @@ class CylinderFlow2DCritic:
         """
         result = CriticResult()
 
-        # 1. Check cylinder type exists (or bump profile is enabled)
-        if not spec.has_cylinder and not spec.has_bottom_profile:
+        # 1. Check cylinder type exists (or bump profile / triangle / rectangle is enabled)
+        if not spec.has_cylinder and not spec.has_bottom_profile and not spec.has_triangle and not spec.has_rectangle and not spec.has_trapezoid:
             # Auto-repair: try to identify cylinder from text
             from fluid_scientist.cylinder_flow_2d.geometry_normalizer import (
                 CylinderFlow2DGeometryNormalizer,
@@ -89,7 +89,7 @@ class CylinderFlow2DCritic:
             else:
                 result.add_issue(
                     "CYLINDER_TYPE_MISSING",
-                    "用户描述中未识别到圆柱类型",
+                    "用户描述中未识别到障碍物类型（圆柱、三角凸起、矩形等）",
                     "blocking",
                 )
 
