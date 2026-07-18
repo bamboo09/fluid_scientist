@@ -256,18 +256,47 @@ def _plan_metadata(
 
 
 def _deterministic_tar_gz(files: dict[str, str]) -> bytes:
+    """Create a deterministic tar.gz archive from file contents.
+
+    Every member carries a fixed mtime/uid/gid/uname/gname and mode, gzip is
+    produced with a frozen header (``filename=""``, ``mtime=0``), and directory
+    entries are emitted explicitly for every parent path (e.g. a file named
+    ``constant/triSurface/geometry.stl`` yields ``constant/`` and
+    ``constant/triSurface/``). Two runs over the same input therefore produce
+    byte-identical output.
+    """
+
+    def _tar_info(name: str, *, mode: int, is_dir: bool) -> tarfile.TarInfo:
+        info = tarfile.TarInfo(name)
+        info.type = tarfile.DIRTYPE if is_dir else tarfile.REGTYPE
+        info.size = 0
+        info.mode = mode
+        info.uid = 0
+        info.gid = 0
+        info.uname = ""
+        info.gname = ""
+        info.mtime = 0
+        return info
+
     tar_output = io.BytesIO()
     with tarfile.open(fileobj=tar_output, mode="w", format=tarfile.USTAR_FORMAT) as bundle:
+        added_dirs: set[str] = set()
         for name in sorted(files):
+            segments = [segment for segment in name.split("/") if segment]
+            for depth in range(1, len(segments)):
+                dir_name = "/".join(segments[:depth]) + "/"
+                if dir_name in added_dirs:
+                    continue
+                added_dirs.add(dir_name)
+                bundle.addfile(_tar_info(dir_name, mode=0o755, is_dir=True))
+            if name.endswith("/"):
+                if name not in added_dirs:
+                    added_dirs.add(name)
+                    bundle.addfile(_tar_info(name, mode=0o755, is_dir=True))
+                continue
             payload = files[name].encode("utf-8")
-            info = tarfile.TarInfo(name)
+            info = _tar_info(name, mode=0o644, is_dir=False)
             info.size = len(payload)
-            info.mode = 0o644
-            info.uid = 0
-            info.gid = 0
-            info.uname = ""
-            info.gname = ""
-            info.mtime = 0
             bundle.addfile(info, io.BytesIO(payload))
     compressed = io.BytesIO()
     with gzip.GzipFile(fileobj=compressed, mode="wb", filename="", mtime=0) as stream:

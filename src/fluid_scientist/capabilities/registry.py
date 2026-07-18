@@ -1,4 +1,4 @@
-"""Unified, persistent Capability Registry with native capability registration.
+﻿"""Unified, persistent Capability Registry with native capability registration.
 
 The registry holds both built-in (native) capabilities and dynamically
 generated code extensions.  It is queried by the CapabilityResolver to
@@ -177,7 +177,7 @@ def _build_native_capabilities() -> list[Capability]:
         implementation_entrypoint="fluid_scientist.case_generation.geometry:block_mesh_rectangular",
         is_native=True,
         status=CapabilityStatus.VERIFIED,
-        supported_versions=["openfoam13"],
+        supported_versions=["openfoam13", "openfoam2412"],
     ))
     caps.append(Capability(
         capability_id="geometry.cylinder_in_channel",
@@ -252,7 +252,7 @@ def _build_native_capabilities() -> list[Capability]:
         capability_id="physics.incompressible_single_phase",
         capability_type="physics_model_compiler",
         name="Incompressible Single-Phase Flow",
-        description="Compile physicalProperties and momentumTransport for incompressible single-phase flow",
+        description="Compile transportProperties and turbulenceProperties for incompressible single-phase flow",
         implementation_entrypoint="fluid_scientist.case_generation.physics:incompressible_single_phase",
         is_native=True,
         status=CapabilityStatus.VERIFIED,
@@ -339,8 +339,11 @@ def _build_native_capabilities() -> list[Capability]:
 
     # ---- solver adapters ----
     for solver_id, name, desc in [
-        ("solver.incompressible_fluid", "incompressibleFluid", "Foundation 13 incompressible flow solver module (foamRun -solver incompressibleFluid)"),
+        ("solver.pimplefoam", "pimpleFoam", "Transient incompressible flow solver (PIMPLE)"),
+        ("solver.pisofoam", "pisoFoam", "Transient incompressible flow solver (PISO)"),
+        ("solver.simplefoam", "simpleFoam", "Steady-state incompressible flow solver (SIMPLE)"),
         ("solver.rhopimplefoam", "rhoPimpleFoam", "Transient compressible flow solver"),
+        ("solver.icoFOAM", "icoFoam", "Laminar transient incompressible flow solver"),
     ]:
         caps.append(Capability(
             capability_id=solver_id,
@@ -485,4 +488,210 @@ class CapabilityRegistry:
                 if not cap.tests and not cap.test_manifest:
                     issues.append(CapabilityHealthIssue(
                         capability_id=cap.capability_id,
-                        issue_cod
+                        issue_code="missing_test_manifest",
+                        message=(
+                            "VERIFIED capability has no unit/minimal-case "
+                            "test manifest recorded."
+                        ),
+                    ))
+                if not cap.verification_artifact:
+                    issues.append(CapabilityHealthIssue(
+                        capability_id=cap.capability_id,
+                        issue_code="missing_verification_artifact",
+                        message=(
+                            "VERIFIED capability has no verification artifact "
+                            "hash recorded."
+                        ),
+                    ))
+
+            status_after = cap.status
+            if mutate and any(issue.severity == "error" for issue in issues):
+                status_after = CapabilityStatus.UNVERIFIED
+                cap.status = status_after
+                degraded += 1
+
+            if implementation_hash and implementation_hash != cap.implementation_hash:
+                cap.implementation_hash = implementation_hash
+
+            records.append(CapabilityHealthRecord(
+                capability_id=cap.capability_id,
+                capability_type=cap.capability_type,
+                status_before=status_before,
+                status_after=status_after,
+                implementation_entrypoint=cap.implementation_entrypoint,
+                implementation_hash=implementation_hash,
+                issues=issues,
+            ))
+
+        verified = sum(
+            1
+            for cap in self._capabilities.values()
+            if cap.status == CapabilityStatus.VERIFIED
+        )
+        unverified = sum(
+            1 for record in records
+            if any(issue.severity == "error" for issue in record.issues)
+            or record.status_after == CapabilityStatus.UNVERIFIED
+        )
+        return CapabilityHealthReport(
+            total=len(records),
+            verified=verified,
+            unverified=unverified,
+            degraded=degraded,
+            records=records,
+        )
+
+    def _inspect_entrypoint(
+        self, capability: Capability
+    ) -> tuple[str, list[CapabilityHealthIssue]]:
+        issues: list[CapabilityHealthIssue] = []
+        entrypoint = capability.implementation_entrypoint
+        if ":" not in entrypoint:
+            return "", [CapabilityHealthIssue(
+                capability_id=capability.capability_id,
+                issue_code="invalid_entrypoint_format",
+                message="implementation_entrypoint must use 'module:function'.",
+            )]
+
+        module_name, attr_name = entrypoint.split(":", 1)
+        try:
+            module = importlib.import_module(module_name)
+        except Exception as exc:  # noqa: BLE001 - health report should capture any import failure
+            return "", [CapabilityHealthIssue(
+                capability_id=capability.capability_id,
+                issue_code="entrypoint_import_failed",
+                message=f"Could not import {module_name}: {exc}",
+            )]
+
+        obj = getattr(module, attr_name, None)
+        if obj is None:
+            issues.append(CapabilityHealthIssue(
+                capability_id=capability.capability_id,
+                issue_code="entrypoint_missing_attribute",
+                message=f"Module {module_name} has no attribute {attr_name}.",
+            ))
+            return "", issues
+        if not callable(obj):
+            issues.append(CapabilityHealthIssue(
+                capability_id=capability.capability_id,
+                issue_code="entrypoint_not_callable",
+                message=f"Entrypoint {entrypoint} is not callable.",
+            ))
+            return "", issues
+
+        try:
+            source = inspect.getsource(obj)
+        except (OSError, TypeError):
+            source = repr(obj)
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        implementation_hash = f"sha256:{digest}"
+        expected_hash = capability.implementation_hash
+        if expected_hash and expected_hash != implementation_hash:
+            issues.append(CapabilityHealthIssue(
+                capability_id=capability.capability_id,
+                issue_code="implementation_hash_changed",
+                message="Implementation hash differs from the registry value.",
+            ))
+        return implementation_hash, issues
+
+    def unregister(self, capability_id: str) -> None:
+        self._capabilities.pop(capability_id, None)
+
+    def has_capability(self, capability_id: str) -> bool:
+        return capability_id in self._capabilities
+
+    def get_capability(self, capability_id: str) -> Capability | None:
+        return self._capabilities.get(capability_id)
+
+    def find_capabilities(
+        self,
+        capability_type: str | None = None,
+        keyword: str | None = None,
+        status: str | None = None,
+    ) -> list[Capability]:
+        """Find capabilities matching type/keyword/status."""
+        results = []
+        for cap in self._capabilities.values():
+            if capability_type and cap.capability_type != capability_type:
+                continue
+            if status and cap.status != status:
+                continue
+            if keyword:
+                kw = keyword.lower()
+                searchable = (cap.name + " " + cap.description + " " + cap.capability_id).lower()
+                if kw not in searchable:
+                    continue
+            results.append(cap)
+        return results
+
+    def resolve_requirement(self, requirement: CapabilityRequirement) -> Capability | None:
+        """Try to resolve a requirement to a registered capability.
+
+        Returns the best matching Capability or None.
+        """
+        # Exact match by capability_id first
+        if requirement.capability_id and requirement.capability_id in self._capabilities:
+            cap = self._capabilities[requirement.capability_id]
+            if cap.status != CapabilityStatus.DEPRECATED:
+                return cap
+
+        # Match by type + keywords
+        candidates = self.find_capabilities(capability_type=requirement.capability_type)
+        if not requirement.keywords:
+            return candidates[0] if candidates else None
+
+        best_cap = None
+        best_score = 0
+        for cap in candidates:
+            if cap.status == CapabilityStatus.DEPRECATED:
+                continue
+            score = 0
+            searchable = (cap.name + " " + cap.description + " " + cap.capability_id).lower()
+            for kw in requirement.keywords:
+                if kw.lower() in searchable:
+                    score += 1
+            if score > best_score:
+                best_score = score
+                best_cap = cap
+        return best_cap
+
+    def list_all(self) -> list[Capability]:
+        return list(self._capabilities.values())
+
+    def list_native(self) -> list[Capability]:
+        return [c for c in self._capabilities.values() if c.is_native]
+
+    def list_extended(self) -> list[Capability]:
+        return [c for c in self._capabilities.values() if not c.is_native]
+
+
+# Singleton registry (process-wide)
+_registry_singleton: CapabilityRegistry | None = None
+
+
+def get_capability_registry() -> CapabilityRegistry:
+    """Return the process-wide CapabilityRegistry singleton."""
+    global _registry_singleton
+    if _registry_singleton is None:
+        _registry_singleton = CapabilityRegistry()
+    return _registry_singleton
+
+
+def reset_registry() -> None:
+    """Reset the singleton (for testing)."""
+    global _registry_singleton
+    _registry_singleton = None
+
+
+__all__ = [
+    "CAPABILITY_TYPES",
+    "Capability",
+    "CapabilityHealthIssue",
+    "CapabilityHealthRecord",
+    "CapabilityHealthReport",
+    "CapabilityRequirement",
+    "CapabilityRegistry",
+    "CapabilityStatus",
+    "get_capability_registry",
+    "reset_registry",
+]

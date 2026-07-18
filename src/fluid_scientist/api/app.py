@@ -1,4 +1,4 @@
-"""FastAPI application for Fake demos and persistent research projects."""
+﻿"""FastAPI application for Fake demos and persistent research projects."""
 
 import contextlib
 import logging
@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal
 from uuid import uuid4
 
 from fastapi import Body, FastAPI, HTTPException, Request, status
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import (
     BaseModel,
@@ -519,14 +519,6 @@ def create_app(
     configured_targets = execution_targets
     if configured_targets is None:
         configured_targets = build_execution_targets(runtime_settings, transport_factory)
-
-    # Merge V5 workstation profiles into execution targets
-    v5_targets = build_v5_execution_targets()
-    if v5_targets:
-        existing_ids = {t.target_id for t in configured_targets}
-        configured_targets = configured_targets + tuple(
-            t for t in v5_targets if t.target_id not in existing_ids
-        )
     coupled_plan_args = (plan_designer, plan_provider_name, plan_model_name)
     if model_configuration is not None and (
         experiment_designer is not None
@@ -600,42 +592,38 @@ def create_app(
     from fluid_scientist.api.v5_router import router as _v5_router
     application.include_router(_v5_router)
 
-    # Mount the obstacle flow API
-    from fluid_scientist.api.obstacle_flow_router import router as _obstacle_router
-    application.include_router(_obstacle_router)
+    # Runtime commit identity / Trae baseline ancestry guard.
+    from fluid_scientist.api.build_info import router as _build_info_router
+    application.include_router(_build_info_router)
 
-    # Mount the cylinder flow 2D API
-    from fluid_scientist.api.cylinder_flow_router import router as _cylinder_router
-    application.include_router(_cylinder_router)
+    # Mount the cylinder-flow 2D dedicated pipeline
+    try:
+        from fluid_scientist.api.cylinder_flow_router import router as _cyl_router
+        application.include_router(_cyl_router)
+    except Exception as _cyl_err:
+        import logging
+        logging.getLogger(__name__).warning("cylinder_flow_router not loaded: %s", _cyl_err)
 
-    # Mount the v5 workstation auto-connect API
-    from fluid_scientist.api.workstation_router import router as _ws_router
-    application.include_router(_ws_router)
+    # Mount the model-driven spec editing API
+    try:
+        from fluid_scientist.api.model_editing_router import router as model_editing_router
+        application.include_router(model_editing_router)
+    except Exception as _me_err:
+        import logging
+        logging.getLogger(__name__).warning("model_editing_router not loaded: %s", _me_err)
+
+    # Mount the generic v5 research-session API (Project/Study/Variant flow)
+    try:
+        from fluid_scientist.api.research_session_router import router as _rs_router
+        application.include_router(_rs_router)
+    except Exception as _rs_err:
+        import logging
+        logging.getLogger(__name__).warning("research_session_router not loaded: %s", _rs_err)
 
     application.state.execution_targets = configured_targets
     application.state.model_configuration = configured_models
     application.state.planning_operation_service = planning_service
     target_registry = {target.target_id: target for target in configured_targets}
-
-    # Register rebuild callback so workstation profiles can refresh targets
-    def _rebuild_targets() -> None:
-        """Rebuild execution targets from settings + V5 profiles.
-
-        Called after a V5 workstation profile is saved or deleted.
-        """
-        nonlocal configured_targets
-        static_targets = build_execution_targets(runtime_settings)
-        v5_targets = build_v5_execution_targets()
-        existing_ids = {t.target_id for t in static_targets}
-        configured_targets = static_targets + tuple(
-            t for t in v5_targets if t.target_id not in existing_ids
-        )
-        application.state.execution_targets = configured_targets
-        target_registry.clear()
-        for t in configured_targets:
-            target_registry[t.target_id] = t
-
-    application.state.rebuild_targets = _rebuild_targets
     capability_cache = target_capability_cache or TargetCapabilityCache()
     application.state.target_capability_cache = capability_cache
     research_session_store = SessionStore()
@@ -665,26 +653,8 @@ def create_app(
     demo_projects: dict[str, DemoResearchResult] = {}
 
     @application.get("/", include_in_schema=False)
-    def workbench() -> HTMLResponse:
-        """Serve the V5 conversational workbench SPA.
-
-        Replaces ``__BUILD_SHA__`` placeholders with the current git SHA
-        so that asset cache-busting query strings are meaningful.
-        """
-        import subprocess
-        try:
-            git_sha = subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
-                stderr=subprocess.DEVNULL,
-                cwd=Path(__file__).resolve().parent,
-            ).decode().strip()
-        except Exception:
-            git_sha = "unknown"
-
-        html_path = WEB_ROOT / "index.html"
-        html = html_path.read_text(encoding="utf-8")
-        html = html.replace("__BUILD_SHA__", git_sha)
-        return HTMLResponse(content=html)
+    def workbench() -> FileResponse:
+        return FileResponse(WEB_ROOT / "index.html")
 
     @application.get("/health")
     def health() -> dict[str, str]:
@@ -712,25 +682,6 @@ def create_app(
             "measurement_plan_compile_enabled": True,
             "package_version": __version__,
             "workflow_v2_enabled": runtime_settings.research_workflow_v2,
-        }
-
-    @application.get("/api/system/build-info")
-    def get_build_info() -> dict:
-        """Return build info for the V5 conversational workbench."""
-        import subprocess
-        try:
-            git_sha = subprocess.check_output(
-                ["git", "rev-parse", "--short", "HEAD"],
-                stderr=subprocess.DEVNULL,
-                cwd=Path(__file__).resolve().parent,
-            ).decode().strip()
-        except Exception:
-            git_sha = "unknown"
-
-        return {
-            "version": __version__,
-            "git_commit": git_sha,
-            "build_time": "",
         }
 
     def _pipeline_work_root() -> Path:
@@ -1071,55 +1022,6 @@ def create_app(
             provider=model_snapshot.provider,
             model=model_snapshot.model,
         )
-
-    # ---- V5 model-config compatibility endpoints ----
-
-    @application.post("/api/v5/model-config")
-    def configure_v5_model_provider(request: ModelConfigurationRequest) -> dict[str, Any]:
-        """Compatibility endpoint used by the V5 conversational workbench."""
-        view = configure_plan_provider(request)
-        return {
-            **view.model_dump(mode="json"),
-            "is_mock": False,
-            "suggested_models": {
-                "openai": ["gpt-5.4", "gpt-5.4-mini"],
-                "glm": ["glm-4-flash", "glm-4.5"],
-                "deepseek": ["deepseek-chat", "deepseek-reasoner"],
-            },
-        }
-
-    @application.get("/api/v5/model-config")
-    def get_v5_model_provider_configuration() -> dict[str, Any]:
-        """Compatibility endpoint used by the V5 conversational workbench."""
-        view = get_plan_provider_configuration()
-        # If app-level config is unconfigured but v5_router restored an LLM
-        # client from persisted config, report that instead so the UI stays
-        # in sync after a server restart.
-        if not view.configured:
-            from fluid_scientist.api import v5_router as _v5r
-            if _v5r._llm_client is not None:
-                saved = _v5r._load_llm_config()
-                if saved:
-                    return {
-                        "configured": True,
-                        "provider": saved.get("provider"),
-                        "model": saved.get("model"),
-                        "is_mock": False,
-                        "suggested_models": {
-                            "openai": ["gpt-5.4", "gpt-5.4-mini"],
-                            "glm": ["glm-4-flash", "glm-4.5"],
-                            "deepseek": ["deepseek-chat", "deepseek-reasoner"],
-                        },
-                    }
-        return {
-            **view.model_dump(mode="json"),
-            "is_mock": False,
-            "suggested_models": {
-                "openai": ["gpt-5.4", "gpt-5.4-mini"],
-                "glm": ["glm-4-flash", "glm-4.5"],
-                "deepseek": ["deepseek-chat", "deepseek-reasoner"],
-            },
-        }
 
     @application.get(
         "/api/experiment-capabilities",
@@ -4003,4 +3905,170 @@ def create_app(
                 },
             )
 
-        spec_dict = json.loads(s
+        spec_dict = json.loads(stored.spec_json)
+        proposal = EditProposal.model_validate(proposal_data)
+
+        # 4. Create SpecEditExecutor, call apply()
+        executor = SpecEditExecutor()
+        updated_spec, change_summary = executor.apply(
+            spec_dict,
+            proposal,
+            payload.accepted_operation_indices,
+        )
+
+        # 5. Save updated spec (increment version if spec was immutable)
+        spec_status = stored.status
+        new_version = (
+            stored.experiment_version + 1
+            if is_immutable(spec_status)
+            else stored.experiment_version
+        )
+        now = datetime.now(UTC).isoformat()
+        updated_stored = workflow_repository.replace_experiment_spec(
+            experiment_id,
+            spec_json=json.dumps(updated_spec, ensure_ascii=False),
+            experiment_version=new_version,
+            status=spec_status,
+            updated_at=now,
+        )
+
+        # 6. Return updated spec + change_summary
+        result = json.loads(updated_stored.spec_json)
+        result["_change_summary"] = change_summary.model_dump()
+        return result
+
+    return application
+
+
+def build_execution_targets(
+    settings: AppSettings,
+    transport_factory: Callable[[NodeSettings], SSHTransport] = SSHTransport,
+) -> tuple[ExecutionTargetAdapter, ...]:
+    workstation = settings.workstation
+    if not workstation.hosts or not workstation.username or not workstation.known_hosts_file:
+        return ()
+    candidates = tuple(
+        (
+            f"candidate-{index}",
+            transport_factory(
+                NodeSettings(
+                    host=host,
+                    username=workstation.username,
+                    port=workstation.port,
+                    identity_file=workstation.identity_file,
+                    known_hosts_file=workstation.known_hosts_file,
+                )
+            ),
+        )
+        for index, host in enumerate(workstation.hosts, start=1)
+    )
+    return (
+        WorkstationOpenFOAMTarget(
+            target_id="workstation-openfoam",
+            candidates=candidates,
+        ),
+    )
+
+
+def _operation_view(record: OperationRecord) -> OperationView:
+    return OperationView(
+        operation_id=record.operation_id,
+        kind=record.kind,
+        state=record.state,
+        stage=record.stage,
+        message=record.message,
+        result_ref=record.result_ref,
+        safe_error=record.safe_error,
+        cancel_requested=record.cancel_requested,
+        attempt=record.attempt,
+        created_at=record.created_at,
+        updated_at=record.updated_at,
+        terminal=record.terminal,
+    )
+
+
+def _planning_capabilities(target: ExecutionTargetAdapter) -> tuple[str, ...]:
+    """Use declared software/type support without contacting the remote host."""
+
+    experiment_types = tuple(
+        capability.experiment_type for capability in EXPERIMENT_CAPABILITIES
+    )
+    declared = tuple(getattr(target, "declared_capabilities", ()))
+    kind = getattr(target, "kind", None)
+    target_markers = (target.target_id,) if kind is None else (kind, target.target_id)
+    return tuple(dict.fromkeys(experiment_types + declared + target_markers))
+
+
+def _require_fresh_target(target: ExecutionTargetAdapter) -> ExecutionTargetCapability:
+    """Gate a remote mutation on a non-cached doctor result."""
+
+    try:
+        capability = target.doctor()
+    except Exception as error:
+        raise HTTPException(
+            status_code=503,
+            detail="execution target capability check failed",
+        ) from error
+    if not capability.available:
+        raise HTTPException(status_code=503, detail="execution target is unavailable")
+    return capability
+
+
+def _submit_custom_fresh(
+    target: ExecutionTargetAdapter,
+    submit: Callable[[str, bytes], JobRecord],
+    job_id: str,
+    archive: bytes,
+) -> JobRecord:
+    _require_fresh_target(target)
+    return submit(job_id, archive)
+
+
+def _bound_benchmark(
+    project_service: ProjectService,
+    target_registry: dict[str, ExecutionTargetAdapter],
+    project_id: str,
+    case_id: str,
+    target_id: str,
+) -> tuple[ExecutionTargetAdapter, str]:
+    target = target_registry.get(target_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="execution target not found")
+    try:
+        project = project_service.get(project_id)
+        job_id = project.external_jobs[case_id]
+    except KeyError as error:
+        raise HTTPException(status_code=404, detail="benchmark job not found") from error
+    return target, job_id
+
+
+def _experiment_job_id(
+    project_id: str,
+    experiment_name: str,
+    *,
+    timestamp: datetime | None = None,
+) -> str:
+    slug = re.sub(r"[^a-z0-9]+", "-", experiment_name.lower()).strip("-")
+    slug = (slug or "openfoam-experiment")[:48].rstrip("-")
+    timestamp_text = (timestamp or datetime.now(UTC)).astimezone(UTC).strftime(
+        "%Y%m%d-%H%M%S"
+    )
+    project_suffix = project_id.replace("-", "")[:8].lower()
+    return f"{timestamp_text}-{slug}-{project_suffix}"
+
+
+def _leaf_evidence_keys(value: object, prefix: str = "") -> set[str]:
+    if isinstance(value, dict):
+        keys: set[str] = set()
+        for key, item in value.items():
+            child = f"{prefix}.{key}" if prefix else str(key)
+            keys.update(_leaf_evidence_keys(item, child))
+        return keys
+    if isinstance(value, (list, tuple)):
+        return {prefix} if prefix else set()
+    return {prefix} if prefix else set()
+
+
+
+
+app = create_app()

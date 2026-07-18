@@ -24,3 +24,20 @@ ssh-keys/
 # Test temp files
 .tmp_pytest/
 tmp_test
+
+# Runtime data and results (not source code) — root-level only
+/data/
+/results/
+/.uploads/
+/.trae-html-share-packages/
+
+# Reports (generated, not source)
+/phase_a_intelligence_audit_report.html
+/trusted_test_report_v5.html
+/pre-experiment-test-report/
+
+# Generated artifacts
+/artifacts/
+
+# Compiled Python (remove from tracking)
+*.pyc

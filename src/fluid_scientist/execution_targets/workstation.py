@@ -3,6 +3,7 @@
 import json
 import tempfile
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -52,16 +53,28 @@ class WorkerSolverResult(BaseModel):
     pressure_drop_pa: float | None
 
 
+class WorkerVisualization(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    type: str = ""
+    field: str = ""
+    format: str = ""
+    filename: str = ""
+    title: str = ""
+    time_step: str | None = None
+
+
 class WorkerPostProcessing(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     case_path: str
     paraview_file: str
-    time_directories: tuple[str, ...]
+    time_directories: tuple[str, ...] = ()
+    visualizations: tuple[WorkerVisualization, ...] = ()
 
 
 class WorkerObservables(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     moment_coefficient: float | None = None
     drag_coefficient: float | None = None
@@ -71,15 +84,16 @@ class WorkerObservables(BaseModel):
 
 
 class WorkerCollection(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="ignore")
 
     job_id: str
     state: str
     mesh: WorkerMeshResult
     solver: WorkerSolverResult
     observables: WorkerObservables = Field(default_factory=WorkerObservables)
-    case_manifest: dict[str, str]
+    case_manifest: dict[str, str] = Field(default_factory=dict)
     post_processing: WorkerPostProcessing | None = None
+    analysis: dict[str, Any] = Field(default_factory=dict)
 
 
 class WorkstationOpenFOAMTarget:
@@ -206,6 +220,12 @@ class WorkstationOpenFOAMTarget:
             raise RemoteExecutionError(
                 "fluid-worker returned an invalid collection response"
             ) from error
+
+    def download_visualization(self, job_id: str, filename: str) -> bytes:
+        """Download a visualization file (PNG/GIF) from the workstation."""
+        transport = self._transport()
+        remote_path = f".local/share/fluid-scientist/jobs/{job_id}/visualizations/{filename}"
+        return transport.download_file(remote_path, timeout=30.0)
 
     def _job_command(self, args: tuple[RemoteArg, ...]) -> JobRecord:
         transport = self._transport()

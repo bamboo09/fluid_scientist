@@ -161,3 +161,46 @@ class SSHTransport:
         if self._node.identity_file:
             argv += ("-i", self._node.identity_file)
         return argv + (f"{self._node.username}@{self._node.host}",)
+
+    def download_file(self, remote_path: str, *, timeout: float = 30.0) -> bytes:
+        """Download a file from the remote host via SCP and return its bytes."""
+        import tempfile
+
+        argv = (
+            "scp",
+            "-P",
+            str(self._node.port),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            f"UserKnownHostsFile={self._node.known_hosts_file}",
+        )
+        if self._node.identity_file:
+            argv += ("-i", self._node.identity_file)
+        source = f"{self._node.username}@{self._node.host}:{remote_path}"
+        with tempfile.NamedTemporaryFile(delete=False) as tmp:
+            tmp_path = tmp.name
+        try:
+            result = self._runner.run(
+                argv + (source, tmp_path), timeout=timeout
+            )
+            if result.returncode != 0:
+                raise RemoteExecutionError(
+                    f"secure download failed: {result.stderr.strip()}"
+                )
+            from pathlib import Path
+
+            return Path(tmp_path).read_bytes()
+        except subprocess.TimeoutExpired as error:
+            raise RemoteExecutionError(
+                f"secure download timed out after {timeout:g} seconds"
+            ) from error
+        finally:
+            try:
+                import os
+
+                os.unlink(tmp_path)
+            except OSError:
+                pass

@@ -1,4 +1,4 @@
-"""Unified Capability system.
+﻿"""Unified Capability system.
 
 Exports the new CapabilityRegistry (with native capabilities) alongside
 legacy re-exports for backward compatibility.
@@ -28,4 +28,48 @@ from fluid_scientist.capabilities.resolution import (
     CapabilityResolution,
     RequirementGraphResolver,
     ResolutionStatus,
-    Resolu
+    ResolutionStrategy,
+)
+from fluid_scientist.capabilities.registry import (
+    CAPABILITY_TYPES,
+    Capability,
+    CapabilityHealthIssue,
+    CapabilityHealthRecord,
+    CapabilityHealthReport,
+    CapabilityRegistry,
+    CapabilityRequirement,
+    CapabilityStatus,
+    get_capability_registry,
+    reset_registry,
+)
+
+__all__ = [
+    "CAPABILITY_TYPES",
+    "Capability",
+    "CapabilityHealthIssue",
+    "CapabilityHealthRecord",
+    "CapabilityHealthReport",
+    "CapabilityRegistry",
+    "CapabilityRequirement",
+    "CapabilityRequirementGraph",
+    "CapabilityResolution",
+    "CapabilityStatus",
+    "CapabilityType",
+    "CodeExtensionSpec",
+    "CompilerCapability",
+    "ConfigExtensionExecution",
+    "ConfigExtensionExecutor",
+    "ExtensionLifecycleStatus",
+    "ExtensionRunRecord",
+    "ExtensionSpec",
+    "MissingCapability",
+    "PipelineCheckpoint",
+    "RequirementGraphResolver",
+    "ResolutionStatus",
+    "ResolutionStrategy",
+    "StrictModel",
+    "UnknownCapabilityOrchestrator",
+    "UnknownCapabilityResult",
+    "get_capability_registry",
+    "reset_registry",
+]
