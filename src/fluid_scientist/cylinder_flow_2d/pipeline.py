@@ -44,6 +44,7 @@ from fluid_scientist.cylinder_flow_2d.models import (
     ModelPolicy,
     ObservableSpec,
     ObservableType,
+    PolygonSpec,
     ProvenanceField,
     SemanticBoundaryType,
     SimulationSpec,
@@ -574,6 +575,20 @@ class CylinderFlow2DV1Pipeline:
                     status=FieldStatus.RESOLVED,
                     confidence=1.0,
                 )
+            elif any(kw in user_text for kw in ["中央", "居中", "中心", "正中", "central", "center"]):
+                # Derive center_x from "下壁面中央" / "中央" keywords
+                domain_l = (spec.domain.length_m.value
+                            if spec.domain.length_m.is_resolved() else None)
+                if domain_l is not None and domain_l > 0:
+                    cx = domain_l / 2.0
+                    spec.bottom_profile.center_x_m = ProvenanceField(
+                        value=cx,
+                        source=FieldSource.SYSTEM_DERIVED,
+                        status=FieldStatus.RESOLVED,
+                        confidence=1.0,
+                        reason=f"由'中央'推导: center_x = domain_length/2 = {domain_l}/2 = {cx}",
+                    )
+                    facts.append(f"凸起位于下壁面中央，center_x = {cx} m")
             # Store alignment flag for physics_dependency to use
             if bump.get("aligned_below_cylinder"):
                 spec.bottom_profile.aligned_below_cylinder = True
@@ -657,6 +672,37 @@ class CylinderFlow2DV1Pipeline:
                 )
             if rectangle.get("aligned_below_cylinder"):
                 spec.rectangle.relation_to_cylinder = "aligned_below"
+
+        # Extract custom polygon obstacle — semantic_type = custom_polygon_2d
+        polygon = self._extract_polygon(user_text)
+        if polygon:
+            facts.append(
+                f"用户指定了自定义多边形障碍物: "
+                f"顶点数={len(polygon.get('vertices', []))}, "
+                f"位置x={polygon.get('center_x')}"
+            )
+            spec.polygon.enabled = True
+            spec.polygon.semantic_type = "custom_polygon_2d"
+            spec.polygon.solver_representation = "polygon_stl"
+            spec.polygon.source_text = user_text
+            if polygon.get("vertices"):
+                spec.polygon.vertices = polygon["vertices"]
+            if polygon.get("center_x") is not None:
+                spec.polygon.center_x_m = ProvenanceField(
+                    value=polygon["center_x"],
+                    source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED,
+                    confidence=1.0,
+                    reason="用户明确指定多边形位置",
+                )
+            if polygon.get("center_y") is not None:
+                spec.polygon.center_y_m = ProvenanceField(
+                    value=polygon["center_y"],
+                    source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED,
+                    confidence=1.0,
+                    reason="用户明确指定多边形位置",
+                )
 
         # Extract end time
         end_time = self._extract_end_time(user_text)
@@ -910,6 +956,30 @@ class CylinderFlow2DV1Pipeline:
         for d in derivation_result.derivations:
             decision.derived_values.append(d.to_display())
 
+        # Physics consistency check: when Re is given with a standard fluid
+        # (water/air), the derived viscosity may be physically unrealistic.
+        # E.g. Re=200, U=1, D=0.2 → nu=0.001, but real water nu≈1e-6.
+        # We do NOT silently accept this — we flag it as a physics conflict.
+        _derived_nu = None
+        for d in derivation_result.derivations:
+            if d.target_field in ("kinematic_viscosity", "kinematic_viscosity_m2_s", "nu"):
+                _derived_nu = d.value
+                break
+        if _derived_nu is not None and _derived_nu > 1e-4:
+            _fluid_type_val = spec.fluid.type.value if spec.fluid.type and spec.fluid.type.value else "water"
+            if _fluid_type_val in ("water", "air"):
+                # Physical conflict: Re-derived viscosity is orders of
+                # magnitude larger than the real fluid's viscosity.
+                _real_nu = 1e-6 if _fluid_type_val == "water" else 1.5e-5
+                decision.unresolved_items.append(
+                    f"PHYSICS_CONFLICT_RE_VS_FLUID: "
+                    f"用户指定Re与流体类型({_fluid_type_val})物理不一致。"
+                    f"由Re推导的粘度nu={_derived_nu:.4e} m2/s远大于"
+                    f"真实{_fluid_type_val}的粘度({_real_nu:.1e} m2/s)。"
+                    f"选项: (1)保持真实{_fluid_type_val}物性,Re自动计算; "
+                    f"(2)改流体类型为custom; (3)调整U或D使Re匹配。"
+                )
+
         # Only set water defaults if viscosity is STILL not resolved
         # (i.e., user didn't give Re, so we can't derive nu)
         if not spec.fluid.kinematic_viscosity_m2_s.is_resolved():
@@ -938,6 +1008,21 @@ class CylinderFlow2DV1Pipeline:
                 source=FieldSource.MODEL_RECOMMENDED,
                 status=FieldStatus.AWAITING_CONFIRMATION,
                 confidence=0.7,
+            )
+
+        # Always ensure density is resolved based on fluid type.
+        # When Re is provided, viscosity is derived (nu=U*D/Re) but density
+        # is NOT set by the block above — it must be set separately here.
+        if not spec.fluid.density_kg_m3.is_resolved():
+            _fluid_type = spec.fluid.type.value if spec.fluid.type and spec.fluid.type.value else "water"
+            _density_default = 998.0 if _fluid_type == "water" else (1.225 if _fluid_type == "air" else 998.0)
+            decision.assumptions.append(f"根据流体类型({_fluid_type})推导密度={_density_default} kg/m3")
+            spec.fluid.density_kg_m3 = ProvenanceField(
+                value=_density_default,
+                source=FieldSource.MODEL_RECOMMENDED,
+                status=FieldStatus.AWAITING_CONFIRMATION,
+                confidence=0.7,
+                reason=f"根据流体类型({_fluid_type})推导密度",
             )
 
         # Default domain if not specified
@@ -1289,6 +1374,35 @@ class CylinderFlow2DV1Pipeline:
         _NUM = self._NUM_PATTERN
         _UNIT = r"(mm|cm|dm|m|毫米|厘米|分米|米)?"
         result: dict[str, float] = {}
+
+        # Generic "Xm×Ym" combined format (handles multiple phrasings):
+        #   "计算域10m×5m"  (计算域 before dimensions)
+        #   "10m×5m的计算域" (dimensions before 计算域)
+        #   "二维域10m×5m"   (二维域 prefix)
+        #   "10m×5m的域"     (域 suffix)
+        #   "域10m×5m"       (域 prefix)
+        _domain_kw = r"(?:计算域|二维域|流场|域|channel|domain)"
+        combined_patterns = [
+            rf"{_domain_kw}\s*{_NUM}\s*{_UNIT}\s*[×xX\*]\s*{_NUM}\s*{_UNIT}",
+            rf"{_NUM}\s*{_UNIT}\s*[×xX\*]\s*{_NUM}\s*{_UNIT}\s*的?{_domain_kw}",
+        ]
+        for combined_pattern in combined_patterns:
+            m = re.search(combined_pattern, text)
+            if m:
+                val_l = float(m.group(1))
+                val_h = float(m.group(3))
+                if m.group(2):
+                    unit_l = m.group(2).strip().lower()
+                    if unit_l in self._UNIT_TO_METERS:
+                        val_l *= self._UNIT_TO_METERS[unit_l]
+                if m.group(4):
+                    unit_h = m.group(4).strip().lower()
+                    if unit_h in self._UNIT_TO_METERS:
+                        val_h *= self._UNIT_TO_METERS[unit_h]
+                result["length"] = val_l
+                result["height"] = val_h
+                return result
+
         # Length: 通道长8, 域长10, 长度300, length=300, 长300m, 长20米
         patterns_l = [
             rf"通道长\s*{_NUM}\s*{_UNIT}",
@@ -1394,40 +1508,44 @@ class CylinderFlow2DV1Pipeline:
         return None
 
     def _extract_inlet_velocity(self, text: str) -> float | None:
-        """Extract inlet velocity from text: U=1.0, U_infty=1.0, 来流速度1.0, 以1 m/s流入, etc."""
+        """Extract inlet velocity from text: U=1.0, U_infty=1.0, 来流速度1.0, 以1 m/s流入, 入口速度1米每秒, etc."""
         text = self._preprocess_chinese_numbers(text)
         _NUM = self._NUM_PATTERN
+        # Velocity unit: supports m/s, 米每秒, 米/秒
+        _VU = r"(?:m/s|米每秒|米/秒)"
         patterns = [
             # U_\infty = 1.0m/s (LaTeX subscript)
-            rf"U\s*_?\\?\s*infty\s*=\s*{_NUM}\s*m/s",
+            rf"U\s*_?\\?\s*infty\s*=\s*{_NUM}\s*{_VU}",
             # U_∞ = 1.0m/s (Unicode)
-            rf"U\s*_?\s*∞\s*=\s*{_NUM}\s*m/s",
+            rf"U\s*_?\s*∞\s*=\s*{_NUM}\s*{_VU}",
             # U∞ = 1.0m/s
-            rf"U∞\s*=\s*{_NUM}\s*m/s",
+            rf"U∞\s*=\s*{_NUM}\s*{_VU}",
             # U = 1.0m/s (basic)
-            rf"[Uu]\s*=\s*{_NUM}\s*m/s",
+            rf"[Uu]\s*=\s*{_NUM}\s*{_VU}",
             # "恒定速度 U... = 1.0m/s" or "恒定速度1.0m/s"
-            rf"恒定速度\s*(?:[Uu]\S*\s*=?\s*)?{_NUM}\s*m/s",
+            rf"恒定速度\s*(?:[Uu]\S*\s*=?\s*)?{_NUM}\s*{_VU}",
             # "恒定速度...1.0m/s"
-            rf"恒[定速]*\s*速度\s*[=为是]?\s*{_NUM}\s*m/s",
-            # 来流...速度...1.0m/s
-            rf"来流.*?速度\s*[=为是]?\s*{_NUM}\s*m/s",
-            rf"来流[速度]*\s*[=为是]?\s*{_NUM}\s*m/s?",
-            # 入口速度
-            rf"入口[速度]*\s*[=为是]?\s*{_NUM}\s*m/s?",
+            rf"恒[定速]*\s*速度\s*[=为是]?\s*{_NUM}\s*{_VU}",
+            # 来流...速度...1.0m/s (with optional "保持" between keyword and number)
+            rf"来流.*?速度\s*(?:保持|设为|设置为|为|是|=)?\s*{_NUM}\s*{_VU}",
+            rf"来流[速度]*\s*(?:保持|设为|为|是|=)?\s*{_NUM}\s*{_VU}",
+            # 入口速度 (with optional "保持")
+            rf"入口[速度]*\s*(?:保持|设为|设置为|为|是|=)?\s*{_NUM}\s*{_VU}",
             # Velocity = 1.0 (with = sign)
-            rf"[Vv]elocity\s*=\s*{_NUM}\s*m/s?",
+            rf"[Vv]elocity\s*=\s*{_NUM}\s*{_VU}",
             # "inlet velocity 1.0m/s" or "velocity 1.0m/s" (without = sign)
-            rf"inlet\s*velocity\s*{_NUM}\s*m/s",
-            rf"velocity\s+{_NUM}\s*m/s",
+            rf"inlet\s*velocity\s*{_NUM}\s*{_VU}",
+            rf"velocity\s+{_NUM}\s*{_VU}",
             # "以1 m/s流入" / "以2 m/s恒速流入"
-            rf"以\s*{_NUM}\s*m/s",
+            rf"以\s*{_NUM}\s*{_VU}",
             # "1 m/s恒速流入" / "1 m/s流入"
-            rf"{_NUM}\s*m/s\s*(?:恒速|流入)",
+            rf"{_NUM}\s*{_VU}\s*(?:恒速|流入)",
             # "v=2+..." formulas — extract the mean velocity (first number after =)
             rf"[Vv]\s*=\s*{_NUM}",
-            # Generic: any number followed by m/s near "流" keyword
-            rf"流[动入]?\s*(?:以|速度|速)?\s*[=为是]?\s*{_NUM}\s*m/s",
+            # Generic: any number followed by velocity unit near "流" keyword
+            rf"流[动入]?\s*(?:以|速度|速)?\s*(?:保持|设为|为|是|=)?\s*{_NUM}\s*{_VU}",
+            # Bare number + velocity unit (last resort, e.g. "1米每秒")
+            rf"{_NUM}\s*{_VU}",
         ]
         for p in patterns:
             m = re.search(p, text)
@@ -1514,14 +1632,15 @@ class CylinderFlow2DV1Pipeline:
 
         result: dict[str, Any] = {}
 
-        # Extract bump height: 凸起高0.3, 凸起高度0.3, 高0.05m
+        # Extract bump height: 凸起高0.3, 凸起高度0.3, 高0.05m, 高度0.1m
         h_patterns = [
-            r"凸起高\s*(\d+\.?\d*)\s*m?",
             r"凸起高度\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
-            r"凸起.*?高\s*(\d+\.?\d*)\s*m?",
+            r"凸起高\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
+            r"高度\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
+            r"凸起.*?高\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
             # "高 0.05 m" (generic height near obstacle keyword)
-            r"(?:障碍|凸起|贴附).*?高\s*(\d+\.?\d*)\s*m?",
-            r"高\s*(\d+\.?\d*)\s*m?(?:.*?(?:障碍|凸起|宽))",
+            r"(?:障碍|凸起|贴附).*?高\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
+            r"高\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?(?:.*?(?:障碍|凸起|宽))",
             r"bump.*?height\s*[=]?\s*(\d+\.?\d*)\s*m?",
         ]
         for p in h_patterns:
@@ -1530,14 +1649,15 @@ class CylinderFlow2DV1Pipeline:
                 result["height"] = float(m.group(1))
                 break
 
-        # Extract bump width: 凸起宽1, 凸起宽度1, 宽0.1m
+        # Extract bump width: 凸起宽1, 凸起宽度1, 宽0.1m, 宽度0.5m
         w_patterns = [
-            r"凸起宽\s*(\d+\.?\d*)\s*m?",
             r"凸起宽度\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
-            r"凸起.*?宽\s*(\d+\.?\d*)\s*m?",
+            r"凸起宽\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
+            r"宽度\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
+            r"凸起.*?宽\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
             # "宽 0.1 m" (generic width near obstacle keyword)
-            r"(?:障碍|凸起|贴附).*?宽\s*(\d+\.?\d*)\s*m?",
-            r"宽\s*(\d+\.?\d*)\s*m?(?:.*?(?:障碍|凸起))",
+            r"(?:障碍|凸起|贴附).*?宽\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
+            r"宽\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?(?:.*?(?:障碍|凸起))",
             r"bump.*?width\s*[=]?\s*(\d+\.?\d*)\s*m?",
         ]
         for p in w_patterns:
@@ -1823,17 +1943,100 @@ class CylinderFlow2DV1Pipeline:
 
         return result if result else None
 
+    def _extract_polygon(self, text: str) -> dict[str, Any] | None:
+        """Extract custom polygon obstacle from text.
+
+        Detects: 多边形, 自定义多边形, polygon, custom polygon, N边形
+        Extracts: vertices (list of [x, y]), center_x, center_y
+
+        Supports vertex lists specified as:
+          - "顶点: (0,0), (1,0), (1,1), (0,1)"
+          - "vertices: [(0,0), (1,0), (1,1), (0,1)]"
+          - "N边形" where N >= 5 (triangles/quadrilaterals have dedicated extractors)
+        """
+        text_lower = text.lower()
+        polygon_keywords = [
+            "多边形", "自定义多边形", "polygon", "custom polygon",
+        ]
+        poly_kw_found = False
+        for kw in polygon_keywords:
+            if kw.lower() in text_lower:
+                poly_kw_found = True
+                break
+
+        # Also detect "N边形" patterns (五边形, 六边形, etc.) for N >= 5
+        n_gon_match = re.search(r'([五六七八九十\d]+)边形', text)
+        if n_gon_match:
+            try:
+                cn_map = {"五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+                n_str = n_gon_match.group(1)
+                n_val = cn_map.get(n_str, int(n_str) if n_str.isdigit() else None)
+                if n_val is not None and n_val >= 5:
+                    poly_kw_found = True
+            except (ValueError, KeyError):
+                pass
+
+        if not poly_kw_found:
+            return None
+
+        result: dict[str, Any] = {}
+
+        # Extract vertices from patterns like:
+        #   (0, 0), (1, 0), (1, 1), (0, 1)
+        #   [(0,0), (1,0), (1,1), (0,1)]
+        #   顶点: (0,0) (1,0) (1,1) (0,1)
+        vertex_pattern = r'\(\s*(-?\d+\.?\d*)\s*[,\s]\s*(-?\d+\.?\d*)\s*\)'
+        vertices_raw = re.findall(vertex_pattern, text)
+
+        # Filter: need at least 3 vertices to form a polygon
+        # But avoid matching coordinates that are clearly domain dimensions
+        if len(vertices_raw) >= 3:
+            result["vertices"] = [[float(x), float(y)] for x, y in vertices_raw]
+
+        # Extract center_x
+        cx_patterns = [
+            r"多边形.*?[xX]\s*[=为在]\s*(\d+\.?\d*)\s*m?",
+            r"多边形.*?位于.*?[xX]\s*[=为]?\s*(\d+\.?\d*)\s*m?",
+            r"polygon.*?[xX]\s*[=:]?\s*(\d+\.?\d*)\s*m?",
+            r"多边形.*?中心.*?[xX]\s*[=为]?\s*(\d+\.?\d*)\s*m?",
+        ]
+        for p in cx_patterns:
+            m = re.search(p, text, re.IGNORECASE)
+            if m:
+                result["center_x"] = float(m.group(1))
+                break
+
+        # Extract center_y
+        cy_patterns = [
+            r"多边形.*?[yY]\s*[=为在]\s*(\d+\.?\d*)\s*m?",
+            r"多边形.*?中心.*?[yY]\s*[=为]?\s*(\d+\.?\d*)\s*m?",
+            r"polygon.*?[yY]\s*[=:]?\s*(\d+\.?\d*)\s*m?",
+        ]
+        for p in cy_patterns:
+            m = re.search(p, text, re.IGNORECASE)
+            if m:
+                result["center_y"] = float(m.group(1))
+                break
+
+        return result if result else None
+
     def _extract_end_time(self, text: str) -> float | None:
-        """Extract simulation end time: 仿真时间2秒, 仿真时间设为15秒, end_time=2."""
+        """Extract simulation end time: 仿真时间2秒, 仿真时间设为15秒, 计算15秒, end_time=2."""
         text = self._preprocess_chinese_numbers(text)
         _NUM = self._NUM_PATTERN
         patterns = [
+            # With "时间" keyword (highest specificity)
             rf"仿真时间\s*(?:设为|设置为|为|是|=)?\s*{_NUM}\s*秒?",
             rf"仿真时间\s*(?:设为|设置为|为|是|=)?\s*{_NUM}\s*s\b",
             rf"模拟时间\s*(?:设为|设置为|为|是|=)?\s*{_NUM}\s*秒?",
             rf"计算时间\s*(?:设为|设置为|为|是|=)?\s*{_NUM}\s*秒?",
-            rf"[Ee]nd[_\s]*[Tt]ime\s*=\s*{_NUM}",
             rf"运行时间\s*(?:设为|设置为|为|是|=)?\s*{_NUM}\s*秒?",
+            rf"[Ee]nd[_\s]*[Tt]ime\s*=\s*{_NUM}",
+            # Without "时间" keyword: "计算15秒", "仿真15秒", "模拟15秒", "运行15秒"
+            rf"(?:仿真|模拟|计算|运行)\s*{_NUM}\s*秒",
+            rf"(?:仿真|模拟|计算|运行)\s*{_NUM}\s*s\b",
+            # "仿真到15秒", "计算到15秒"
+            rf"(?:仿真|模拟|计算|运行)到\s*{_NUM}\s*秒?",
         ]
         for p in patterns:
             m = re.search(p, text)
@@ -1842,12 +2045,13 @@ class CylinderFlow2DV1Pipeline:
         return None
 
     def _extract_reynolds(self, text: str) -> float | None:
-        """Extract Reynolds number: Re=200, Re = 200, 雷诺数200, Reynolds 200."""
+        """Extract Reynolds number: Re=200, Re = 200, 雷诺数200, Reynolds 200, Re保持200."""
+        _NUM = self._NUM_PATTERN
         patterns = [
-            r"(?<![a-zA-Z])[Rr]e\s*=\s*(\d+\.?\d*)",
-            r"雷诺数\s*[=为是]?\s*(\d+\.?\d*)",
-            r"[Rr]eynolds\s*(?:number)?\s*[=:]?\s*(\d+\.?\d*)",
-            r"(?<![a-zA-Z])[Rr]e\s+(\d+\.?\d*)",  # "Re 200" with space
+            rf"(?<![a-zA-Z])[Rr]e\s*(?:保持|设为|设置为|为|是|=)?\s*{_NUM}",
+            rf"雷诺数\s*(?:保持|设为|设置为|为|是|=)?\s*{_NUM}",
+            rf"[Rr]eynolds\s*(?:number)?\s*(?:保持|设为|设置为|为|是|=|:)?\s*{_NUM}",
+            rf"(?<![a-zA-Z])[Rr]e\s+{_NUM}",  # "Re 200" with space
         ]
         for p in patterns:
             m = re.search(p, text)

@@ -758,11 +758,12 @@ class PhysicsDependencyResolver:
 
     def _extract_reynolds(self, text: str) -> float | None:
         """从用户文本中提取 Reynolds 数。"""
+        _NUM = r"(\d+\.?\d*(?:[eE][+-]?\d+)?)"
         patterns = [
-            r"(?<![a-zA-Z])[Rr]e\s*=\s*(\d+\.?\d*)",
-            r"[Rr]eynolds\s*(?:number)?\s*[=:]?\s*(\d+\.?\d*)",
-            r"雷诺数\s*[:=为是]?\s*(\d+\.?\d*)",
-            r"(?<![a-zA-Z])[Rr]e\s+(\d+\.?\d*)",  # "Re 200" with space
+            rf"(?<![a-zA-Z])[Rr]e\s*(?:保持|设为|设置为|为|是|=)?\s*{_NUM}",
+            rf"[Rr]eynolds\s*(?:number)?\s*(?:保持|设为|设置为|为|是|=|:)?\s*{_NUM}",
+            rf"雷诺数\s*(?:保持|设为|设置为|为|是|:|=)?\s*{_NUM}",
+            rf"(?<![a-zA-Z])[Rr]e\s+{_NUM}",  # "Re 200" with space
         ]
         for p in patterns:
             m = re.search(p, text, re.IGNORECASE)

@@ -285,6 +285,12 @@ class SpecAdapter:
 
     def adapt(self, spec: CylinderFlow2DExperimentSpecV1) -> ObstacleFlowExperimentSpecV1:
         """Produce an ObstacleFlowExperimentSpecV1 from a cylinder flow spec."""
+        # Validate that critical physical fields are resolved before
+        # adaptation.  Silently filling in defaults for unresolved
+        # density, viscosity, or domain dimensions would mask
+        # incomplete specs and produce physically meaningless cases.
+        self._validate_resolved_fields(spec)
+
         domain = self._adapt_domain(spec)
         fluid = self._adapt_fluid(spec)
         geometry_bump = self._adapt_bump(spec)
@@ -324,6 +330,30 @@ class SpecAdapter:
         )
 
     # -- sub-adapters -------------------------------------------------------
+
+    def _validate_resolved_fields(self, spec: CylinderFlow2DExperimentSpecV1) -> None:
+        """Validate that critical physical fields are resolved.
+
+        Raises ``ValueError`` if any critical field (domain dimensions,
+        fluid density, fluid viscosity) is unresolved (``None``).
+        This prevents the adapter from silently substituting default
+        values for physically essential parameters.
+        """
+        unresolved: list[str] = []
+        if spec.domain.length_m.value is None:
+            unresolved.append("domain.length_m")
+        if spec.domain.height_m.value is None:
+            unresolved.append("domain.height_m")
+        if spec.fluid.density_kg_m3.value is None:
+            unresolved.append("fluid.density_kg_m3")
+        if spec.fluid.kinematic_viscosity_m2_s.value is None:
+            unresolved.append("fluid.kinematic_viscosity_m2_s")
+        if unresolved:
+            raise ValueError(
+                f"Cannot adapt spec with unresolved critical fields: "
+                f"{', '.join(unresolved)}. All physical parameters must be "
+                f"resolved before compilation — refusing to use silent defaults."
+            )
 
     def _adapt_domain(self, spec: CylinderFlow2DExperimentSpecV1) -> ObsDomainSpec:
         return ObsDomainSpec(
@@ -403,6 +433,18 @@ class SpecAdapter:
 
         if diameter is not None and diameter > 0:
             radius = diameter / 2.0
+
+            # Reject extreme oversize: if the requested cylinder diameter
+            # exceeds the domain height, the spec is clearly invalid (e.g.
+            # a patch overwrote the geometry).  Silently auto-shrinking a
+            # cylinder that is larger than the entire domain would mask a
+            # serious spec corruption.
+            if diameter > domain_height:
+                raise ValueError(
+                    f"Cylinder diameter {diameter:.3f} m exceeds domain height "
+                    f"{domain_height:.3f} m — cylinder cannot be larger than the "
+                    f"domain. Refusing to auto-shrink an extreme geometry violation."
+                )
 
             # Ensure diameter fits within domain at all
             # Also respect blockage ratio limit (diameter / domain_height <= 0.5)
@@ -528,6 +570,16 @@ class SpecAdapter:
             return []
 
         tri = spec.triangle
+
+        # Validate semantic_type — must be 'triangle_2d'.  A mutated
+        # semantic_type (e.g. 'cosine_bell') indicates the obstacle
+        # identity was silently changed, which the compiler must reject.
+        if tri.semantic_type != "triangle_2d":
+            raise ValueError(
+                f"TriangleSpec.semantic_type must be 'triangle_2d', got "
+                f"'{tri.semantic_type}' — obstacle identity mismatch"
+            )
+
         base_width = _unwrap(tri.base_width_m)
         height = _unwrap(tri.height_m)
         center_x = _unwrap(tri.center_x_m)
@@ -737,8 +789,11 @@ class SpecAdapter:
         time_mode = _TIME_MODE_MAP.get(sim.time_mode, ObsTimeMode.AUTO)
         flow_regime = _FLOW_REGIME_MAP.get(sim.flow_regime, ObsFlowRegime.AUTO)
 
-        # Set simulation defaults: transient, end_time=10.0, max_courant=0.5
-        end_time = sim.end_time if sim.end_time is not None else DEFAULT_END_TIME
+        # Preserve the user-specified end_time (None when unset) so that
+        # ObstacleFlowCompiler.compute_time_step can apply context-aware
+        # defaults (100.0 for transient, 1000.0 for steady) instead of
+        # receiving a blanket 10.0 that is wrong for steady-state iterations.
+        end_time = sim.end_time
         max_courant = sim.max_courant_number if sim.max_courant_number else DEFAULT_MAX_COURANT
 
         # Force transient for cylinder flow (cylinders produce unsteady wakes)
@@ -965,11 +1020,15 @@ class WorkstationExecutor:
         return remote_dir
 
     def run_mesh(self, case_path: str) -> dict:
-        """Run blockMesh, snappyHexMesh, and checkMesh.
+        """Run blockMesh, snappyHexMesh (if dict exists), and checkMesh.
 
         For 2D cases, snappyHexMesh cannot handle empty patches.
         We temporarily change front/back to wall, run snappyHexMesh,
         then change back to empty.
+
+        If no snappyHexMeshDict is present (e.g. bump-only cases without
+        STL surfaces), snappyHexMesh is skipped and only blockMesh +
+        checkMesh are run.
 
         Returns a dict with parsed checkMesh statistics.
         """
@@ -978,38 +1037,54 @@ class WorkstationExecutor:
             f"cd {case_path} && blockMesh",
             timeout=300,
         )
-
-        # Step 2: Change front/back from empty to wall for snappyHexMesh
-        # Use sed (more reliable through SSH than awk)
-        sed_result = self._ssh(
-            f"cd {case_path} && "
-            f"sed -i '/frontAndBack/,/}}/ s/empty/wall/g' constant/polyMesh/boundary",
-            timeout=30,
-        )
-        if sed_result.returncode != 0:
-            raise RuntimeError(
-                f"Failed to change frontAndBack to wall: {sed_result.stderr}"
-            )
-
-        # Step 3: snappyHexMesh
-        result = self._ssh(
-            f"cd {case_path} && snappyHexMesh -overwrite",
-            timeout=600,
-        )
         if result.returncode != 0:
             raise RuntimeError(
-                f"snappyHexMesh failed: {result.stderr[-500:]}"
+                f"blockMesh failed: {result.stderr[-500:]}"
             )
 
-        # Step 4: Change front/back back to empty
-        sed_result = self._ssh(
-            f"cd {case_path} && "
-            f"sed -i '/frontAndBack/,/}}/ s/wall/empty/g' constant/polyMesh/boundary",
+        # Step 1b: Check if snappyHexMeshDict exists
+        check_dict = self._ssh_raw(
+            f"test -f {case_path}/system/snappyHexMeshDict && echo 'SNAPPY_EXISTS' || echo 'SNAPPY_MISSING'",
             timeout=30,
         )
-        if sed_result.returncode != 0:
-            raise RuntimeError(
-                f"Failed to change frontAndBack back to empty: {sed_result.stderr}"
+        has_snappy_dict = "SNAPPY_EXISTS" in check_dict.stdout
+
+        if has_snappy_dict:
+            # Step 2: Change front/back from empty to wall for snappyHexMesh
+            # Use sed (more reliable through SSH than awk)
+            sed_result = self._ssh(
+                f"cd {case_path} && "
+                f"sed -i '/frontAndBack/,/}}/ s/empty/wall/g' constant/polyMesh/boundary",
+                timeout=30,
+            )
+            if sed_result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to change frontAndBack to wall: {sed_result.stderr}"
+                )
+
+            # Step 3: snappyHexMesh
+            result = self._ssh(
+                f"cd {case_path} && snappyHexMesh -overwrite",
+                timeout=600,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"snappyHexMesh failed: {result.stderr[-500:]}"
+                )
+
+            # Step 4: Change front/back back to empty
+            sed_result = self._ssh(
+                f"cd {case_path} && "
+                f"sed -i '/frontAndBack/,/}}/ s/wall/empty/g' constant/polyMesh/boundary",
+                timeout=30,
+            )
+            if sed_result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to change frontAndBack back to empty: {sed_result.stderr}"
+                )
+        else:
+            logger.info(
+                "No snappyHexMeshDict found — skipping snappyHexMesh (blockMesh only)"
             )
 
         # Step 5: checkMesh

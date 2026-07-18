@@ -39,6 +39,7 @@ from fluid_scientist.obstacle_flow.models import (
     CylinderSpec,
     DomainSpec,
     ObstacleFlowExperimentSpecV1,
+    PolygonSpec,
     TriangleSpec,
     TrapezoidSpec,
 )
@@ -54,6 +55,7 @@ class MeshManifest:
     rectangle_stl: str | None = None
     triangle_stl: str | None = None
     trapezoid_stl: str | None = None
+    polygon_stl: str | None = None
     has_cylinder: bool = False
     has_bump: bool = False
     n_blocks: int = 1
@@ -112,13 +114,14 @@ class ObstacleFlowMeshBackend:
             spec, domain, params, bump_profile, is_periodic
         )
 
-        # Generate snappyHexMeshDict and STL files if cylinder, rectangle, triangle, or trapezoid present
+        # Generate snappyHexMeshDict and STL files if cylinder, rectangle, triangle, trapezoid, or polygon present
         snappy_dict: str | None = None
         cylinder_stl: str | None = None
         rectangle_stl: str | None = None
         triangle_stl: str | None = None
         trapezoid_stl: str | None = None
-        if spec.has_cylinder or spec.has_rectangle or spec.has_triangle or spec.has_trapezoid:
+        polygon_stl: str | None = None
+        if spec.has_cylinder or spec.has_rectangle or spec.has_triangle or spec.has_trapezoid or spec.has_polygon:
             cyl_geom: CylinderGeometry | None = None
             if spec.has_cylinder:
                 cyl_geom = self._cyl_builder.build(spec.cylinders[0])
@@ -142,6 +145,8 @@ class ObstacleFlowMeshBackend:
                 triangle_stl = self._generate_triangle_stl(tri_geom)
             if trap_geom is not None:
                 trapezoid_stl = self._generate_trapezoid_stl(trap_geom)
+            if spec.has_polygon:
+                polygon_stl = self._generate_polygon_stl(spec.polygons[0])
 
         n_blocks = self._count_blocks(spec, bump_profile)
         expected_cells = params.n_layers_x * params.n_layers_y * params.n_layers_z
@@ -153,6 +158,7 @@ class ObstacleFlowMeshBackend:
             rectangle_stl=rectangle_stl,
             triangle_stl=triangle_stl,
             trapezoid_stl=trapezoid_stl,
+            polygon_stl=polygon_stl,
             has_cylinder=spec.has_cylinder,
             has_bump=spec.has_bump,
             n_blocks=n_blocks,
@@ -1086,6 +1092,75 @@ class ObstacleFlowMeshBackend:
             lines.append("    endloop")
             lines.append("  endfacet")
         lines.append("endsolid trapezoid")
+        return "\n".join(lines)
+
+    def _generate_polygon_stl(
+        self, poly: PolygonSpec,
+    ) -> str:
+        """Generate a polygonal prism STL surface for snappyHexMesh.
+
+        Creates a closed prism from an arbitrary polygon by extruding
+        the 2D vertices in z by *thickness*.  The polygon must have at
+        least 3 vertices.
+
+        Triangulation uses a simple fan from vertex 0 for both the bottom
+        and top faces.  Side faces are quads split into 2 triangles each.
+        """
+        verts_2d = poly.vertices
+        n = len(verts_2d)
+        if n < 3:
+            raise ValueError(f"Polygon needs >= 3 vertices, got {n}")
+
+        z0 = 0.0
+        z1 = poly.thickness
+
+        # Build 3D vertex list: n bottom + n top
+        verts: list[tuple[float, float, float]] = []
+        for v in verts_2d:
+            verts.append((float(v[0]), float(v[1]), z0))
+        for v in verts_2d:
+            verts.append((float(v[0]), float(v[1]), z1))
+
+        triangles: list[tuple[tuple[float, float, float], int, int, int]] = []
+
+        # Bottom face (normal -z): fan from vertex 0
+        for i in range(1, n - 1):
+            triangles.append(((0.0, 0.0, -1.0), 0, i + 1, i))
+
+        # Top face (normal +z): fan from vertex n
+        for i in range(1, n - 1):
+            triangles.append(((0.0, 0.0, 1.0), n, n + i, n + i + 1))
+
+        # Side faces: quad (i, i+1, i+1+n, i+n) split into 2 triangles
+        for i in range(n):
+            j = (i + 1) % n
+            # Approximate normal (outward facing)
+            dx = verts_2d[j][0] - verts_2d[i][0]
+            dy = verts_2d[j][1] - verts_2d[i][1]
+            length = math.sqrt(dx * dx + dy * dy)
+            if length > 0:
+                nx = dy / length
+                ny = -dx / length
+            else:
+                nx, ny = 0.0, 0.0
+            triangles.append(((nx, ny, 0.0), i, j, n + j))
+            triangles.append(((nx, ny, 0.0), i, n + j, n + i))
+
+        lines: list[str] = []
+        lines.append("solid polygon")
+        for normal, i0, i1, i2 in triangles:
+            nx, ny, nz = normal
+            v0 = verts[i0]
+            v1 = verts[i1]
+            v2 = verts[i2]
+            lines.append(f"  facet normal {nx:.6e} {ny:.6e} {nz:.6e}")
+            lines.append("    outer loop")
+            lines.append(f"      vertex {v0[0]:.6e} {v0[1]:.6e} {v0[2]:.6e}")
+            lines.append(f"      vertex {v1[0]:.6e} {v1[1]:.6e} {v1[2]:.6e}")
+            lines.append(f"      vertex {v2[0]:.6e} {v2[1]:.6e} {v2[2]:.6e}")
+            lines.append("    endloop")
+            lines.append("  endfacet")
+        lines.append("endsolid polygon")
         return "\n".join(lines)
 
     def _compute_spline_points(

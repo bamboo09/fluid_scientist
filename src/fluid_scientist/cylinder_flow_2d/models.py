@@ -367,6 +367,29 @@ class TrapezoidSpec(BaseModel):
     source_text: str | None = None
 
 
+class PolygonSpec(BaseModel):
+    """Custom polygon obstacle configuration with provenance.
+
+    Semantic type: custom_polygon_2d
+    Solver representation: polygon_stl (arbitrary polygon via snappyHexMesh STL)
+
+    Stores an ordered list of vertices ``[[x0, y0], [x1, y1], ...]`` that
+    define the polygon boundary in counter-clockwise order.  The polygon is
+    extruded in z by the domain thickness to create a 2D prism for
+    snappyHexMesh.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    vertices: list[list[float]] = Field(default_factory=list)
+    center_x_m: ProvenanceField = Field(default_factory=ProvenanceField)
+    center_y_m: ProvenanceField = Field(default_factory=ProvenanceField)
+    semantic_type: str = "custom_polygon_2d"
+    solver_representation: str = "polygon_stl"
+    source_text: str | None = None
+
+
 class BottomProfileSpec(BaseModel):
     """Bottom profile configuration — optional."""
 
@@ -557,6 +580,7 @@ class CylinderFlow2DExperimentSpecV1(BaseModel):
     rectangle: RectangleSpec = Field(default_factory=RectangleSpec)
     triangle: TriangleSpec = Field(default_factory=TriangleSpec)
     trapezoid: TrapezoidSpec = Field(default_factory=TrapezoidSpec)
+    polygon: PolygonSpec = Field(default_factory=PolygonSpec)
     bottom_profile: BottomProfileSpec = Field(default_factory=BottomProfileSpec)
     flow_topology: dict[str, Any] = Field(default_factory=lambda: {"mode": None})
     boundaries: BoundaryConfig = Field(default_factory=BoundaryConfig)
@@ -609,6 +633,10 @@ class CylinderFlow2DExperimentSpecV1(BaseModel):
     @property
     def has_trapezoid(self) -> bool:
         return self.trapezoid.enabled and self.trapezoid.bottom_width_m.is_resolved()
+
+    @property
+    def has_polygon(self) -> bool:
+        return self.polygon.enabled and len(self.polygon.vertices) >= 3
 
     @property
     def has_bottom_profile(self) -> bool:
@@ -760,6 +788,18 @@ class CylinderFlow2DExperimentSpecV1(BaseModel):
                 "solver_representation": self.trapezoid.solver_representation,
             }
 
+        # Custom polygon obstacle
+        if self.polygon.enabled:
+            display["多边形障碍物"] = {
+                "type": "自定义多边形",
+                "vertices": self.polygon.vertices,
+                "vertex_count": len(self.polygon.vertices),
+                "center_x_m": self.polygon.center_x_m.value,
+                "center_y_m": self.polygon.center_y_m.value,
+                "semantic_type": self.polygon.semantic_type,
+                "solver_representation": self.polygon.solver_representation,
+            }
+
         # Bottom profile
         if self.has_bottom_profile:
             display["底部轮廓"] = {
@@ -892,6 +932,7 @@ __all__ = [
     "ModelPolicy",
     "ObservableSpec",
     "ObservableType",
+    "PolygonSpec",
     "PressureGradientUnit",
     "ProvenanceField",
     "SemanticBoundaryType",

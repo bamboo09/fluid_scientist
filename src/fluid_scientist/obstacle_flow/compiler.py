@@ -14,6 +14,7 @@ Key constraints:
 
 from __future__ import annotations
 
+import gzip
 import hashlib
 import io
 import json
@@ -43,6 +44,7 @@ from fluid_scientist.obstacle_flow.models import (
     ObservableType,
     ObstacleFlowExperimentSpecV1,
     PlotRequest,
+    PolygonSpec,
     PressureGradientUnit,
     SimulationSpec,
     TemporalType,
@@ -131,21 +133,52 @@ def _normalize(text: str) -> str:
 
 
 def _deterministic_tar_gz(files: dict[str, str]) -> bytes:
-    """Create a deterministic tar.gz archive from file contents."""
-    buf = io.BytesIO()
-    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.GNU_FORMAT) as tar:
-        for name in sorted(files.keys()):
-            content = files[name].encode("utf-8")
-            info = tarfile.TarInfo(name=name)
-            info.size = len(content)
-            info.mtime = 0
-            info.mode = 0o644
-            info.uid = 0
-            info.gid = 0
-            info.uname = ""
-            info.gname = ""
-            tar.addfile(info, io.BytesIO(content))
-    return buf.getvalue()
+    """Create a deterministic tar.gz archive from file contents.
+
+    Every member carries a fixed mtime/uid/gid/uname/gname and mode, gzip is
+    produced with a frozen header (``filename=""``, ``mtime=0``), and directory
+    entries are emitted explicitly for every parent path (e.g. a file named
+    ``constant/triSurface/geometry.stl`` yields ``constant/`` and
+    ``constant/triSurface/``). Two runs over the same input therefore produce
+    byte-identical output.
+    """
+
+    def _tar_info(name: str, *, mode: int, is_dir: bool) -> tarfile.TarInfo:
+        info = tarfile.TarInfo(name)
+        info.type = tarfile.DIRTYPE if is_dir else tarfile.REGTYPE
+        info.size = 0
+        info.mode = mode
+        info.uid = 0
+        info.gid = 0
+        info.uname = ""
+        info.gname = ""
+        info.mtime = 0
+        return info
+
+    tar_output = io.BytesIO()
+    with tarfile.open(fileobj=tar_output, mode="w", format=tarfile.USTAR_FORMAT) as bundle:
+        added_dirs: set[str] = set()
+        for name in sorted(files):
+            segments = [segment for segment in name.split("/") if segment]
+            for depth in range(1, len(segments)):
+                dir_name = "/".join(segments[:depth]) + "/"
+                if dir_name in added_dirs:
+                    continue
+                added_dirs.add(dir_name)
+                bundle.addfile(_tar_info(dir_name, mode=0o755, is_dir=True))
+            if name.endswith("/"):
+                if name not in added_dirs:
+                    added_dirs.add(name)
+                    bundle.addfile(_tar_info(name, mode=0o755, is_dir=True))
+                continue
+            payload = files[name].encode("utf-8")
+            info = _tar_info(name, mode=0o644, is_dir=False)
+            info.size = len(payload)
+            bundle.addfile(info, io.BytesIO(payload))
+    compressed = io.BytesIO()
+    with gzip.GzipFile(fileobj=compressed, mode="wb", filename="", mtime=0) as stream:
+        stream.write(tar_output.getvalue())
+    return compressed.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +219,16 @@ class ObstacleFlowCompiler:
         geom_validator = GeometryFeasibilityValidator()
         geom_validator.validate(spec)
 
+        # Validate material consistency (fluid type vs density/viscosity)
+        self._validate_material_consistency(spec)
+
+        # Validate rotating cylinder has non-zero angular velocity
+        self._validate_rotating_cylinder(spec)
+
+        # Validate observable-geometry consistency (e.g. cylinder drag
+        # requires a cylinder to be present)
+        self._validate_observable_geometry(spec)
+
         # Generate mesh files
         mesh_manifest = self._mesh_backend.generate(spec)
 
@@ -207,6 +250,9 @@ class ObstacleFlowCompiler:
             trap_geom = self._trap_builder.build(spec.trapezoids[0])
         if mesh_manifest.trapezoid_stl is not None:
             files["constant/triSurface/trapezoid.stl"] = mesh_manifest.trapezoid_stl
+        # Polygon geometry (if present)
+        if mesh_manifest.polygon_stl is not None:
+            files["constant/triSurface/polygon.stl"] = mesh_manifest.polygon_stl
 
         # Field files
         is_turbulent = spec.is_turbulent
@@ -232,6 +278,11 @@ class ObstacleFlowCompiler:
         files["system/fvSchemes"] = self._compile_fv_schemes(spec, is_turbulent)
         files["system/fvSolution"] = self._compile_fv_solution(spec, is_turbulent)
         files["system/decomposeParDict"] = self._compile_decompose_par_dict(spec)
+
+        # Time-varying inlet velocity table (for sinusoidal / ramp / tabulated)
+        inlet_table = self._compile_inlet_velocity_table(spec)
+        if inlet_table is not None:
+            files["constant/inletVelocity.table"] = inlet_table
 
         # Spec metadata
         metadata = {
@@ -294,6 +345,98 @@ class ObstacleFlowCompiler:
         )
 
         return compiled, manifest
+
+    # --- Pre-compilation validation ---
+
+    def _validate_material_consistency(self, spec: ObstacleFlowExperimentSpecV1) -> None:
+        """Check that the declared fluid type is consistent with density and viscosity.
+
+        Raises ``CompilationError`` when the fluid type implies a known
+        material (water, air) but the supplied density or kinematic
+        viscosity falls far outside the expected physical range for that
+        material.  This catches dependencies where, for example, air
+        density is paired with water viscosity.
+        """
+        fluid = spec.fluid
+        ftype = (fluid.type or "").lower().strip()
+        rho = fluid.density_kg_m3
+        nu = fluid.kinematic_viscosity_m2_s
+
+        # Known fluid property ranges at standard conditions.
+        # These are PHYSICAL ranges — we do NOT widen them to accommodate
+        # Re-derived viscosities.  When the user specifies Re=200 with
+        # water at U=1m/s, D=0.2m, the derived nu=0.001 is NOT real water
+        # (real water nu ≈ 1e-6).  This is a physical inconsistency that
+        # must be surfaced to the user, not silently accepted.
+        KNOWN_FLUIDS = {
+            "water": {
+                "rho_min": 950.0, "rho_max": 1050.0,
+                "nu_min": 5e-7, "nu_max": 2e-5,
+            },
+            "air": {
+                "rho_min": 0.8, "rho_max": 1.5,
+                "nu_min": 1e-6, "nu_max": 5e-5,
+            },
+        }
+
+        if ftype in KNOWN_FLUIDS:
+            bounds = KNOWN_FLUIDS[ftype]
+            if rho < bounds["rho_min"] or rho > bounds["rho_max"]:
+                raise CompilationError(
+                    f"Fluid type '{fluid.type}' has density {rho} kg/m3 which "
+                    f"is outside the physical range "
+                    f"[{bounds['rho_min']}, {bounds['rho_max']}] for {ftype}. "
+                    f"Material dependency violation. If you need a non-standard "
+                    f"fluid, set fluid type to 'custom'."
+                )
+            if nu < bounds["nu_min"] or nu > bounds["nu_max"]:
+                raise CompilationError(
+                    f"Fluid type '{fluid.type}' has kinematic viscosity {nu} "
+                    f"m2/s which is outside the physical range "
+                    f"[{bounds['nu_min']}, {bounds['nu_max']}] for {ftype}. "
+                    f"This usually means Re was specified with incompatible "
+                    f"fluid properties (e.g. Re=200 with water gives "
+                    f"nu=U*D/Re=0.001, but real water nu≈1e-6). "
+                    f"Options: (1) keep real water properties and let Re be "
+                    f"computed from U, D, nu; (2) set fluid type to 'custom' "
+                    f"for a high-viscosity fluid; (3) adjust U or D to match "
+                    f"the desired Re with real water."
+                )
+
+    def _validate_rotating_cylinder(self, spec: ObstacleFlowExperimentSpecV1) -> None:
+        """Validate that a rotating-wall cylinder has a non-zero angular velocity.
+
+        A ``ROTATING_WALL`` boundary with ``angular_velocity_rad_s == 0``
+        is a capability error — the user requested rotation but no
+        rotation speed was supplied, which would silently produce a
+        stationary wall.
+        """
+        for cyl in spec.cylinders:
+            if cyl.boundary_type == CylinderBoundaryType.ROTATING_WALL:
+                if cyl.angular_velocity_rad_s == 0:
+                    raise CompilationError(
+                        f"Cylinder '{cyl.id}' has ROTATING_WALL boundary type "
+                        f"but angular_velocity_rad_s is 0 — a rotating cylinder "
+                        f"must have a non-zero angular velocity."
+                    )
+
+    def _validate_observable_geometry(self, spec: ObstacleFlowExperimentSpecV1) -> None:
+        """Validate that observables are consistent with the geometry.
+
+        Raises ``CompilationError`` when a cylinder-specific observable
+        (CYLINDER_DRAG / CYLINDER_LIFT) is requested but no cylinder is
+        present in the spec.
+        """
+        has_force_obs = any(
+            o.type in (ObservableType.CYLINDER_DRAG, ObservableType.CYLINDER_LIFT)
+            for o in spec.observables
+        )
+        if has_force_obs and not spec.has_cylinder:
+            raise CompilationError(
+                "CYLINDER_DRAG / CYLINDER_LIFT observables are requested but "
+                "no cylinder is present in the spec — force measurement "
+                "requires a cylinder obstacle."
+            )
 
     # --- Field files ---
 
@@ -382,6 +525,13 @@ class ObstacleFlowCompiler:
             lines.append("        type            noSlip;")
             lines.append("    }")
 
+        # Polygon (if present)
+        if spec.has_polygon:
+            lines.append("    polygon")
+            lines.append("    {")
+            lines.append("        type            noSlip;")
+            lines.append("    }")
+
         # frontAndBack
         lines.append("    frontAndBack")
         lines.append("    {")
@@ -404,6 +554,20 @@ class ObstacleFlowCompiler:
         bt = boundary.type
 
         if bt == BoundaryType.VELOCITY_INLET:
+            # Time-varying inlet: emit uniformFixedValue with a tableFile
+            # Function1 so sinusoidal / ramp / tabulated profiles are
+            # honoured by the solver at runtime.
+            if self._is_time_varying_inlet(spec):
+                return (
+                    "type            uniformFixedValue;\n"
+                    "        uniformValue\n"
+                    "        {\n"
+                    "            type            tableFile;\n"
+                    "            file            \"constant/inletVelocity.table\";\n"
+                    "            format          openfoam;\n"
+                    "            outOfBounds     clamp;\n"
+                    "        }"
+                )
             v = boundary.inlet_velocity or 0.0
             return f"type            fixedValue;\n        value           uniform ({_fmt(v)} 0 0);"
         elif bt == BoundaryType.PRESSURE_INLET:
@@ -439,6 +603,103 @@ class ObstacleFlowCompiler:
             return "type            inletOutlet;\n        inletValue      uniform (0 0 0);\n        value           uniform (0 0 0);"
         else:
             return "type            zeroGradient;"
+
+    # --- Time-varying inlet support ---
+
+    def _is_time_varying_inlet(self, spec: ObstacleFlowExperimentSpecV1) -> bool:
+        """Return True when the spec has a non-constant temporal inlet profile."""
+        ip = spec.inlet_profile
+        return ip.enabled and ip.temporal_type != TemporalType.CONSTANT
+
+    def _compile_inlet_velocity_table(
+        self, spec: ObstacleFlowExperimentSpecV1
+    ) -> str | None:
+        """Generate the inlet velocity time-series table file.
+
+        Produces an OpenFOAM ``tableFile`` (openfoam format) with
+        ``(time (vx vy vz))`` entries covering the full simulation
+        duration.  Returns ``None`` when the inlet profile is constant or
+        disabled, in which case no table file is emitted and the inlet
+        falls back to a plain ``fixedValue`` BC.
+        """
+        ip = spec.inlet_profile
+        if not ip.enabled or ip.temporal_type == TemporalType.CONSTANT:
+            return None
+
+        p = ip.parameters
+        end_time, _, _ = self.compute_time_step(spec)
+        end_time = max(float(end_time), 1.0)  # guard against zero/negative
+
+        rows: list[tuple[float, list[float]]] = []
+
+        if ip.temporal_type == TemporalType.SINUSOIDAL:
+            mean = float(p.get("mean_velocity", 0.0))
+            amp = float(p.get("amplitude", 0.0))
+            freq = float(p.get("frequency", 0.0))
+            phase = float(p.get("phase", 0.0))
+            # Resolution: 24 points per period, at least 100, capped at 2000
+            period = (1.0 / freq) if freq > 0 else end_time
+            n_periods = end_time / period if period > 0 else 1.0
+            n_points = max(100, int(math.ceil(n_periods * 24)))
+            n_points = min(n_points, 2000)
+            for i in range(n_points + 1):
+                t = end_time * i / n_points
+                v = mean + amp * math.sin(2.0 * math.pi * freq * t + phase)
+                rows.append((t, [v, 0.0, 0.0]))
+
+        elif ip.temporal_type == TemporalType.RAMP:
+            v0 = float(p.get("start_velocity", 0.0))
+            v1 = float(p.get("end_velocity", v0))
+            t0 = float(p.get("start_time", 0.0))
+            # 'end_time' key inside parameters is the *ramp* end time
+            t1 = float(p.get("end_time", end_time))
+            t1 = min(t1, end_time)
+            # Before the ramp
+            if t0 > 0:
+                rows.append((0.0, [v0, 0.0, 0.0]))
+                rows.append((t0, [v0, 0.0, 0.0]))
+            else:
+                rows.append((0.0, [v0, 0.0, 0.0]))
+            # During the ramp — 50 intermediate points
+            n_ramp = 50
+            span = (t1 - t0) if t1 > t0 else 1.0
+            for i in range(1, n_ramp + 1):
+                t = t0 + span * i / n_ramp
+                v = v0 + (v1 - v0) * (i / n_ramp)
+                rows.append((t, [v, 0.0, 0.0]))
+            # Hold the final value until the simulation end
+            if t1 < end_time:
+                rows.append((end_time, [v1, 0.0, 0.0]))
+
+        elif ip.temporal_type in (TemporalType.PIECEWISE_LINEAR, TemporalType.TABULATED):
+            key = "points" if ip.temporal_type == TemporalType.PIECEWISE_LINEAR else "data"
+            pts = p.get(key, [])
+            if not pts:
+                return None
+            # Prepend t=0 with the first value if the table starts later
+            first_t = float(pts[0][0])
+            first_v = float(pts[0][1])
+            if first_t > 0:
+                rows.append((0.0, [first_v, 0.0, 0.0]))
+            for pt in pts:
+                rows.append((float(pt[0]), [float(pt[1]), 0.0, 0.0]))
+            # Extend the last value to the simulation end
+            last_t = float(pts[-1][0])
+            last_v = float(pts[-1][1])
+            if last_t < end_time:
+                rows.append((end_time, [last_v, 0.0, 0.0]))
+
+        else:
+            return None
+
+        lines = ["("]
+        for t, vec in rows:
+            lines.append(
+                f"    ({_fmt(t)} ({_fmt(vec[0])} {_fmt(vec[1])} {_fmt(vec[2])}))"
+            )
+        lines.append(")")
+        lines.append("")
+        return "\n".join(lines)
 
     def _compile_pressure_field(self, spec: ObstacleFlowExperimentSpecV1) -> str:
         """Generate 0/p — pressure initial and boundary conditions."""
@@ -500,6 +761,13 @@ class ObstacleFlowCompiler:
         # Trapezoid
         if spec.has_trapezoid:
             lines.append("    trapezoid")
+            lines.append("    {")
+            lines.append("        type            zeroGradient;")
+            lines.append("    }")
+
+        # Polygon
+        if spec.has_polygon:
+            lines.append("    polygon")
             lines.append("    {")
             lines.append("        type            zeroGradient;")
             lines.append("    }")
@@ -606,6 +874,11 @@ class ObstacleFlowCompiler:
             lines.append("    {")
             lines.append("        type            kqRWallFunction;\n        value           uniform 0;")
             lines.append("    }")
+        if spec.has_polygon:
+            lines.append("    polygon")
+            lines.append("    {")
+            lines.append("        type            kqRWallFunction;\n        value           uniform 0;")
+            lines.append("    }")
         lines.append("    frontAndBack")
         lines.append("    {")
         lines.append("        type            empty;")
@@ -666,6 +939,11 @@ class ObstacleFlowCompiler:
             lines.append("    {")
             lines.append("        type            omegaWallFunction;\n        value           uniform 0;")
             lines.append("    }")
+        if spec.has_polygon:
+            lines.append("    polygon")
+            lines.append("    {")
+            lines.append("        type            omegaWallFunction;\n        value           uniform 0;")
+            lines.append("    }")
         lines.append("    frontAndBack")
         lines.append("    {")
         lines.append("        type            empty;")
@@ -712,6 +990,11 @@ class ObstacleFlowCompiler:
             lines.append("    }")
         if spec.has_trapezoid:
             lines.append("    trapezoid")
+            lines.append("    {")
+            lines.append("        type            nutkWallFunction;\n        value           uniform 0;")
+            lines.append("    }")
+        if spec.has_polygon:
+            lines.append("    polygon")
             lines.append("    {")
             lines.append("        type            nutkWallFunction;\n        value           uniform 0;")
             lines.append("    }")
@@ -808,10 +1091,31 @@ class ObstacleFlowCompiler:
 
     # --- System files ---
 
-    def _compile_control_dict(self, spec: ObstacleFlowExperimentSpecV1) -> str:
-        """Generate system/controlDict."""
+    def compute_time_step(
+        self, spec: ObstacleFlowExperimentSpecV1
+    ) -> tuple[float, float, int]:
+        """Compute (end_time, delta_t, write_interval) for the given spec.
+
+        This is the single source of truth for time-step estimation.
+        Both :meth:`_compile_control_dict` (which writes the actual
+        ``controlDict``) and external preview code (e.g.
+        ``_generate_compile_preview`` in the cylinder-flow router) call
+        this method so that the preview shown to the user always matches
+        the value that ends up in the compiled ``controlDict``.
+
+        For steady-state simulations *end_time* represents the iteration
+        count rather than physical time; the user-specified value is
+        honoured, falling back to 1000 when unset.
+        """
         sim = spec.simulation
         is_transient = spec.is_transient
+
+        # Validate delta_t is positive when explicitly set
+        if sim.delta_t is not None and sim.delta_t <= 0:
+            raise CompilationError(
+                f"Simulation delta_t must be positive, got {sim.delta_t} — "
+                f"a non-positive time step is physically invalid."
+            )
 
         if is_transient:
             end_time = sim.end_time or 100.0
@@ -832,9 +1136,18 @@ class ObstacleFlowCompiler:
                 delta_t = min(delta_t, end_time / 200)
             write_interval = sim.write_interval or max(1, int(end_time / (delta_t * 20)))
         else:
-            end_time = 1000.0
+            # Steady-state: end_time is the iteration count.
+            # Honour the user-specified value, fall back to 1000.
+            end_time = sim.end_time if sim.end_time is not None else 1000.0
             delta_t = 1.0
-            write_interval = 100
+            write_interval = sim.write_interval or 100
+
+        return end_time, delta_t, write_interval
+
+    def _compile_control_dict(self, spec: ObstacleFlowExperimentSpecV1) -> str:
+        """Generate system/controlDict."""
+        is_transient = spec.is_transient
+        end_time, delta_t, write_interval = self.compute_time_step(spec)
 
         lines = [
             _header("dictionary", "controlDict"),
@@ -909,6 +1222,8 @@ class ObstacleFlowCompiler:
                 patches.append("triangle")
             if spec.has_trapezoid:
                 patches.append("trapezoid")
+            if spec.has_polygon:
+                patches.append("polygon")
             lines.append(f"        patches         ({' '.join(patches)});")
             lines.append("        rho             rhoInf;")
             lines.append(f"        rhoInf          {_fmt(rho)};")
@@ -926,9 +1241,25 @@ class ObstacleFlowCompiler:
             lines.append("    }")
             lines.append("")
 
-        # Probes for point velocity
-        point_obs = [o for o in spec.observables if o.type == ObservableType.POINT_VELOCITY]
-        if point_obs:
+        # Probes for point velocity and section mean velocity
+        probe_points: list[list[float]] = []
+        for obs in spec.observables:
+            if obs.type == ObservableType.POINT_VELOCITY and obs.point is not None:
+                probe_points.append(list(obs.point))
+            elif (
+                obs.type == ObservableType.SECTION_MEAN_VELOCITY
+                and obs.section_x is not None
+            ):
+                # Distribute probe points vertically along the section so
+                # the mean velocity can be reconstructed from the
+                # resulting time-series.
+                n_section_probes = 10
+                h = spec.domain.height_m
+                for i in range(n_section_probes + 1):
+                    y = h * i / n_section_probes
+                    probe_points.append([obs.section_x, y, 0.0])
+
+        if probe_points:
             lines.append("    probes1")
             lines.append("    {")
             lines.append("        type            probes;")
@@ -938,11 +1269,9 @@ class ObstacleFlowCompiler:
             lines.append("        fields          (U);")
             lines.append("        probeLocations")
             lines.append("        (")
-            for obs in point_obs:
-                if obs.point is not None:
-                    p = obs.point
-                    z = p[2] if len(p) > 2 else 0.0
-                    lines.append(f"            ({_fmt(p[0])} {_fmt(p[1])} {_fmt(z)})")
+            for p in probe_points:
+                z = p[2] if len(p) > 2 else 0.0
+                lines.append(f"            ({_fmt(p[0])} {_fmt(p[1])} {_fmt(z)})")
             lines.append("        );")
             lines.append("    }")
             lines.append("")
@@ -978,6 +1307,30 @@ class ObstacleFlowCompiler:
             lines.append("    }")
             lines.append("")
 
+        # Wall shear stress
+        wss_obs = [
+            o for o in spec.observables if o.type == ObservableType.WALL_SHEAR_STRESS
+        ]
+        if wss_obs:
+            available_walls = self._available_wall_patches(spec)
+            wall_names: list[str] = []
+            for obs in wss_obs:
+                wname = obs.wall_name
+                if wname and wname not in wall_names and wname in available_walls:
+                    wall_names.append(wname)
+            # Fallback: if no recognised wall names, probe all wall patches
+            if not wall_names:
+                wall_names = list(available_walls)
+
+            lines.append("    wallShearStress1")
+            lines.append("    {")
+            lines.append("        type            wallShearStress;")
+            lines.append("        libs            (\"libforces.so\");")
+            lines.append(f"        patches         ({' '.join(wall_names)});")
+            lines.append("        writeControl    writeTime;")
+            lines.append("    }")
+            lines.append("")
+
         # Residuals
         lines.append("    residuals1")
         lines.append("    {")
@@ -999,6 +1352,23 @@ class ObstacleFlowCompiler:
             lines.append("")
 
         return lines
+
+    def _available_wall_patches(
+        self, spec: ObstacleFlowExperimentSpecV1
+    ) -> list[str]:
+        """Return the list of wall patch names present in the case."""
+        patches = ["bottom", "top"]
+        if spec.has_cylinder:
+            patches.append("cylinder")
+        if spec.has_rectangle:
+            patches.append("rectangle")
+        if spec.has_triangle:
+            patches.append("triangle")
+        if spec.has_trapezoid:
+            patches.append("trapezoid")
+        if spec.has_polygon:
+            patches.append("polygon")
+        return patches
 
     def _compile_fv_schemes(
         self, spec: ObstacleFlowExperimentSpecV1, is_turbulent: bool
@@ -1252,10 +1622,79 @@ class ObstacleFlowCompiler:
     ) -> tuple[str, ...]:
         """Determine preprocessing steps needed."""
         steps = ["blockMesh"]
-        if spec.has_cylinder or spec.has_rectangle or spec.has_triangle or spec.has_trapezoid:
+        if spec.has_cylinder or spec.has_rectangle or spec.has_triangle or spec.has_trapezoid or spec.has_polygon:
             steps.append("snappyHexMesh")
         steps.append("checkMesh")
         return tuple(steps)
+
+    def _compile_polygon(self, polygon: PolygonSpec) -> str:
+        """Generate a polygonal prism STL surface for snappyHexMesh.
+
+        Creates a closed prism from the polygon's 2D vertex list by
+        extruding in z by *thickness*.  The polygon must have >= 3
+        vertices.
+
+        Triangulation uses a fan from vertex 0 for bottom and top faces.
+        Side faces are quads split into 2 triangles each, with outward-
+        facing normals computed from the edge direction.
+        """
+        verts_2d = polygon.vertices
+        n = len(verts_2d)
+        if n < 3:
+            raise CompilationError(
+                f"Polygon requires at least 3 vertices, got {n}"
+            )
+
+        z0 = 0.0
+        z1 = polygon.thickness
+
+        # Build 3D vertices: n bottom + n top
+        verts: list[tuple[float, float, float]] = []
+        for v in verts_2d:
+            verts.append((float(v[0]), float(v[1]), z0))
+        for v in verts_2d:
+            verts.append((float(v[0]), float(v[1]), z1))
+
+        triangles: list[tuple[tuple[float, float, float], int, int, int]] = []
+
+        # Bottom face (normal -z): fan from vertex 0
+        for i in range(1, n - 1):
+            triangles.append(((0.0, 0.0, -1.0), 0, i + 1, i))
+
+        # Top face (normal +z): fan from vertex n
+        for i in range(1, n - 1):
+            triangles.append(((0.0, 0.0, 1.0), n, n + i, n + i + 1))
+
+        # Side faces: quad (i, i+1, i+1+n, i+n) split into 2 triangles
+        for i in range(n):
+            j = (i + 1) % n
+            dx = verts_2d[j][0] - verts_2d[i][0]
+            dy = verts_2d[j][1] - verts_2d[i][1]
+            length = math.sqrt(dx * dx + dy * dy)
+            if length > 0:
+                nx = dy / length
+                ny = -dx / length
+            else:
+                nx, ny = 0.0, 0.0
+            triangles.append(((nx, ny, 0.0), i, j, n + j))
+            triangles.append(((nx, ny, 0.0), i, n + j, n + i))
+
+        lines: list[str] = []
+        lines.append("solid polygon")
+        for normal, i0, i1, i2 in triangles:
+            nx, ny, nz = normal
+            v0 = verts[i0]
+            v1 = verts[i1]
+            v2 = verts[i2]
+            lines.append(f"  facet normal {nx:.6e} {ny:.6e} {nz:.6e}")
+            lines.append("    outer loop")
+            lines.append(f"      vertex {v0[0]:.6e} {v0[1]:.6e} {v0[2]:.6e}")
+            lines.append(f"      vertex {v1[0]:.6e} {v1[1]:.6e} {v1[2]:.6e}")
+            lines.append(f"      vertex {v2[0]:.6e} {v2[1]:.6e} {v2[2]:.6e}")
+            lines.append("    endloop")
+            lines.append("  endfacet")
+        lines.append("endsolid polygon")
+        return "\n".join(lines)
 
     def _determine_required_outputs(
         self, spec: ObstacleFlowExperimentSpecV1
@@ -1266,6 +1705,13 @@ class ObstacleFlowCompiler:
             outputs.append("vorticity")
         if any(o.type in (ObservableType.CYLINDER_DRAG, ObservableType.CYLINDER_LIFT) for o in spec.observables):
             outputs.append("forceCoefficients")
+        if any(o.type == ObservableType.WALL_SHEAR_STRESS for o in spec.observables):
+            outputs.append("wallShearStress")
+        if any(
+            o.type in (ObservableType.POINT_VELOCITY, ObservableType.SECTION_MEAN_VELOCITY)
+            for o in spec.observables
+        ):
+            outputs.append("probes")
         return tuple(outputs)
 
 

@@ -683,14 +683,14 @@ class V5WorkflowPipeline:
         bump: dict[str, Any] = {}
         if any(k in lower for k in ("凸起", "bump", "protrusion", "hill", "脊")):
             bump["type"] = "sinusoidal"
-            bump_h = re.search(r'(?:高|height|H)\s*[=：:]?\s*(\d+(?:\.\d+)?)\s*(m|米)', text, re.IGNORECASE)
-            # Try to find bump-specific height: "凸起...高为5米"
-            bump_h2 = re.search(r'(?:凸起|bump|protrusion|hill).*?(?:高|height)\s*[=：:]?\s*(\d+(?:\.\d+)?)\s*(m|米)', text, re.IGNORECASE)
+            bump_h = re.search(r'(?:高|高度|height|H)\s*[=：:]?\s*(\d+(?:\.\d+)?)\s*(m|米)', text, re.IGNORECASE)
+            # Try to find bump-specific height: "凸起...高为5米" or "凸起...高度0.1m"
+            bump_h2 = re.search(r'(?:凸起|bump|protrusion|hill).*?(?:高|高度|height)\s*[=：:]?\s*(\d+(?:\.\d+)?)\s*(m|米)', text, re.IGNORECASE)
             if bump_h2:
                 bump["height"] = float(bump_h2.group(1))
             elif bump_h:
                 bump["height"] = float(bump_h.group(1))
-            bump_w = re.search(r'(?:凸起|bump|protrusion|hill).*?(?:宽|width|W)\s*[=：:]?\s*(\d+(?:\.\d+)?)\s*(m|米)', text, re.IGNORECASE)
+            bump_w = re.search(r'(?:凸起|bump|protrusion|hill).*?(?:宽|宽度|width|W)\s*[=：:]?\s*(\d+(?:\.\d+)?)\s*(m|米)', text, re.IGNORECASE)
             if bump_w:
                 bump["width"] = float(bump_w.group(1))
             bump["position"] = "center"
