@@ -54,6 +54,7 @@ from fluid_scientist.case_ir.geometry_ast import (
     TriangleNode,
 )
 from fluid_scientist.case_ir.geometry_to_case_ir import StudySpecToCaseIRConverter
+from fluid_scientist.case_ir.open_builder import OpenCaseIRBuilder
 from fluid_scientist.case_ir.models import (
     Ambiguity,
     Assumption,
@@ -109,6 +110,7 @@ __all__ = [
     "NumericalIntent",
     "Observable",
     "OperatingStage",
+    "OpenCaseIRBuilder",
     "ParameterValue",
     "PhysicsIntent",
     "PolygonNode",

@@ -627,6 +627,10 @@ class RequestedCaseIR(_CaseIRBase):
     case_ir_version: int = 1
     study_id: str
     case_id: str
+    case_family: str = "open_cfd_case"
+    dimensionality: Literal["2D", "3D"] = "2D"
+    domain: dict[str, ParameterValue] = Field(default_factory=dict)
+    research_objectives: list[str] = Field(default_factory=list)
     physics: PhysicsIntent = Field(default_factory=PhysicsIntent)
     entities: list[Entity] = Field(default_factory=list)
     regions: list[Region] = Field(default_factory=list)
