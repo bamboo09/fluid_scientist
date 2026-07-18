@@ -230,6 +230,23 @@ def build_spec_editor_prompt(
     )
     sections.append(user_prompt)
 
+    # Full conversational and reference context.  These sections are kept
+    # explicit so Prompt Trace/context-removal tests can prove that each one
+    # reached the primary reasoner rather than merely existing in session
+    # storage.
+    sections.append(
+        "## Earlier session summary\n"
+        + str(context.get("session_summary", ""))
+    )
+    sections.append(
+        "## Recent original conversation\n"
+        + json.dumps(context.get("recent_conversation", []), ensure_ascii=False, indent=2)
+    )
+    sections.append(
+        "## Selected references\n"
+        + json.dumps(context.get("references", []), ensure_ascii=False, indent=2)
+    )
+
     # 10. Prior Critic feedback (for retries)
     prior_feedback = context.get("prior_critic_feedback")
     if prior_feedback:

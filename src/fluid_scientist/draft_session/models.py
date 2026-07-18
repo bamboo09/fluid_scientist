@@ -267,6 +267,8 @@ class LLMCallRecord(BaseModel):
         "code_generation",
         "code_review",
         "explanation",
+        "spec_editing",
+        "structured_understanding",
     ]
     provider: str = "unknown"
     model_name: str = "unknown"

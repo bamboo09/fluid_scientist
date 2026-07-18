@@ -30,6 +30,17 @@ from pydantic import BaseModel, Field
 
 from fluid_scientist.compat import UTC
 from fluid_scientist.model_runtime.tracing import ModelTrace, TraceRecorder
+from fluid_scientist.llm.prompt_trace import (
+    PromptTrace,
+    PromptTraceContext,
+    PromptTraceResult,
+    get_prompt_trace_recorder,
+)
+from fluid_scientist.llm.structured_understanding import (
+    ModelNativeUnderstandingService,
+    ModelUnderstandingError,
+    UnderstandingContext,
+)
 from fluid_scientist.prompts.critic import build_critic_prompt
 from fluid_scientist.prompts.spec_editor import build_spec_editor_prompt
 from fluid_scientist.prompts.two_call_strategy import TwoCallStrategy
@@ -89,12 +100,9 @@ def _resolve_skills(session: Any, user_message: str) -> list[str]:
     try:
         from fluid_scientist.skills.skill_resolver import SkillResolver
         resolver = SkillResolver()
-        injection = resolver.build_prompt_injection(
-            user_message=user_message,
-            session_state={},
-        )
-        if injection and injection.get("skill_ids"):
-            return injection["skill_ids"]
+        selected = resolver.select_skills(user_text=user_message)
+        if selected:
+            return [manifest.skill_id for manifest in selected]
     except (ImportError, AttributeError, Exception):
         pass
     return _DEFAULT_SKILLS
@@ -877,6 +885,119 @@ def _handle_explanation_turn(
     return resp
 
 
+def _run_model_native_understanding(
+    *,
+    session_id: str,
+    user_message: str,
+    current_spec: SimulationStudySpec | None,
+    model_context: Any,
+    resolved_skills: list[str],
+    llm_client: Any,
+) -> tuple[SimulationSpecPatch | None, str, list[str]]:
+    """Run the primary semantic model and return its validated patch."""
+
+    spec_dict = current_spec.model_dump(mode="json") if current_spec else None
+    skill_documents: list[dict[str, str]] = []
+    try:
+        from fluid_scientist.skills.skill_resolver import SkillResolver
+
+        resolver = SkillResolver()
+        skill_documents = resolver.resolve_documents(
+            resolved_skills, user_text=user_message
+        )
+    except Exception as exc:
+        model_trace_id = _record_trace(session_id, llm_client=llm_client)
+        return None, model_trace_id, [str(exc)]
+
+    context = UnderstandingContext(
+        user_message=user_message,
+        current_spec=spec_dict,
+        conversation_history=getattr(model_context, "recent_conversation", []),
+        confirmed_facts=getattr(model_context, "confirmed_facts", []),
+        unresolved_conflicts=getattr(model_context, "unresolved_conflicts", []),
+        workflow_skills=[{
+            "skill_id": "model_native_research_session",
+            "content": getattr(model_context, "system_role", ""),
+        }],
+        professional_skills=skill_documents,
+        references=getattr(model_context, "references", []),
+    )
+    call_record: dict[str, Any] = {}
+
+    def call_model(prompt_payload: str, output_schema: dict[str, Any]) -> dict[str, Any]:
+        parsed, record = llm_client.call(
+            purpose="structured_understanding",
+            prompt_name="model_native_spec_understanding",
+            system_prompt=(
+                "You are the primary CFD semantic reasoner. Read the complete JSON context. "
+                "Return exactly one StructuredUnderstanding object containing facts, entities, "
+                "relations, ambiguities, conflicts, capability requirements, evidence quotes, "
+                "and a minimal SimulationSpecPatch. Never use unstated defaults."
+            ),
+            user_message=prompt_payload,
+            output_schema=output_schema,
+            session_id=session_id,
+            prompt_version="structured-understanding-v1",
+        )
+        call_record["record"] = record
+        if not getattr(record, "success", False) or getattr(record, "fallback_used", False):
+            raise ModelUnderstandingError(
+                f"MODEL_FAILED: {getattr(record, 'error', 'model call failed')}"
+            )
+        if not isinstance(parsed, dict):
+            raise ModelUnderstandingError("MODEL_FAILED: structured output is not an object")
+        return parsed
+
+    trace = PromptTrace(
+        session_id=session_id,
+        spec_id=getattr(current_spec, "spec_id", "") if current_spec else "",
+        spec_version=getattr(current_spec, "version", 0) if current_spec else 0,
+        provider=getattr(llm_client, "_provider", ""),
+        actual_model=getattr(llm_client, "_model_name", ""),
+        purpose="structured_understanding",
+        skill_ids=resolved_skills,
+        reference_ids=[item.get("reference_id", "") for item in context.references],
+        context=PromptTraceContext(
+            user_message=user_message,
+            current_spec_snapshot=spec_dict,
+            conversation_history=context.conversation_history,
+            confirmed_facts=context.confirmed_facts,
+            unresolved_conflicts=context.unresolved_conflicts,
+            skill_prompt_fragments=skill_documents + context.workflow_skills,
+            reference_documents=context.references,
+            output_schema=context.output_schema,
+        ),
+    )
+    try:
+        understanding, validation = ModelNativeUnderstandingService(call_model).understand(context)
+        trace.result = PromptTraceResult(
+            model_raw_response=getattr(call_record.get("record"), "raw_output", ""),
+            model_structured_output=understanding.model_dump(mode="json"),
+            parsed_successfully=True,
+            latency_ms=int(getattr(call_record.get("record"), "latency_ms", 0) or 0),
+        )
+        trace.field_provenance = [
+            {key: str(value) for key, value in item.items()}
+            for item in validation.field_source_chain
+        ]
+        errors: list[str] = []
+        patch = understanding.proposed_patch
+    except Exception as exc:
+        trace.result = PromptTraceResult(
+            model_raw_response=getattr(call_record.get("record"), "raw_output", ""),
+            parsed_successfully=False,
+            parse_error=str(exc),
+            latency_ms=int(getattr(call_record.get("record"), "latency_ms", 0) or 0),
+        )
+        errors = [str(exc)]
+        patch = None
+    get_prompt_trace_recorder().record(trace)
+    model_trace_id = _record_trace(
+        session_id, llm_client=llm_client, llm_record=call_record.get("record")
+    )
+    return patch, model_trace_id, errors
+
+
 def _handle_spec_modification(
     session_id: str,
     user_message: str,
@@ -912,6 +1033,10 @@ def _handle_spec_modification(
         user_message=user_message,
         skills=resolved_skills,
         openfoam_env=_OPENFOAM_ENV,
+        references=[{
+            "reference_id": "openfoam_environment",
+            "content": json.dumps(_OPENFOAM_ENV, ensure_ascii=False, sort_keys=True),
+        }],
     )
 
     # 2. Get patch schema.
@@ -935,42 +1060,17 @@ def _handle_spec_modification(
         return resp
 
     # 4. Create the model client callable adapter.
-    model_client = _make_model_client_callable(llm_client, session_id)
-
-    # 5. Build the context dict for TwoCallStrategy from the ModelContext
-    #    object returned by build_context().  This ensures the full
-    #    context (system_role, skills, patch_schema, session_summary,
-    #    recent_conversation, openfoam_env) is passed to the model,
-    #    not just a hand-written subset.
-    context_dict: dict[str, Any] = {
-        "workflow_phase": str(session.current_phase),
-        "confirmed_facts": [f.model_dump() for f in session.confirmed_facts],
-        "unresolved_conflicts": [
-            c.model_dump() for c in session.unresolved_conflicts
-        ],
-        "skills": resolved_skills,
-        "openfoam_env": _OPENFOAM_ENV,
-        # Fields from ModelContext that were previously lost:
-        "system_role": getattr(model_context, "system_role", ""),
-        "patch_schema": patch_schema,
-        "session_summary": getattr(model_context, "session_summary", ""),
-        "recent_conversation": getattr(model_context, "recent_conversation", []),
-        "current_spec": spec_dict or {},
-    }
-
-    # 6. Execute the two-call strategy.
-    candidate_patch, _critic_result, errors = _two_call_strategy.execute(
-        model_client=model_client,
-        context=context_dict,
+    patch, trace_id, errors = _run_model_native_understanding(
+        session_id=session_id,
         user_message=user_message,
-        current_spec=spec_dict or {},
-        patch_schema=patch_schema,
+        current_spec=current_spec,
+        model_context=model_context,
+        resolved_skills=resolved_skills,
+        llm_client=llm_client,
     )
 
     # 7. Record a trace for the model call — pass the real llm_client
     #    so the trace records the actual provider/model, not "unknown".
-    trace_id = _record_trace(session_id, llm_client=llm_client)
-
     if errors:
         resp = TurnResponse(
             session_id=session_id,
@@ -986,41 +1086,7 @@ def _handle_spec_modification(
         )
         return resp
 
-    if candidate_patch is None:
-        resp = TurnResponse(
-            session_id=session_id,
-            intent=intent_str,
-            phase=str(session.current_phase),
-            assistant_message="The model did not produce a valid patch after retries.",
-            errors=[
-                "MODEL_NO_PATCH: The model did not produce a valid "
-                "patch after retries."
-            ],
-            spec_version=session.active_spec_version,
-        )
-        _record_turn(
-            session_id, user_message, intent_str, resp.assistant_message,
-            trace_ids=[trace_id],
-        )
-        return resp
-
-    # 8. Validate the candidate patch into a SimulationSpecPatch.
-    try:
-        patch = SimulationSpecPatch.model_validate(candidate_patch)
-    except Exception as exc:
-        resp = TurnResponse(
-            session_id=session_id,
-            intent=intent_str,
-            phase=str(session.current_phase),
-            assistant_message="Patch validation failed.",
-            errors=[f"PATCH_VALIDATION_ERROR: {exc}"],
-            spec_version=session.active_spec_version,
-        )
-        _record_turn(
-            session_id, user_message, intent_str, resp.assistant_message,
-            trace_ids=[trace_id],
-        )
-        return resp
+    assert patch is not None
 
     # 9. If there is no current spec, we cannot apply the patch yet —
     #    set it as pending for the user to review after providing a base.

@@ -81,6 +81,7 @@ class ModelContext(BaseModel):
     unresolved_conflicts: list[dict[str, Any]] = Field(default_factory=list)
     session_summary: str = ""
     recent_conversation: list[dict[str, Any]] = Field(default_factory=list)
+    references: list[dict[str, str]] = Field(default_factory=list)
     user_message: str = ""
 
 
@@ -115,6 +116,7 @@ class ContextBuilder:
         user_message: str,
         skills: list[str],
         openfoam_env: dict[str, Any],
+        references: list[dict[str, str]] | None = None,
     ) -> ModelContext:
         """Build the full model context for the current turn.
 
@@ -200,6 +202,7 @@ class ContextBuilder:
             unresolved_conflicts=unresolved_conflicts,
             session_summary=session_summary,
             recent_conversation=recent_conversation,
+            references=list(references or []),
             user_message=user_msg,
         )
 
