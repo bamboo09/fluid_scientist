@@ -44,6 +44,7 @@ from fluid_scientist.cylinder_flow_2d.models import (
     ModelPolicy,
     ObservableSpec,
     ObservableType,
+    PolygonSpec,
     ProvenanceField,
     SemanticBoundaryType,
     SimulationSpec,
@@ -296,6 +297,40 @@ class CylinderFlow2DV1Pipeline:
             else:
                 facts.append(f"用户提到了圆柱距壁面 {wall_dist} m（语义待确认）")
 
+        # Extract "正中央" / "居中" / "中央" — user explicitly says cylinder is centered
+        # This sets center_x = domain_length/2 as USER_EXPLICIT
+        # If center_y is not yet resolved AND no wall distance was given, also set center_y = domain_height/2
+        center_phrases = ["正中央", "流场中央", "流场中心", "位于中央", "位于中心",
+                          "水平居中", "水平中心", "居中放置", "正中"]
+        user_says_centered = any(p in user_text for p in center_phrases)
+        if user_says_centered:
+            domain_l = spec.domain.length_m.value
+            domain_h = spec.domain.height_m.value
+            # Set center_x = domain_length / 2 (horizontal centering)
+            if domain_l is not None and domain_l > 0 and not spec.cylinder.center_x_m.is_resolved():
+                cx = domain_l / 2.0
+                facts.append(f"用户指定'位于流场正中央'，圆心x = 域长/2 = {cx} m")
+                spec.cylinder.center_x_m = ProvenanceField(
+                    value=cx,
+                    source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED,
+                    confidence=0.95,
+                    reason="用户明确指定'位于流场正中央'，水平居中",
+                )
+            # Only set center_y from "正中央" if no wall distance was given
+            if (domain_h is not None and domain_h > 0
+                    and not spec.cylinder.center_y_m.is_resolved()
+                    and wall_dist is None):
+                cy = domain_h / 2.0
+                facts.append(f"用户指定'位于流场正中央'，圆心y = 域高/2 = {cy} m")
+                spec.cylinder.center_y_m = ProvenanceField(
+                    value=cy,
+                    source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED,
+                    confidence=0.8,
+                    reason="用户指定'位于流场正中央'，垂直居中（无距壁面信息）",
+                )
+
         # Extract inlet velocity
         inlet_v = self._extract_inlet_velocity(user_text)
         if inlet_v is not None:
@@ -540,6 +575,20 @@ class CylinderFlow2DV1Pipeline:
                     status=FieldStatus.RESOLVED,
                     confidence=1.0,
                 )
+            elif any(kw in user_text for kw in ["中央", "居中", "中心", "正中", "central", "center"]):
+                # Derive center_x from "下壁面中央" / "中央" keywords
+                domain_l = (spec.domain.length_m.value
+                            if spec.domain.length_m.is_resolved() else None)
+                if domain_l is not None and domain_l > 0:
+                    cx = domain_l / 2.0
+                    spec.bottom_profile.center_x_m = ProvenanceField(
+                        value=cx,
+                        source=FieldSource.SYSTEM_DERIVED,
+                        status=FieldStatus.RESOLVED,
+                        confidence=1.0,
+                        reason=f"由'中央'推导: center_x = domain_length/2 = {domain_l}/2 = {cx}",
+                    )
+                    facts.append(f"凸起位于下壁面中央，center_x = {cx} m")
             # Store alignment flag for physics_dependency to use
             if bump.get("aligned_below_cylinder"):
                 spec.bottom_profile.aligned_below_cylinder = True
@@ -623,6 +672,37 @@ class CylinderFlow2DV1Pipeline:
                 )
             if rectangle.get("aligned_below_cylinder"):
                 spec.rectangle.relation_to_cylinder = "aligned_below"
+
+        # Extract custom polygon obstacle — semantic_type = custom_polygon_2d
+        polygon = self._extract_polygon(user_text)
+        if polygon:
+            facts.append(
+                f"用户指定了自定义多边形障碍物: "
+                f"顶点数={len(polygon.get('vertices', []))}, "
+                f"位置x={polygon.get('center_x')}"
+            )
+            spec.polygon.enabled = True
+            spec.polygon.semantic_type = "custom_polygon_2d"
+            spec.polygon.solver_representation = "polygon_stl"
+            spec.polygon.source_text = user_text
+            if polygon.get("vertices"):
+                spec.polygon.vertices = polygon["vertices"]
+            if polygon.get("center_x") is not None:
+                spec.polygon.center_x_m = ProvenanceField(
+                    value=polygon["center_x"],
+                    source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED,
+                    confidence=1.0,
+                    reason="用户明确指定多边形位置",
+                )
+            if polygon.get("center_y") is not None:
+                spec.polygon.center_y_m = ProvenanceField(
+                    value=polygon["center_y"],
+                    source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED,
+                    confidence=1.0,
+                    reason="用户明确指定多边形位置",
+                )
 
         # Extract end time
         end_time = self._extract_end_time(user_text)
@@ -876,6 +956,30 @@ class CylinderFlow2DV1Pipeline:
         for d in derivation_result.derivations:
             decision.derived_values.append(d.to_display())
 
+        # Physics consistency check: when Re is given with a standard fluid
+        # (water/air), the derived viscosity may be physically unrealistic.
+        # E.g. Re=200, U=1, D=0.2 → nu=0.001, but real water nu≈1e-6.
+        # We do NOT silently accept this — we flag it as a physics conflict.
+        _derived_nu = None
+        for d in derivation_result.derivations:
+            if d.target_field in ("kinematic_viscosity", "kinematic_viscosity_m2_s", "nu"):
+                _derived_nu = d.value
+                break
+        if _derived_nu is not None and _derived_nu > 1e-4:
+            _fluid_type_val = spec.fluid.type.value if spec.fluid.type and spec.fluid.type.value else "water"
+            if _fluid_type_val in ("water", "air"):
+                # Physical conflict: Re-derived viscosity is orders of
+                # magnitude larger than the real fluid's viscosity.
+                _real_nu = 1e-6 if _fluid_type_val == "water" else 1.5e-5
+                decision.unresolved_items.append(
+                    f"PHYSICS_CONFLICT_RE_VS_FLUID: "
+                    f"用户指定Re与流体类型({_fluid_type_val})物理不一致。"
+                    f"由Re推导的粘度nu={_derived_nu:.4e} m2/s远大于"
+                    f"真实{_fluid_type_val}的粘度({_real_nu:.1e} m2/s)。"
+                    f"选项: (1)保持真实{_fluid_type_val}物性,Re自动计算; "
+                    f"(2)改流体类型为custom; (3)调整U或D使Re匹配。"
+                )
+
         # Only set water defaults if viscosity is STILL not resolved
         # (i.e., user didn't give Re, so we can't derive nu)
         if not spec.fluid.kinematic_viscosity_m2_s.is_resolved():
@@ -904,6 +1008,21 @@ class CylinderFlow2DV1Pipeline:
                 source=FieldSource.MODEL_RECOMMENDED,
                 status=FieldStatus.AWAITING_CONFIRMATION,
                 confidence=0.7,
+            )
+
+        # Always ensure density is resolved based on fluid type.
+        # When Re is provided, viscosity is derived (nu=U*D/Re) but density
+        # is NOT set by the block above — it must be set separately here.
+        if not spec.fluid.density_kg_m3.is_resolved():
+            _fluid_type = spec.fluid.type.value if spec.fluid.type and spec.fluid.type.value else "water"
+            _density_default = 998.0 if _fluid_type == "water" else (1.225 if _fluid_type == "air" else 998.0)
+            decision.assumptions.append(f"根据流体类型({_fluid_type})推导密度={_density_default} kg/m3")
+            spec.fluid.density_kg_m3 = ProvenanceField(
+                value=_density_default,
+                source=FieldSource.MODEL_RECOMMENDED,
+                status=FieldStatus.AWAITING_CONFIRMATION,
+                confidence=0.7,
+                reason=f"根据流体类型({_fluid_type})推导密度",
             )
 
         # Default domain if not specified
@@ -1095,28 +1214,129 @@ class CylinderFlow2DV1Pipeline:
     # Helper methods for text extraction
     # -----------------------------------------------------------------------
 
+    # Shared number pattern supporting scientific notation
+    _NUM_PATTERN = r"(\d+\.?\d*(?:[eE][+-]?\d+)?)"
+
+    # Unit conversion table (to meters)
+    _UNIT_TO_METERS = {
+        "mm": 0.001, "毫米": 0.001, "millimeter": 0.001,
+        "cm": 0.01, "厘米": 0.01, "centimeter": 0.01,
+        "dm": 0.1, "分米": 0.1, "decimeter": 0.1,
+        "m": 1.0, "米": 1.0, "meter": 1.0,
+    }
+
+    @staticmethod
+    def _chinese_num_to_float(text: str) -> float | None:
+        """Convert Chinese numeral string to float. Supports 0-9999."""
+        cn_map = {"零": 0, "〇": 0, "一": 1, "二": 2, "两": 2, "三": 3, "四": 4,
+                  "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10,
+                  "百": 100, "千": 1000}
+        # Handle simple cases: 十五 = 15, 二十 = 20, 十 = 10, 一百 = 100
+        if not text or not all(c in cn_map for c in text):
+            # Try mixed like "一百二十三"
+            pass
+        if text == "十":
+            return 10.0
+        if text.startswith("十"):
+            # 十五 = 15, 十二 = 12
+            return 10.0 + float(cn_map.get(text[1], 0))
+        if "十" in text:
+            parts = text.split("十")
+            tens = cn_map.get(parts[0], 1) if parts[0] else 1
+            ones = cn_map.get(parts[1], 0) if len(parts) > 1 and parts[1] else 0
+            return float(tens * 10 + ones)
+        if "百" in text:
+            parts = text.split("百")
+            hundreds = cn_map.get(parts[0], 1) if parts[0] else 1
+            remainder = parts[1] if len(parts) > 1 else ""
+            if not remainder:
+                return float(hundreds * 100)
+            if "十" in remainder:
+                rparts = remainder.split("十")
+                tens = cn_map.get(rparts[0], 1) if rparts[0] else 1
+                ones = cn_map.get(rparts[1], 0) if len(rparts) > 1 and rparts[1] else 0
+                return float(hundreds * 100 + tens * 10 + ones)
+            return float(hundreds * 100 + cn_map.get(remainder, 0))
+        # Pure digit characters
+        total = 0
+        for c in text:
+            if c in cn_map:
+                total = total * 10 + cn_map[c]
+            else:
+                return None
+        return float(total) if total > 0 else None
+
+    @classmethod
+    def _preprocess_chinese_numbers(cls, text: str) -> str:
+        """Replace Chinese numerals with Arabic numerals in text."""
+        # Pattern to find Chinese number sequences
+        cn_chars = "零〇一二三四五六七八九十百千万两"
+        pattern = re.compile(f"[{cn_chars}]+")
+
+        def replacer(m):
+            cn_str = m.group(0)
+            result = cls._chinese_num_to_float(cn_str)
+            if result is not None:
+                # Preserve integer vs float
+                if result == int(result):
+                    return str(int(result))
+                return str(result)
+            return cn_str
+
+        return pattern.sub(replacer, text)
+
+    @classmethod
+    def _extract_value_with_unit(cls, text: str, patterns: list[str], convert_unit: bool = True) -> float | None:
+        """Extract a numeric value with optional unit conversion.
+
+        Patterns should use (\\d+\\.?\\d*(?:[eE][+-]?\\d+)?) for the number group
+        and a second optional group for the unit.
+        """
+        # Preprocess Chinese numbers
+        text = cls._preprocess_chinese_numbers(text)
+
+        for p in patterns:
+            m = re.search(p, text)
+            if m:
+                val = float(m.group(1))
+                # Try to extract unit from group(2) if present
+                if len(m.groups()) > 1 and m.group(2):
+                    unit_str = m.group(2).strip().lower()
+                    if convert_unit and unit_str in cls._UNIT_TO_METERS:
+                        val *= cls._UNIT_TO_METERS[unit_str]
+                return val
+        return None
+
     def _extract_radius(self, text: str) -> float | None:
         """Extract radius from text: R=0.1, 半径R=0.1, 半径0.1, radius=0.1, etc."""
+        text = self._preprocess_chinese_numbers(text)
+        _NUM = self._NUM_PATTERN
+        _UNIT = r"(mm|cm|dm|m|毫米|厘米|分米|米)?"
         patterns = [
             # "半径R = 0.1 m" or "半径 R = 0.1 m" (Chinese + variable name)
-            r"半径\s*[Rr]\s*=\s*(\d+\.?\d*)\s*m?",
+            rf"半径\s*[Rr]\s*=\s*{_NUM}\s*{_UNIT}",
             # "圆柱半径R = 0.1 m"
-            r"圆柱.*?半径\s*[Rr]?\s*=\s*(\d+\.?\d*)\s*m?",
+            rf"圆柱.*?半径\s*[Rr]?\s*=\s*{_NUM}\s*{_UNIT}",
             # "半径R=0.1" without space
-            r"半径\s*[Rr]\s*=\s*(\d+\.?\d*)",
+            rf"半径\s*[Rr]\s*=\s*{_NUM}",
             # "R = 0.1 m" — but NOT "Re = 200" (negative lookahead for 'e' after R)
-            r"(?<![a-zA-Z])[Rr]\s*=\s*(\d+\.?\d*)\s*m?",
+            rf"(?<![a-zA-Z])[Rr]\s*=\s*{_NUM}\s*{_UNIT}",
             # "半径 = 0.1 m" or "半径0.1 m"
-            r"半径\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
+            rf"半径\s*[=为是]?\s*{_NUM}\s*{_UNIT}",
             # "radius = 0.1 m" or "radius 0.1 m" (without =)
-            r"[Rr]adius\s*[=:]?\s*(\d+\.?\d*)\s*m?",
+            rf"[Rr]adius\s*[=:]?\s*{_NUM}\s*{_UNIT}",
             # "半径 0.1"
-            r"半径\s*(\d+\.?\d*)\s*m?",
+            rf"半径\s*{_NUM}\s*{_UNIT}",
         ]
         for p in patterns:
             m = re.search(p, text)
             if m:
                 val = float(m.group(1))
+                # Unit conversion
+                if len(m.groups()) > 1 and m.group(2):
+                    unit = m.group(2).strip().lower()
+                    if unit in self._UNIT_TO_METERS:
+                        val *= self._UNIT_TO_METERS[unit]
                 # Sanity check: radius should be small (not 200 from Re)
                 if val > 10:
                     continue
@@ -1125,51 +1345,102 @@ class CylinderFlow2DV1Pipeline:
 
     def _extract_diameter(self, text: str) -> float | None:
         """Extract diameter from text: D=0.2, 直径0.2, diameter=0.2, etc."""
+        text = self._preprocess_chinese_numbers(text)
+        _NUM = self._NUM_PATTERN
+        _UNIT = r"(mm|cm|dm|m|毫米|厘米|分米|米)?"
         patterns = [
-            r"[Dd]\s*=\s*(\d+\.?\d*)\s*m?",
-            r"直径\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
-            r"[Dd]iameter\s*[=:]?\s*(\d+\.?\d*)\s*m?",
+            rf"[Dd]\s*=\s*{_NUM}\s*{_UNIT}",
+            rf"直径\s*[=为是]?\s*{_NUM}\s*{_UNIT}",
+            rf"[Dd]iameter\s*[=:]?\s*{_NUM}\s*{_UNIT}",
         ]
         for p in patterns:
             m = re.search(p, text)
             if m:
-                return float(m.group(1))
+                val = float(m.group(1))
+                # Unit conversion
+                if len(m.groups()) > 1 and m.group(2):
+                    unit = m.group(2).strip().lower()
+                    if unit in self._UNIT_TO_METERS:
+                        val *= self._UNIT_TO_METERS[unit]
+                # Sanity check: diameter should be reasonable
+                if val > 50:
+                    continue
+                return val
         return None
 
     def _extract_domain(self, text: str) -> dict[str, float]:
         """Extract domain dimensions from text."""
+        text = self._preprocess_chinese_numbers(text)
+        _NUM = self._NUM_PATTERN
+        _UNIT = r"(mm|cm|dm|m|毫米|厘米|分米|米)?"
         result: dict[str, float] = {}
+
+        # Generic "Xm×Ym" combined format (handles multiple phrasings):
+        #   "计算域10m×5m"  (计算域 before dimensions)
+        #   "10m×5m的计算域" (dimensions before 计算域)
+        #   "二维域10m×5m"   (二维域 prefix)
+        #   "10m×5m的域"     (域 suffix)
+        #   "域10m×5m"       (域 prefix)
+        _domain_kw = r"(?:计算域|二维域|流场|域|channel|domain)"
+        combined_patterns = [
+            rf"{_domain_kw}\s*{_NUM}\s*{_UNIT}\s*[×xX\*]\s*{_NUM}\s*{_UNIT}",
+            rf"{_NUM}\s*{_UNIT}\s*[×xX\*]\s*{_NUM}\s*{_UNIT}\s*的?{_domain_kw}",
+        ]
+        for combined_pattern in combined_patterns:
+            m = re.search(combined_pattern, text)
+            if m:
+                val_l = float(m.group(1))
+                val_h = float(m.group(3))
+                if m.group(2):
+                    unit_l = m.group(2).strip().lower()
+                    if unit_l in self._UNIT_TO_METERS:
+                        val_l *= self._UNIT_TO_METERS[unit_l]
+                if m.group(4):
+                    unit_h = m.group(4).strip().lower()
+                    if unit_h in self._UNIT_TO_METERS:
+                        val_h *= self._UNIT_TO_METERS[unit_h]
+                result["length"] = val_l
+                result["height"] = val_h
+                return result
+
         # Length: 通道长8, 域长10, 长度300, length=300, 长300m, 长20米
         patterns_l = [
-            r"通道长\s*(\d+\.?\d*)\s*[m米]",
-            r"域长\s*(\d+\.?\d*)\s*[m米]",
-            r"长度\s*[=为是]?\s*(\d+\.?\d*)\s*[m米]",
-            r"[Ll]ength\s*[=:]?\s*(\d+\.?\d*)\s*m",
-            r"长\s*(\d+\.?\d*)\s*[m米]",
+            rf"通道长\s*{_NUM}\s*{_UNIT}",
+            rf"域长\s*{_NUM}\s*{_UNIT}",
+            rf"长度\s*[=为是]?\s*{_NUM}\s*{_UNIT}",
+            rf"[Ll]ength\s*[=:]?\s*{_NUM}\s*{_UNIT}",
+            rf"长\s*{_NUM}\s*{_UNIT}",
         ]
         for p in patterns_l:
             m = re.search(p, text)
             if m:
-                result["length"] = float(m.group(1))
+                val = float(m.group(1))
+                if len(m.groups()) > 1 and m.group(2):
+                    unit = m.group(2).strip().lower()
+                    if unit in self._UNIT_TO_METERS:
+                        val *= self._UNIT_TO_METERS[unit]
+                result["length"] = val
                 break
 
         # Height: 通道高4, 域高6, 高度25, height=25, 宽4米
-        # NOTE: Only match domain-specific keywords, NOT generic "高" which
-        # would false-match bump heights like "凸起高0.3 m" or "障碍物高0.05 m"
-        # IMPORTANT: Try "宽" first since "高度" may match obstacle descriptions
         patterns_h = [
-            r"通道高\s*(\d+\.?\d*)\s*[m米]",
-            r"域高\s*(\d+\.?\d*)\s*[m米]",
-            r"域\s*高\s*(\d+\.?\d*)\s*[m米]",
-            r"流场\s*高\s*(\d+\.?\d*)\s*[m米]",
-            r"宽\s*(\d+\.?\d*)\s*[m米]",
-            r"计算域.*高\s*(\d+\.?\d*)\s*[m米]",
-            r"[Hh]eight\s*[=:]?\s*(\d+\.?\d*)\s*m",
+            rf"通道高\s*{_NUM}\s*{_UNIT}",
+            rf"域高\s*{_NUM}\s*{_UNIT}",
+            rf"域\s*高\s*{_NUM}\s*{_UNIT}",
+            rf"流场\s*高\s*{_NUM}\s*{_UNIT}",
+            rf"宽\s*{_NUM}\s*{_UNIT}",
+            rf"计算域.*高\s*{_NUM}\s*{_UNIT}",
+            rf"[Hh]eight\s*[=:]?\s*{_NUM}\s*{_UNIT}",
         ]
         for p in patterns_h:
             m = re.search(p, text)
             if m:
-                result["height"] = float(m.group(1))
+                val = float(m.group(1))
+                if len(m.groups()) > 1 and m.group(2):
+                    unit = m.group(2).strip().lower()
+                    if unit in self._UNIT_TO_METERS:
+                        val *= self._UNIT_TO_METERS[unit]
+                result["height"] = val
                 break
 
         return result
@@ -1237,38 +1508,44 @@ class CylinderFlow2DV1Pipeline:
         return None
 
     def _extract_inlet_velocity(self, text: str) -> float | None:
-        """Extract inlet velocity from text: U=1.0, U_infty=1.0, 来流速度1.0, 以1 m/s流入, etc."""
+        """Extract inlet velocity from text: U=1.0, U_infty=1.0, 来流速度1.0, 以1 m/s流入, 入口速度1米每秒, etc."""
+        text = self._preprocess_chinese_numbers(text)
+        _NUM = self._NUM_PATTERN
+        # Velocity unit: supports m/s, 米每秒, 米/秒
+        _VU = r"(?:m/s|米每秒|米/秒)"
         patterns = [
             # U_\infty = 1.0m/s (LaTeX subscript)
-            r"U\s*_?\\?\s*infty\s*=\s*(\d+\.?\d*)\s*m/s",
+            rf"U\s*_?\\?\s*infty\s*=\s*{_NUM}\s*{_VU}",
             # U_∞ = 1.0m/s (Unicode)
-            r"U\s*_?\s*∞\s*=\s*(\d+\.?\d*)\s*m/s",
+            rf"U\s*_?\s*∞\s*=\s*{_NUM}\s*{_VU}",
             # U∞ = 1.0m/s
-            r"U∞\s*=\s*(\d+\.?\d*)\s*m/s",
+            rf"U∞\s*=\s*{_NUM}\s*{_VU}",
             # U = 1.0m/s (basic)
-            r"[Uu]\s*=\s*(\d+\.?\d*)\s*m/s",
+            rf"[Uu]\s*=\s*{_NUM}\s*{_VU}",
             # "恒定速度 U... = 1.0m/s" or "恒定速度1.0m/s"
-            r"恒定速度\s*(?:[Uu]\S*\s*=?\s*)?(\d+\.?\d*)\s*m/s",
+            rf"恒定速度\s*(?:[Uu]\S*\s*=?\s*)?{_NUM}\s*{_VU}",
             # "恒定速度...1.0m/s"
-            r"恒[定速]*\s*速度\s*[=为是]?\s*(\d+\.?\d*)\s*m/s",
-            # 来流...速度...1.0m/s
-            r"来流.*?速度\s*[=为是]?\s*(\d+\.?\d*)\s*m/s",
-            r"来流[速度]*\s*[=为是]?\s*(\d+\.?\d*)\s*m/s?",
-            # 入口速度
-            r"入口[速度]*\s*[=为是]?\s*(\d+\.?\d*)\s*m/s?",
+            rf"恒[定速]*\s*速度\s*[=为是]?\s*{_NUM}\s*{_VU}",
+            # 来流...速度...1.0m/s (with optional "保持" between keyword and number)
+            rf"来流.*?速度\s*(?:保持|设为|设置为|为|是|=)?\s*{_NUM}\s*{_VU}",
+            rf"来流[速度]*\s*(?:保持|设为|为|是|=)?\s*{_NUM}\s*{_VU}",
+            # 入口速度 (with optional "保持")
+            rf"入口[速度]*\s*(?:保持|设为|设置为|为|是|=)?\s*{_NUM}\s*{_VU}",
             # Velocity = 1.0 (with = sign)
-            r"[Vv]elocity\s*=\s*(\d+\.?\d*)\s*m/s?",
+            rf"[Vv]elocity\s*=\s*{_NUM}\s*{_VU}",
             # "inlet velocity 1.0m/s" or "velocity 1.0m/s" (without = sign)
-            r"inlet\s*velocity\s*(\d+\.?\d*)\s*m/s",
-            r"velocity\s+(\d+\.?\d*)\s*m/s",
+            rf"inlet\s*velocity\s*{_NUM}\s*{_VU}",
+            rf"velocity\s+{_NUM}\s*{_VU}",
             # "以1 m/s流入" / "以2 m/s恒速流入"
-            r"以\s*(\d+\.?\d*)\s*m/s",
+            rf"以\s*{_NUM}\s*{_VU}",
             # "1 m/s恒速流入" / "1 m/s流入"
-            r"(\d+\.?\d*)\s*m/s\s*(?:恒速|流入)",
+            rf"{_NUM}\s*{_VU}\s*(?:恒速|流入)",
             # "v=2+..." formulas — extract the mean velocity (first number after =)
-            r"[Vv]\s*=\s*(\d+\.?\d*)",
-            # Generic: any number followed by m/s near "流" keyword
-            r"流[动入]?\s*(?:以|速度|速)?\s*[=为是]?\s*(\d+\.?\d*)\s*m/s",
+            rf"[Vv]\s*=\s*{_NUM}",
+            # Generic: any number followed by velocity unit near "流" keyword
+            rf"流[动入]?\s*(?:以|速度|速)?\s*(?:保持|设为|为|是|=)?\s*{_NUM}\s*{_VU}",
+            # Bare number + velocity unit (last resort, e.g. "1米每秒")
+            rf"{_NUM}\s*{_VU}",
         ]
         for p in patterns:
             m = re.search(p, text)
@@ -1278,11 +1555,13 @@ class CylinderFlow2DV1Pipeline:
 
     def _extract_density(self, text: str) -> float | None:
         """Extract fluid density: 密度1.225, density=1.225, ρ=1.225."""
+        text = self._preprocess_chinese_numbers(text)
+        _NUM = self._NUM_PATTERN
         patterns = [
-            r"密度\s*[=为是]?\s*(\d+\.?\d*)\s*kg/m3?",
-            r"[Dd]ensity\s*=\s*(\d+\.?\d*)\s*kg/m3?",
-            r"ρ\s*=\s*(\d+\.?\d*)\s*kg/m3?",
-            r"密度\s*[=为是]?\s*(\d+\.?\d*)",
+            rf"密度\s*[=为是]?\s*{_NUM}\s*kg/m3?",
+            rf"[Dd]ensity\s*=\s*{_NUM}\s*kg/m3?",
+            rf"ρ\s*=\s*{_NUM}\s*kg/m3?",
+            rf"密度\s*[=为是]?\s*{_NUM}",
         ]
         for p in patterns:
             m = re.search(p, text)
@@ -1291,14 +1570,20 @@ class CylinderFlow2DV1Pipeline:
         return None
 
     def _extract_viscosity(self, text: str) -> float | None:
-        """Extract kinematic viscosity: 运动粘度1.5e-5, viscosity=1.5e-5, ν=1.5e-5."""
+        """Extract kinematic viscosity: 运动粘度/黏度1.5e-5, viscosity=1.5e-5, ν=1.5e-5."""
+        text = self._preprocess_chinese_numbers(text)
+        _NUM = self._NUM_PATTERN
+        _VISC_UNIT = r"(?:平方米每秒|m2/s|m\^2/s|m²/s|s\b)?"
         patterns = [
-            r"运动粘度\s*[=为是]?\s*(\d+\.?\d*[eE][-+]?\d+)\s*m2/s?",
-            r"运动粘度\s*[=为是]?\s*(\d+\.?\d*[eE][-+]?\d+)",
-            r"[Vv]iscosity\s*=\s*(\d+\.?\d*[eE][-+]?\d+)\s*m2/s?",
-            r"ν\s*=\s*(\d+\.?\d*[eE][-+]?\d+)\s*m2/s?",
-            r"运动粘度\s*[=为是]?\s*(\d+\.?\d*)\s*m2/s?",
-            r"运动粘度\s*[=为是]?\s*(\d+\.\d+)\s*m",
+            # Support both 粘度 and 黏度
+            rf"运动[粘黏]度\s*[=为是]?\s*{_NUM}\s*{_VISC_UNIT}",
+            rf"运动[粘黏]度\s*[=为是]?\s*{_NUM}",
+            rf"[Vv]iscosity\s*=\s*{_NUM}\s*{_VISC_UNIT}",
+            rf"ν\s*=\s*{_NUM}\s*{_VISC_UNIT}",
+            rf"运动[粘黏]度\s*[=为是]?\s*{_NUM}\s*{_VISC_UNIT}",
+            # Also support bare "1e-5 m²/s" without keyword
+            rf"(?<![a-zA-Z\d]){_NUM}\s*(?:平方米每秒|m2/s|m\^2/s|m²/s)",
+            rf"运动[粘黏]度\s*[=为是]?\s*{_NUM}\s*m",
         ]
         for p in patterns:
             m = re.search(p, text)
@@ -1347,14 +1632,15 @@ class CylinderFlow2DV1Pipeline:
 
         result: dict[str, Any] = {}
 
-        # Extract bump height: 凸起高0.3, 凸起高度0.3, 高0.05m
+        # Extract bump height: 凸起高0.3, 凸起高度0.3, 高0.05m, 高度0.1m
         h_patterns = [
-            r"凸起高\s*(\d+\.?\d*)\s*m?",
             r"凸起高度\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
-            r"凸起.*?高\s*(\d+\.?\d*)\s*m?",
+            r"凸起高\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
+            r"高度\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
+            r"凸起.*?高\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
             # "高 0.05 m" (generic height near obstacle keyword)
-            r"(?:障碍|凸起|贴附).*?高\s*(\d+\.?\d*)\s*m?",
-            r"高\s*(\d+\.?\d*)\s*m?(?:.*?(?:障碍|凸起|宽))",
+            r"(?:障碍|凸起|贴附).*?高\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
+            r"高\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?(?:.*?(?:障碍|凸起|宽))",
             r"bump.*?height\s*[=]?\s*(\d+\.?\d*)\s*m?",
         ]
         for p in h_patterns:
@@ -1363,14 +1649,15 @@ class CylinderFlow2DV1Pipeline:
                 result["height"] = float(m.group(1))
                 break
 
-        # Extract bump width: 凸起宽1, 凸起宽度1, 宽0.1m
+        # Extract bump width: 凸起宽1, 凸起宽度1, 宽0.1m, 宽度0.5m
         w_patterns = [
-            r"凸起宽\s*(\d+\.?\d*)\s*m?",
             r"凸起宽度\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
-            r"凸起.*?宽\s*(\d+\.?\d*)\s*m?",
+            r"凸起宽\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
+            r"宽度\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
+            r"凸起.*?宽\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
             # "宽 0.1 m" (generic width near obstacle keyword)
-            r"(?:障碍|凸起|贴附).*?宽\s*(\d+\.?\d*)\s*m?",
-            r"宽\s*(\d+\.?\d*)\s*m?(?:.*?(?:障碍|凸起))",
+            r"(?:障碍|凸起|贴附).*?宽\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?",
+            r"宽\s*度?\s*[=为是]?\s*(\d+\.?\d*)\s*m?(?:.*?(?:障碍|凸起))",
             r"bump.*?width\s*[=]?\s*(\d+\.?\d*)\s*m?",
         ]
         for p in w_patterns:
@@ -1656,14 +1943,100 @@ class CylinderFlow2DV1Pipeline:
 
         return result if result else None
 
+    def _extract_polygon(self, text: str) -> dict[str, Any] | None:
+        """Extract custom polygon obstacle from text.
+
+        Detects: 多边形, 自定义多边形, polygon, custom polygon, N边形
+        Extracts: vertices (list of [x, y]), center_x, center_y
+
+        Supports vertex lists specified as:
+          - "顶点: (0,0), (1,0), (1,1), (0,1)"
+          - "vertices: [(0,0), (1,0), (1,1), (0,1)]"
+          - "N边形" where N >= 5 (triangles/quadrilaterals have dedicated extractors)
+        """
+        text_lower = text.lower()
+        polygon_keywords = [
+            "多边形", "自定义多边形", "polygon", "custom polygon",
+        ]
+        poly_kw_found = False
+        for kw in polygon_keywords:
+            if kw.lower() in text_lower:
+                poly_kw_found = True
+                break
+
+        # Also detect "N边形" patterns (五边形, 六边形, etc.) for N >= 5
+        n_gon_match = re.search(r'([五六七八九十\d]+)边形', text)
+        if n_gon_match:
+            try:
+                cn_map = {"五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+                n_str = n_gon_match.group(1)
+                n_val = cn_map.get(n_str, int(n_str) if n_str.isdigit() else None)
+                if n_val is not None and n_val >= 5:
+                    poly_kw_found = True
+            except (ValueError, KeyError):
+                pass
+
+        if not poly_kw_found:
+            return None
+
+        result: dict[str, Any] = {}
+
+        # Extract vertices from patterns like:
+        #   (0, 0), (1, 0), (1, 1), (0, 1)
+        #   [(0,0), (1,0), (1,1), (0,1)]
+        #   顶点: (0,0) (1,0) (1,1) (0,1)
+        vertex_pattern = r'\(\s*(-?\d+\.?\d*)\s*[,\s]\s*(-?\d+\.?\d*)\s*\)'
+        vertices_raw = re.findall(vertex_pattern, text)
+
+        # Filter: need at least 3 vertices to form a polygon
+        # But avoid matching coordinates that are clearly domain dimensions
+        if len(vertices_raw) >= 3:
+            result["vertices"] = [[float(x), float(y)] for x, y in vertices_raw]
+
+        # Extract center_x
+        cx_patterns = [
+            r"多边形.*?[xX]\s*[=为在]\s*(\d+\.?\d*)\s*m?",
+            r"多边形.*?位于.*?[xX]\s*[=为]?\s*(\d+\.?\d*)\s*m?",
+            r"polygon.*?[xX]\s*[=:]?\s*(\d+\.?\d*)\s*m?",
+            r"多边形.*?中心.*?[xX]\s*[=为]?\s*(\d+\.?\d*)\s*m?",
+        ]
+        for p in cx_patterns:
+            m = re.search(p, text, re.IGNORECASE)
+            if m:
+                result["center_x"] = float(m.group(1))
+                break
+
+        # Extract center_y
+        cy_patterns = [
+            r"多边形.*?[yY]\s*[=为在]\s*(\d+\.?\d*)\s*m?",
+            r"多边形.*?中心.*?[yY]\s*[=为]?\s*(\d+\.?\d*)\s*m?",
+            r"polygon.*?[yY]\s*[=:]?\s*(\d+\.?\d*)\s*m?",
+        ]
+        for p in cy_patterns:
+            m = re.search(p, text, re.IGNORECASE)
+            if m:
+                result["center_y"] = float(m.group(1))
+                break
+
+        return result if result else None
+
     def _extract_end_time(self, text: str) -> float | None:
-        """Extract simulation end time: 仿真时间2秒, end_time=2, simulation time 2s."""
+        """Extract simulation end time: 仿真时间2秒, 仿真时间设为15秒, 计算15秒, end_time=2."""
+        text = self._preprocess_chinese_numbers(text)
+        _NUM = self._NUM_PATTERN
         patterns = [
-            r"仿真时间\s*[=为是]?\s*(\d+\.?\d*)\s*秒?",
-            r"仿真时间\s*[=为是]?\s*(\d+\.?\d*)\s*s\b",
-            r"模拟时间\s*[=为是]?\s*(\d+\.?\d*)\s*秒?",
-            r"[Ee]nd[_\s]*[Tt]ime\s*=\s*(\d+\.?\d*)",
-            r"计算时间\s*[=为是]?\s*(\d+\.?\d*)\s*秒?",
+            # With "时间" keyword (highest specificity)
+            rf"仿真时间\s*(?:设为|设置为|为|是|=)?\s*{_NUM}\s*秒?",
+            rf"仿真时间\s*(?:设为|设置为|为|是|=)?\s*{_NUM}\s*s\b",
+            rf"模拟时间\s*(?:设为|设置为|为|是|=)?\s*{_NUM}\s*秒?",
+            rf"计算时间\s*(?:设为|设置为|为|是|=)?\s*{_NUM}\s*秒?",
+            rf"运行时间\s*(?:设为|设置为|为|是|=)?\s*{_NUM}\s*秒?",
+            rf"[Ee]nd[_\s]*[Tt]ime\s*=\s*{_NUM}",
+            # Without "时间" keyword: "计算15秒", "仿真15秒", "模拟15秒", "运行15秒"
+            rf"(?:仿真|模拟|计算|运行)\s*{_NUM}\s*秒",
+            rf"(?:仿真|模拟|计算|运行)\s*{_NUM}\s*s\b",
+            # "仿真到15秒", "计算到15秒"
+            rf"(?:仿真|模拟|计算|运行)到\s*{_NUM}\s*秒?",
         ]
         for p in patterns:
             m = re.search(p, text)
@@ -1672,12 +2045,13 @@ class CylinderFlow2DV1Pipeline:
         return None
 
     def _extract_reynolds(self, text: str) -> float | None:
-        """Extract Reynolds number: Re=200, Re = 200, 雷诺数200, Reynolds 200."""
+        """Extract Reynolds number: Re=200, Re = 200, 雷诺数200, Reynolds 200, Re保持200."""
+        _NUM = self._NUM_PATTERN
         patterns = [
-            r"(?<![a-zA-Z])[Rr]e\s*=\s*(\d+\.?\d*)",
-            r"雷诺数\s*[=为是]?\s*(\d+\.?\d*)",
-            r"[Rr]eynolds\s*(?:number)?\s*[=:]?\s*(\d+\.?\d*)",
-            r"(?<![a-zA-Z])[Rr]e\s+(\d+\.?\d*)",  # "Re 200" with space
+            rf"(?<![a-zA-Z])[Rr]e\s*(?:保持|设为|设置为|为|是|=)?\s*{_NUM}",
+            rf"雷诺数\s*(?:保持|设为|设置为|为|是|=)?\s*{_NUM}",
+            rf"[Rr]eynolds\s*(?:number)?\s*(?:保持|设为|设置为|为|是|=|:)?\s*{_NUM}",
+            rf"(?<![a-zA-Z])[Rr]e\s+{_NUM}",  # "Re 200" with space
         ]
         for p in patterns:
             m = re.search(p, text)

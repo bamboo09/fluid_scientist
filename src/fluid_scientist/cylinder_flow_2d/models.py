@@ -340,6 +340,56 @@ class TriangleSpec(BaseModel):
     source_text: str | None = None
 
 
+class TrapezoidSpec(BaseModel):
+    """Trapezoid obstacle configuration with provenance.
+
+    Semantic type: trapezoid_2d
+    Solver representation: polygon (4-vertex polygon via snappyHexMesh STL)
+
+    Uses generic parametric_polygon representation:
+    top_width + bottom_width + height → 4 vertices.
+    No dedicated TrapezoidCompiler — compiled via PolygonGeometryCompiler.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    top_width_m: ProvenanceField = Field(default_factory=ProvenanceField)
+    bottom_width_m: ProvenanceField = Field(default_factory=ProvenanceField)
+    height_m: ProvenanceField = Field(default_factory=ProvenanceField)
+    center_x_m: ProvenanceField = Field(default_factory=ProvenanceField)
+    center_y_m: ProvenanceField = Field(default_factory=ProvenanceField)
+    apex_direction: str = "up"  # wide base at bottom, narrow top
+    relation_to_cylinder: str | None = None
+    attached_boundary: str | None = None
+    semantic_type: str = "trapezoid_2d"
+    solver_representation: str = "parametric_polygon"
+    source_text: str | None = None
+
+
+class PolygonSpec(BaseModel):
+    """Custom polygon obstacle configuration with provenance.
+
+    Semantic type: custom_polygon_2d
+    Solver representation: polygon_stl (arbitrary polygon via snappyHexMesh STL)
+
+    Stores an ordered list of vertices ``[[x0, y0], [x1, y1], ...]`` that
+    define the polygon boundary in counter-clockwise order.  The polygon is
+    extruded in z by the domain thickness to create a 2D prism for
+    snappyHexMesh.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    vertices: list[list[float]] = Field(default_factory=list)
+    center_x_m: ProvenanceField = Field(default_factory=ProvenanceField)
+    center_y_m: ProvenanceField = Field(default_factory=ProvenanceField)
+    semantic_type: str = "custom_polygon_2d"
+    solver_representation: str = "polygon_stl"
+    source_text: str | None = None
+
+
 class BottomProfileSpec(BaseModel):
     """Bottom profile configuration — optional."""
 
@@ -529,6 +579,8 @@ class CylinderFlow2DExperimentSpecV1(BaseModel):
     cylinder: CylinderSpec = Field(default_factory=CylinderSpec)
     rectangle: RectangleSpec = Field(default_factory=RectangleSpec)
     triangle: TriangleSpec = Field(default_factory=TriangleSpec)
+    trapezoid: TrapezoidSpec = Field(default_factory=TrapezoidSpec)
+    polygon: PolygonSpec = Field(default_factory=PolygonSpec)
     bottom_profile: BottomProfileSpec = Field(default_factory=BottomProfileSpec)
     flow_topology: dict[str, Any] = Field(default_factory=lambda: {"mode": None})
     boundaries: BoundaryConfig = Field(default_factory=BoundaryConfig)
@@ -577,6 +629,14 @@ class CylinderFlow2DExperimentSpecV1(BaseModel):
     @property
     def has_triangle(self) -> bool:
         return self.triangle.enabled and self.triangle.base_width_m.is_resolved()
+
+    @property
+    def has_trapezoid(self) -> bool:
+        return self.trapezoid.enabled and self.trapezoid.bottom_width_m.is_resolved()
+
+    @property
+    def has_polygon(self) -> bool:
+        return self.polygon.enabled and len(self.polygon.vertices) >= 3
 
     @property
     def has_bottom_profile(self) -> bool:
@@ -688,6 +748,57 @@ class CylinderFlow2DExperimentSpecV1(BaseModel):
             "source_radius": self.cylinder.radius_m.source.value,
             "source_diameter": self.cylinder.diameter_m.source.value,
         }
+
+        # Triangle obstacle
+        if self.triangle.enabled:
+            display["三角障碍物"] = {
+                "type": "三角形",
+                "base_width_m": self.triangle.base_width_m.value,
+                "height_m": self.triangle.height_m.value,
+                "center_x_m": self.triangle.center_x_m.value,
+                "source_base_width": self.triangle.base_width_m.source.value,
+                "source_height": self.triangle.height_m.source.value,
+                "relation_to_cylinder": self.triangle.relation_to_cylinder,
+            }
+
+        # Rectangle obstacle
+        if self.rectangle.enabled:
+            display["矩形障碍物"] = {
+                "type": "矩形",
+                "width_m": self.rectangle.width_m.value,
+                "height_m": self.rectangle.height_m.value,
+                "center_x_m": self.rectangle.center_x_m.value,
+                "source_width": self.rectangle.width_m.source.value,
+                "source_height": self.rectangle.height_m.source.value,
+                "relation_to_cylinder": self.rectangle.relation_to_cylinder,
+            }
+
+        # Trapezoid obstacle
+        if self.trapezoid.enabled:
+            display["梯形障碍物"] = {
+                "type": "梯形",
+                "top_width_m": self.trapezoid.top_width_m.value,
+                "bottom_width_m": self.trapezoid.bottom_width_m.value,
+                "height_m": self.trapezoid.height_m.value,
+                "center_x_m": self.trapezoid.center_x_m.value,
+                "source_top_width": self.trapezoid.top_width_m.source.value,
+                "source_bottom_width": self.trapezoid.bottom_width_m.source.value,
+                "source_height": self.trapezoid.height_m.source.value,
+                "relation_to_cylinder": self.trapezoid.relation_to_cylinder,
+                "solver_representation": self.trapezoid.solver_representation,
+            }
+
+        # Custom polygon obstacle
+        if self.polygon.enabled:
+            display["多边形障碍物"] = {
+                "type": "自定义多边形",
+                "vertices": self.polygon.vertices,
+                "vertex_count": len(self.polygon.vertices),
+                "center_x_m": self.polygon.center_x_m.value,
+                "center_y_m": self.polygon.center_y_m.value,
+                "semantic_type": self.polygon.semantic_type,
+                "solver_representation": self.polygon.solver_representation,
+            }
 
         # Bottom profile
         if self.has_bottom_profile:
@@ -821,6 +932,7 @@ __all__ = [
     "ModelPolicy",
     "ObservableSpec",
     "ObservableType",
+    "PolygonSpec",
     "PressureGradientUnit",
     "ProvenanceField",
     "SemanticBoundaryType",
@@ -828,5 +940,6 @@ __all__ = [
     "SpatialType",
     "TemporalType",
     "TimeMode",
+    "TrapezoidSpec",
     "TriangleSpec",
 ]

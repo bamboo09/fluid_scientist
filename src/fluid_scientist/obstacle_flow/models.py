@@ -333,6 +333,56 @@ class TriangleSpec(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Geometry: Trapezoid
+# ---------------------------------------------------------------------------
+
+
+class TrapezoidSpec(BaseModel):
+    """Trapezoid obstacle configuration (snappyHexMesh + STL route).
+
+    Uses parametric_polygon representation: top_width + bottom_width + height.
+    Wide base (bottom_width) sits on the wall, narrow top (top_width) faces upstream.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    trapezoid_id: str = "trapezoid_1"
+    center_x: float = 0.0  # center of base
+    center_y: float = 0.0  # center of base (usually 0 for wall-attached)
+    top_width: float = 0.05  # 上底 (narrow top)
+    bottom_width: float = 0.1  # 下底 (wide base)
+    height: float = 0.05
+    thickness: float = 1.0
+
+    provenance: FieldProvenance = Field(default_factory=FieldProvenance)
+
+
+# ---------------------------------------------------------------------------
+# Geometry: Custom Polygon
+# ---------------------------------------------------------------------------
+
+
+class PolygonSpec(BaseModel):
+    """Custom polygon obstacle configuration (snappyHexMesh + STL route).
+
+    Stores an ordered list of 2D vertices that define the polygon boundary.
+    The polygon is extruded in z by *thickness* to create a 2D prism for
+    snappyHexMesh.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    polygon_id: str = "polygon_1"
+    vertices: list[list[float]] = Field(default_factory=list)
+    center_x: float = 0.0
+    center_y: float = 0.0
+    thickness: float = 1.0
+    semantic_type: str = "custom_polygon_2d"
+
+    provenance: FieldProvenance = Field(default_factory=FieldProvenance)
+
+
+# ---------------------------------------------------------------------------
 # Boundaries
 # ---------------------------------------------------------------------------
 
@@ -586,6 +636,8 @@ class ObstacleFlowExperimentSpecV1(BaseModel):
     cylinders: list[CylinderSpec] = Field(default_factory=list)
     rectangles: list[RectangleSpec] = Field(default_factory=list)
     triangles: list[TriangleSpec] = Field(default_factory=list)
+    trapezoids: list[TrapezoidSpec] = Field(default_factory=list)
+    polygons: list[PolygonSpec] = Field(default_factory=list)
     flow_definition: FlowDefinitionSpec
     boundaries: BoundaryConfig
     inlet_profile: InletProfileSpec = Field(default_factory=InletProfileSpec)
@@ -648,6 +700,14 @@ class ObstacleFlowExperimentSpecV1(BaseModel):
     @property
     def has_triangle(self) -> bool:
         return len(self.triangles) > 0
+
+    @property
+    def has_trapezoid(self) -> bool:
+        return len(self.trapezoids) > 0
+
+    @property
+    def has_polygon(self) -> bool:
+        return len(self.polygons) > 0 and len(self.polygons[0].vertices) >= 3
 
     @property
     def has_bump(self) -> bool:
@@ -942,4 +1002,5 @@ __all__ = [
     "TimeMode",
     "TriangleSpec",
     "TurbulenceModel",
+    "PolygonSpec",
 ]

@@ -288,11 +288,19 @@ class LLMCandidateExtractor:
         # Scene
         scene = llm_parsed.get("scene", {})
         if scene.get("dimension"):
+            # Robust confidence parsing: LLM may return "0.0-1.0" or other
+            # non-numeric strings from the prompt's range notation.
+            _raw_conf = scene.get("confidence", 0.8)
+            try:
+                _conf = float(_raw_conf)
+            except (ValueError, TypeError):
+                _conf = 0.8
+            _conf = max(0.0, min(1.0, _conf))
             candidates.append(ExtractionCandidate(
                 field_path="scene.dimension",
                 value=scene["dimension"],
                 source=CandidateSource.LLM,
-                confidence=float(scene.get("confidence", 0.8)),
+                confidence=_conf,
             ))
 
         # Geometry
@@ -491,10 +499,18 @@ class ConflictResolver:
 
         llm_by_path: dict[str, list[ExtractionCandidate]] = {}
         for c in llm_candidates:
-            # Normalize geometry object paths to obstacle.type for comparison
+            # Normalize geometry object paths to obstacle.type for comparison.
+            # BUT: skip cylinder objects — the cylinder is the primary obstacle
+            # handled separately by the pipeline. Only non-cylinder objects
+            # (triangle, rectangle, etc.) should map to obstacle.type, since
+            # obstacle.type refers to the bottom-profile secondary obstacle.
             path = c.field_path
             if path.startswith("geometry.objects."):
-                # Map to obstacle.type for conflict detection
+                obj_type = _normalize_geometry_type(c.value)
+                if obj_type == "cylinder":
+                    # Don't map cylinder to obstacle.type — it's the primary obstacle
+                    continue
+                # Map non-cylinder objects to obstacle.type for conflict detection
                 path = "obstacle.type"
             llm_by_path.setdefault(path, []).append(c)
 
@@ -813,3 +829,131 @@ class ConflictResolver:
         synonyms = GEOMETRY_SYNONYMS.get(geom_type, [])
         text_lower = text.lower()
         return any(kw.lower() in text_lower for kw in synonyms)
+
+
+# ---------------------------------------------------------------------------
+# 2D / 3D 维度冲突检测
+# ---------------------------------------------------------------------------
+#
+# 当用户在同一个请求中同时提到"二维/2D"与"三维/3D/等值面/Q准则"时，仿真
+# 维度自相矛盾，属于阻塞性冲突，需要用户澄清。这类冲突与 regex/LLM 候选
+# 之间的字段冲突不同——它源自用户文本本身的语义矛盾，因此单独成类。
+
+# 二维指示词（大小写不敏感匹配）
+_DIMENSION_2D_INDICATORS: list[str] = [
+    "二维", "2维", "2d", "2d ", "2-d", "two-dimensional",
+]
+
+# 三维指示词：既包含显式维度词，也包含本质上属于 3D 的后处理概念
+# （等值面 iso-surface、Q准则 Q-criterion 通常用于三维涡结构识别）。
+_DIMENSION_3D_INDICATORS: list[str] = [
+    "三维", "3维", "3d", "3-d", "three-dimensional",
+    "等值面", "iso-surface", "isosurface",
+    "q准则", "q-criterion", "q criterion", "q-criteria",
+]
+
+
+def _find_indicator_evidence(text: str, indicators: list[str]) -> tuple[str, list[str]]:
+    """在 *text* 中查找命中的指示词，返回 (evidence_snippet, matched_indicators)。
+
+    evidence_snippet 为首个命中词及其上下文，便于在 blocking issue 中向用户
+    展示冲突来源。
+    """
+    text_lower = text.lower()
+    matched: list[str] = []
+    first_snippet = ""
+    for kw in indicators:
+        if kw.lower() in text_lower:
+            matched.append(kw)
+            if not first_snippet:
+                idx = text_lower.find(kw.lower())
+                start = max(0, idx - 8)
+                end = min(len(text), idx + len(kw) + 16)
+                first_snippet = text[start:end]
+    return first_snippet, matched
+
+
+class DimensionConflictDetector:
+    """检测用户文本中同时出现 2D 与 3D 维度指示词的冲突。
+
+    用法::
+
+        detector = DimensionConflictDetector()
+        issue = detector.detect(user_text)
+        if issue is not None:
+            # issue["code"] == "DIMENSION_CONFLICT_2D_3D"
+            ...
+
+    检测到冲突时返回一个 blocking issue dict，其中 ``code`` 固定为
+    ``"DIMENSION_CONFLICT_2D_3D"``；未检测到冲突返回 ``None``。
+    """
+
+    #: 维度冲突的固定 issue code。
+    CONFLICT_CODE = "DIMENSION_CONFLICT_2D_3D"
+
+    def __init__(
+        self,
+        indicators_2d: list[str] | None = None,
+        indicators_3d: list[str] | None = None,
+    ) -> None:
+        self._indicators_2d = list(indicators_2d or _DIMENSION_2D_INDICATORS)
+        self._indicators_3d = list(indicators_3d or _DIMENSION_3D_INDICATORS)
+
+    def detect(self, user_text: str) -> dict[str, Any] | None:
+        """检测 *user_text* 是否同时包含 2D 与 3D 维度指示词。
+
+        Returns
+        -------
+        若存在冲突，返回 blocking issue dict::
+
+            {
+                "code": "DIMENSION_CONFLICT_2D_3D",
+                "message": "...",
+                "category": "DIMENSION_CONFLICT",
+                "severity": "blocking",
+                "conflict_type": "dimension_conflict",
+                "2d_evidence": "...",
+                "3d_evidence": "...",
+                "2d_indicators": ["二维", ...],
+                "3d_indicators": ["三维", "等值面", ...],
+                "resolution": None,
+            }
+
+        否则返回 ``None``。
+        """
+        if not user_text:
+            return None
+
+        evidence_2d, matched_2d = _find_indicator_evidence(
+            user_text, self._indicators_2d
+        )
+        evidence_3d, matched_3d = _find_indicator_evidence(
+            user_text, self._indicators_3d
+        )
+
+        if not matched_2d or not matched_3d:
+            return None
+
+        return {
+            "code": self.CONFLICT_CODE,
+            "message": (
+                "检测到维度冲突：用户同时提到了二维(2D)与三维(3D)相关概念"
+                "（如等值面/Q准则）。请明确仿真的空间维度（2D 或 3D）。"
+            ),
+            "category": "DIMENSION_CONFLICT",
+            "severity": ConflictSeverity.BLOCKING.value,
+            "conflict_type": ConflictType.DIMENSION_CONFLICT.value,
+            "2d_evidence": evidence_2d,
+            "3d_evidence": evidence_3d,
+            "2d_indicators": matched_2d,
+            "3d_indicators": matched_3d,
+            "resolution": None,
+        }
+
+
+def detect_dimension_conflict(user_text: str) -> dict[str, Any] | None:
+    """模块级便捷入口：检测 2D/3D 维度冲突。
+
+    等价于 ``DimensionConflictDetector().detect(user_text)``。
+    """
+    return DimensionConflictDetector().detect(user_text)

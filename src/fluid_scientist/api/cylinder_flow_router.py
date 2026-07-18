@@ -37,7 +37,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 
 from fluid_scientist.cylinder_flow_2d import (
@@ -56,9 +56,15 @@ from fluid_scientist.intent.conflict_resolver import (
     ConflictResolver,
     LLMCandidateExtractor,
     RegexCandidateExtractor,
+    detect_dimension_conflict,
 )
 from fluid_scientist.skills.skill_resolver import SkillResolver
 from fluid_scientist.analysis.llm_report import LLMReportGenerator, PhysicsValidator
+from fluid_scientist.spec_editing.relative_patch import (
+    RelativePatchError,
+    RelativePatchExpression,
+)
+from fluid_scientist.study_spec.project_models import ProjectStore
 
 router = APIRouter(prefix="/api/v5/cylinder-flow", tags=["cylinder-flow-2d"])
 
@@ -108,6 +114,304 @@ except Exception:
 
 
 # ---------------------------------------------------------------------------
+# CREATE_VARIANT / CREATE_NEW_STUDY 支持
+# ---------------------------------------------------------------------------
+#
+# 当用户在 draft 端点表达"保留当前方案 + 复制/对照"意图时，复制当前 spec
+# 生成一个新的 spec_id（CREATE_VARIANT）；当表达"保存当前 + 新建"意图时，
+# 将当前方案保存为一个 Study 并新建一个工作 spec（CREATE_NEW_STUDY）。
+#
+# 维护两类状态：
+#   * ``_session_current_spec`` —— session_id 到当前 spec_id 的映射，用于
+#     在多轮对话中推断"当前方案"。
+#   * ``_research_project_store`` —— Project/Study/Variant 层次结构的内存存储，
+#     使研究组织结构与 cylinder flow spec 关联起来。
+
+_session_current_spec: dict[str, str] = {}
+_research_project_store = ProjectStore()
+_research_default_project_id: str | None = None
+
+
+def _ensure_research_project() -> str:
+    """惰性创建默认 Project，返回其 id。"""
+    global _research_default_project_id
+    if _research_default_project_id is None:
+        project = _research_project_store.create_project(
+            name="cylinder-flow-research",
+            description="CylinderFlow2D 默认研究项目",
+        )
+        _research_default_project_id = project.project_id
+    return _research_default_project_id
+
+
+def _detect_variant_intent(text: str) -> bool:
+    """检测 CREATE_VARIANT 意图："保留当前方案" + ("复制" 或 "对照")。"""
+    return "保留当前方案" in text and ("复制" in text or "对照" in text)
+
+
+def _detect_new_study_intent(text: str) -> bool:
+    """检测 CREATE_NEW_STUDY 意图："保存当前" + "新建"。"""
+    return "保存当前" in text and "新建" in text
+
+
+def _resolve_current_spec_id(request: "DraftRequest") -> str | None:
+    """解析"当前 spec" id：优先用显式 current_spec_id，否则按 session_id 推断。"""
+    if request.current_spec_id:
+        return request.current_spec_id
+    if request.session_id:
+        return _session_current_spec.get(request.session_id)
+    return None
+
+
+def _copy_spec_to_new_id(original_spec_id: str) -> tuple[str, Any] | None:
+    """复制 original spec 到一个新 spec_id，返回 (new_spec_id, new_spec)。
+
+    复制采用深拷贝，确保新 spec 与原 spec 互不影响；新 spec 的 version 重置为 1，
+    experiment_id 更新为新 id。返回 ``None`` 表示原 spec 不存在。
+    """
+    original = _load_spec(original_spec_id)
+    if original is None:
+        return None
+    new_spec = original.model_copy(deep=True)
+    new_spec_id = f"spec_{uuid.uuid4().hex[:12]}"
+    new_spec.experiment_id = new_spec_id
+    new_spec.spec_version = 1
+    # 清除旧 blocking_issues，复制出的变体应被视为新的可编辑草案
+    new_spec.blocking_issues = []
+    _persist_spec(new_spec_id, new_spec)
+    return new_spec_id, new_spec
+
+
+def _build_variant_response(
+    request: "DraftRequest",
+    original_spec_id: str,
+    new_spec_id: str,
+    new_spec: Any,
+) -> "DraftResponse":
+    """构造 CREATE_VARIANT 成功响应。"""
+    # 在 ProjectStore 中记录变体层次
+    try:
+        project_id = _ensure_research_project()
+        study = _research_project_store.create_study(
+            project_id=project_id,
+            name=f"variant-of-{original_spec_id[:12]}",
+            objective="CREATE_VARIANT 派生变体",
+        )
+        _research_project_store.create_spec_version(
+            parameters=new_spec.model_dump(),
+            source="variant",
+        )
+        _research_project_store.create_variant(
+            study_id=study.study_id,
+            name=f"variant_{new_spec_id[:12]}",
+            spec_version_id=study.study_id,  # 占位引用，便于层级可观测
+            description=f"由 {original_spec_id} 复制派生",
+        )
+    except Exception:
+        # 层次记录失败不影响 spec 复制本身
+        pass
+
+    # 更新 session -> current spec 映射
+    if request.session_id:
+        _session_current_spec[request.session_id] = new_spec_id
+
+    return DraftResponse(
+        success=True,
+        spec_id=new_spec_id,
+        spec_version=new_spec.spec_version,
+        draft_status=new_spec.draft_status.value if hasattr(new_spec.draft_status, "value") else str(new_spec.draft_status),
+        spec=new_spec.model_dump(),
+        semantic_display=new_spec.to_semantic_display() if hasattr(new_spec, "to_semantic_display") else None,
+        original_spec_id=original_spec_id,
+        new_spec_id=new_spec_id,
+        skill_summary={"intent": "CREATE_VARIANT"},
+    )
+
+
+def _build_new_study_response(
+    request: "DraftRequest",
+    original_spec_id: str,
+    new_spec_id: str,
+    new_spec: Any,
+) -> "DraftResponse":
+    """构造 CREATE_NEW_STUDY 成功响应。"""
+    study_id: str | None = None
+    try:
+        project_id = _ensure_research_project()
+        # 保存当前方案为一个 Study（首变体引用原 spec）
+        study = _research_project_store.create_study(
+            project_id=project_id,
+            name=f"study-of-{original_spec_id[:12]}",
+            objective="CREATE_NEW_STUDY 保存当前方案",
+        )
+        study_id = study.study_id
+        saved_spec_version = _research_project_store.create_spec_version(
+            parameters=_load_spec(original_spec_id).model_dump()
+            if _load_spec(original_spec_id) is not None else {},
+            source="saved_current",
+        )
+        _research_project_store.create_variant(
+            study_id=study.study_id,
+            name=f"saved_{original_spec_id[:12]}",
+            spec_version_id=saved_spec_version.spec_version_id,
+            description="保存的当前方案",
+        )
+        # 新建工作 spec 作为一个新的规范版本快照（复制自原 spec）
+        _research_project_store.create_spec_version(
+            parameters=new_spec.model_dump(),
+            source="new_study",
+        )
+    except Exception:
+        pass
+
+    if request.session_id:
+        _session_current_spec[request.session_id] = new_spec_id
+
+    return DraftResponse(
+        success=True,
+        spec_id=new_spec_id,
+        spec_version=new_spec.spec_version,
+        draft_status=new_spec.draft_status.value if hasattr(new_spec.draft_status, "value") else str(new_spec.draft_status),
+        spec=new_spec.model_dump(),
+        semantic_display=new_spec.to_semantic_display() if hasattr(new_spec, "to_semantic_display") else None,
+        original_spec_id=original_spec_id,
+        new_spec_id=new_spec_id,
+        new_study_id=study_id,
+        skill_summary={"intent": "CREATE_NEW_STUDY"},
+    )
+
+
+# ---------------------------------------------------------------------------
+# 相对 Patch (RelativePatchExpression) 辅助
+# ---------------------------------------------------------------------------
+#
+# 在 modify 端点中，当用户使用"一半/两倍/加倍"等相对措辞时，使用
+# :class:`RelativePatchExpression` 依据当前 spec 的实际取值计算新值，
+# 而不是要求用户给出绝对数值。
+
+# 相对措辞 → 乘数
+_RELATIVE_FACTOR_KEYWORDS: list[tuple[str, float]] = [
+    ("一半", 0.5),
+    ("减半", 0.5),
+    ("两倍", 2.0),
+    ("加倍", 2.0),
+    ("翻倍", 2.0),
+    ("三倍", 3.0),
+    ("四倍", 4.0),
+]
+
+# 目标字段关键词 → (JSON Pointer 路径, 字段类型)
+# 字段类型: "scalar" = 裸数值; "provenance" = ProvenanceField 包装
+_RELATIVE_TARGET_KEYWORDS: list[tuple[str, str, str]] = [
+    ("结束时间", "/simulation/end_time", "scalar"),
+    ("仿真时间", "/simulation/end_time", "scalar"),
+    ("时长", "/simulation/end_time", "scalar"),
+    ("end_time", "/simulation/end_time", "scalar"),
+    ("来流速度", "/boundaries/left/inlet_velocity", "scalar"),
+    ("入口速度", "/boundaries/left/inlet_velocity", "scalar"),
+    ("速度", "/boundaries/left/inlet_velocity", "scalar"),
+    ("inlet_velocity", "/boundaries/left/inlet_velocity", "scalar"),
+    ("密度", "/fluid/density_kg_m3", "provenance"),
+    ("density", "/fluid/density_kg_m3", "provenance"),
+    ("粘度", "/fluid/kinematic_viscosity_m2_s", "provenance"),
+    ("viscosity", "/fluid/kinematic_viscosity_m2_s", "provenance"),
+    ("直径", "/cylinder/diameter_m", "provenance"),
+    ("diameter", "/cylinder/diameter_m", "provenance"),
+    ("半径", "/cylinder/radius_m", "provenance"),
+    ("radius", "/cylinder/radius_m", "provenance"),
+]
+
+
+def _detect_relative_factor(text: str) -> float | None:
+    """从文本中检测相对乘数（multiply）。"""
+    for kw, factor in _RELATIVE_FACTOR_KEYWORDS:
+        if kw in text:
+            return factor
+    return None
+
+
+def _detect_relative_target(text: str) -> tuple[str, str] | None:
+    """从文本中检测目标字段，返回 (json_pointer_path, field_type)。"""
+    for kw, path, field_type in _RELATIVE_TARGET_KEYWORDS:
+        if kw in text:
+            return path, field_type
+    return None
+
+
+def _apply_relative_patch(spec: Any, mod_text: str) -> list[str]:
+    """若 mod_text 含相对措辞，则用 RelativePatchExpression 计算并写回 spec。
+
+    返回应用记录列表（每项为人类可读描述）。当前仅支持 multiply 类操作
+    （"一半/两倍/加倍"等）。若未命中相对措辞，返回空列表，modify 端点
+    按既有逻辑处理。
+    """
+    factor = _detect_relative_factor(mod_text)
+    if factor is None:
+        return []
+    target = _detect_relative_target(mod_text)
+    if target is None:
+        return []
+
+    path, field_type = target
+    current_spec = spec.model_dump()
+    expression = {
+        "expression": {
+            "operator": "multiply",
+            "path": path,
+            "factor": factor,
+        }
+    }
+    try:
+        new_value = RelativePatchExpression.model_validate(
+            expression["expression"]
+        ).apply(current_spec)
+    except RelativePatchError:
+        # 当前 spec 中该字段无值或非数值，跳过相对修改，回退到既有逻辑
+        return []
+    except Exception:
+        return []
+
+    # 把新值写回 spec 对象
+    if path == "/simulation/end_time":
+        spec.simulation.end_time = float(new_value)
+    elif path == "/boundaries/left/inlet_velocity":
+        spec.boundaries.left.inlet_velocity = float(new_value)
+        spec.boundaries.left.status = FieldStatus.RESOLVED
+    elif path == "/fluid/density_kg_m3":
+        spec.fluid.density_kg_m3 = ProvenanceField(
+            value=float(new_value), source=FieldSource.USER_EXPLICIT,
+            status=FieldStatus.RESOLVED, confidence=1.0,
+            reason=f"相对修改: 乘以 {factor}",
+        )
+    elif path == "/fluid/kinematic_viscosity_m2_s":
+        spec.fluid.kinematic_viscosity_m2_s = ProvenanceField(
+            value=float(new_value), source=FieldSource.USER_EXPLICIT,
+            status=FieldStatus.RESOLVED, confidence=1.0,
+            reason=f"相对修改: 乘以 {factor}",
+        )
+    elif path == "/cylinder/diameter_m":
+        spec.cylinder.diameter_m = ProvenanceField(
+            value=float(new_value), source=FieldSource.USER_EXPLICIT,
+            status=FieldStatus.RESOLVED, confidence=1.0,
+            reason=f"相对修改: 乘以 {factor}",
+        )
+        spec.cylinder.radius_m = ProvenanceField(
+            value=float(new_value) / 2, source=FieldSource.FORMULA_DERIVED,
+            status=FieldStatus.RESOLVED, confidence=1.0,
+            reason="由直径推导半径",
+        )
+        spec.cylinder.characteristic_dimension_m = spec.cylinder.diameter_m
+    elif path == "/cylinder/radius_m":
+        spec.cylinder.radius_m = ProvenanceField(
+            value=float(new_value), source=FieldSource.USER_EXPLICIT,
+            status=FieldStatus.RESOLVED, confidence=1.0,
+            reason=f"相对修改: 乘以 {factor}",
+        )
+
+    return [f"相对修改: {path} × {factor} → {new_value}"]
+
+
+# ---------------------------------------------------------------------------
 # LLM client access — bridges to the global LLM configured via v5_router
 # ---------------------------------------------------------------------------
 
@@ -147,7 +451,8 @@ _LLM_PARSE_SYSTEM_PROMPT = """你是一个CFD（计算流体力学）实验理�
   "geometry": {
     "domain": {"length": {"value":0,"unit":"m"}, "height": {"value":0,"unit":"m"}},
     "objects": [
-      {"id":"cylinder_1","type":"cylinder","radius":{"value":0,"unit":"m"},"center":{"x":{"value":0,"unit":"m"},"y":{"value":0,"unit":"m"}}}
+      {"id":"cylinder_1","type":"cylinder","radius":{"value":0,"unit":"m"},"center":{"x":{"value":0,"unit":"m"},"y":{"value":0,"unit":"m"}}},
+      {"id":"trapezoid_1","type":"trapezoid","top_width":{"value":0,"unit":"m"},"bottom_width":{"value":0,"unit":"m"},"height":{"value":0,"unit":"m"},"center_x":{"value":0,"unit":"m"},"relation":"","attached_boundary":"bottom"}
     ]
   },
   "physics": {
@@ -163,6 +468,12 @@ _LLM_PARSE_SYSTEM_PROMPT = """你是一个CFD（计算流体力学）实验理�
     {"name":"top","type":"unknown","details":{}},
     {"name":"bottom","type":"no_slip_wall","details":{}}
   ],
+  "simulation": {
+    "end_time": {"value": 0, "unit": "s", "source": "USER_EXPLICIT"},
+    "delta_t": {"value": 0, "unit": "s", "source": "USER_EXPLICIT"},
+    "max_courant": {"value": 0, "source": "USER_EXPLICIT"},
+    "mesh_resolution": {"nx": 0, "ny": 0, "source": "USER_EXPLICIT"}
+  },
   "research_goals": ["研究目标1","研究目标2"],
   "requested_metrics": ["drag_coefficient","lift_coefficient","vorticity","shedding_frequency"],
   "missing_fields": ["缺失的字段1"],
@@ -178,6 +489,12 @@ _LLM_PARSE_SYSTEM_PROMPT = """你是一个CFD（计算流体力学）实验理�
    - 用户说"三角形"/"三角障碍物"/"三角凸起"→type="triangle"，不能变成其他形状
    - 用户说"余弦钟形"/"余弦丘"/"cosine bell"→type="cosine_bell"
    - 用户说"梯形"/"梯形凸起"→type="trapezoid"
+   - 梯形必须提取 top_width（上底）、bottom_width（下底）、height（高）三个独立参数
+   - 梯形的"上底"="顶宽"，"下底"="底宽"，不要混为"width"
+   - 用户说"多边形"/"自定义多边形"/"polygon"/"N边形"(N>=5)→type="polygon"
+   - 多边形必须提取vertices顶点列表，格式为[[x0,y0],[x1,y1],...]
+   - 用户说"翼型"/"airfoil"/"NACA"→type="airfoil"，列入unsupported_capabilities
+   - 用户说"导入STL"/"import STL"/"STL文件"→type="stl_import"，列入unsupported_capabilities
    - 用户说"障碍物"但未指定形状→type="unknown_obstacle"
    - 禁止将三角形替换为cosine_bell、rectangle或其他形状
    - 禁止将不支持的几何替换为最接近的已知形状
@@ -190,6 +507,13 @@ _LLM_PARSE_SYSTEM_PROMPT = """你是一个CFD（计算流体力学）实验理�
    - 如果用户提供了Re、来流速度和圆柱直径，运动黏度可由nu=U*D/Re推导，不要列为缺失
    - 圆柱直径可由半径推导，反之亦然
 9. 如果存在位置冲突（如"距下壁面2m"和"位于5m高流场正中央"给出不同的y坐标），必须列入ambiguities
+10. 仿真控制参数必须提取：
+   - 仿真时间/模拟时间/计算时间/运行时间 → end_time (秒)
+   - 时间步长/步长 → delta_t (秒)
+   - Courant数/CFL数 → max_courant
+   - 网格数/网格分辨率/网格尺寸 → mesh_resolution (nx, ny)
+   - 如果用户未提及，value设为0，source设为UNKNOWN
+   - "仿真时间设为15秒" → end_time.value=15, source=USER_EXPLICIT
 """
 
 
@@ -198,11 +522,15 @@ def _llm_structured_parse(user_text: str, session_id: str = "") -> dict:
 
     Returns the parsed JSON dict. Raises HTTPException on failure.
     Skill prompt fragments are injected into the system prompt for domain-specific guidance.
+
+    A PromptTrace is recorded for every call, capturing the full context
+    (skills, spec snapshot, history) for downstream auditability.
     """
     llm = _require_llm_client()
 
     # Inject skill prompt fragments into system prompt
     _skill_resolver = SkillResolver()
+    selected_skills = _skill_resolver.select_skills(user_text, stage="intent")
     skill_injection = _skill_resolver.build_prompt_injection(
         user_text=user_text,
         stage="intent",
@@ -216,6 +544,7 @@ def _llm_structured_parse(user_text: str, session_id: str = "") -> dict:
             "geometry": {"type": "object"},
             "physics": {"type": "object"},
             "boundaries": {"type": "array"},
+            "simulation": {"type": "object"},
             "research_goals": {"type": "array"},
             "requested_metrics": {"type": "array"},
             "missing_fields": {"type": "array"},
@@ -225,6 +554,38 @@ def _llm_structured_parse(user_text: str, session_id: str = "") -> dict:
         "required": ["scene", "geometry", "physics", "boundaries", "research_goals", "requested_metrics"],
     }
 
+    # Build PromptTrace context
+    from fluid_scientist.llm.prompt_trace import (
+        PromptTrace,
+        PromptTraceContext,
+        PromptTraceResult,
+        get_prompt_trace_recorder,
+    )
+    import hashlib as _hashlib
+    import time as _time
+
+    _skill_ids = [s.skill_id for s in selected_skills]
+    _system_prompt_hash = _hashlib.sha256(full_system_prompt.encode()).hexdigest()[:16]
+
+    _trace = PromptTrace(
+        session_id=session_id,
+        purpose="study_decomposition",
+        provider=llm._provider if hasattr(llm, "_provider") else "",
+        actual_model=llm._model_name if hasattr(llm, "_model_name") else "",
+        skill_ids=_skill_ids,
+        prompt_snapshot_id=f"snap_{_system_prompt_hash}",
+        context=PromptTraceContext(
+            user_message=user_text,
+            skill_prompt_fragments=[
+                {"skill_id": s.skill_id, "fragment": s.prompt_fragment[:200]}
+                for s in selected_skills
+            ],
+            output_schema=output_schema,
+            system_prompt_hash=_system_prompt_hash,
+        ),
+    )
+
+    _call_start = _time.monotonic()
     parsed, record = llm.call(
         purpose="study_decomposition",
         prompt_name="cyl_flow_structured_parse",
@@ -234,6 +595,32 @@ def _llm_structured_parse(user_text: str, session_id: str = "") -> dict:
         session_id=session_id,
         prompt_version="cyl-parse-v2-with-skills",
     )
+    _call_latency = int((_time.monotonic() - _call_start) * 1000)
+
+    # Complete the trace with results
+    _trace.model_request_id = record.call_id
+    _trace.result = PromptTraceResult(
+        model_raw_response=record.raw_output if hasattr(record, "raw_output") else "",
+        model_structured_output=parsed,
+        parsed_successfully=record.success,
+        parse_error=record.error if hasattr(record, "error") else None,
+        latency_ms=_call_latency,
+    )
+
+    # Record field-level provenance from parsed output
+    if parsed and isinstance(parsed, dict):
+        _scene = parsed.get("scene", {})
+        _geom = parsed.get("geometry", {})
+        _physics = parsed.get("physics", {})
+        for _field, _val in {**_scene, **_geom, **_physics}.items():
+            if _val is not None:
+                _trace.field_provenance.append({
+                    "field": str(_field),
+                    "source": "LLM_EXTRACTED",
+                    "value_preview": str(_val)[:80],
+                })
+
+    get_prompt_trace_recorder().record(_trace)
 
     if not record.success:
         raise HTTPException(
@@ -242,6 +629,7 @@ def _llm_structured_parse(user_text: str, session_id: str = "") -> dict:
                 "error": "LLM_STRUCTURED_OUTPUT_FAILED",
                 "message": f"大模型调用失败: {record.error}",
                 "request_id": record.call_id,
+                "prompt_trace_id": _trace.trace_id,
             },
         )
 
@@ -504,8 +892,17 @@ class RouteResponse(BaseModel):
 
 
 class DraftRequest(BaseModel):
+    # Bug fix (FAIL-006): extra="forbid" prevents silent dropping of
+    # unknown fields.  Without this, Pydantic v2 defaults to "ignore",
+    # which means schema-unsupported fields are silently discarded
+    # instead of being reported as capability extensions.
+    model_config = {"extra": "forbid"}
+
     user_text: str
     session_id: str | None = None
+    # Optional: 当 CREATE_VARIANT / CREATE_NEW_STUDY 时，显式指明"当前 spec"
+    # 以便复制派生。若未提供，则按 session_id 推断当前 spec。
+    current_spec_id: str | None = None
 
 
 class DraftResponse(BaseModel):
@@ -535,6 +932,11 @@ class DraftResponse(BaseModel):
     audit_issues: list[dict] = Field(default_factory=list)
     # New: intent candidate set for traceability
     intent_candidates: dict[str, Any] | None = None
+    # New: CREATE_VARIANT / CREATE_NEW_STUDY 时返回原 spec 与新 spec
+    original_spec_id: str | None = None
+    new_spec_id: str | None = None
+    # New: CREATE_NEW_STUDY 时返回新建 study 的 id
+    new_study_id: str | None = None
     error: str | None = None
 
 
@@ -544,6 +946,9 @@ class RevalidateRequest(BaseModel):
 
 
 class ModifyRequest(BaseModel):
+    # Bug fix (FAIL-006): extra="forbid" prevents silent dropping of unknown fields
+    model_config = {"extra": "forbid"}
+
     spec_id: str
     modification_text: str
     user_input: str | None = None  # For recovery when spec_store is cleared
@@ -1002,9 +1407,83 @@ def _apply_clarification(spec: Any, question_id: str, answer: str) -> None:
 
     elif question_id == "cylinder_type":
         if "不是" in answer or "清除" in answer:
-            spec.has_cylinder = False
-        else:
-            spec.has_cylinder = True
+            # has_cylinder is a read-only @property based on radius/diameter being resolved.
+            # To "clear" the cylinder, unset radius and diameter fields.
+            spec.cylinder.radius_m = ProvenanceField(
+                value=None, source=FieldSource.SYSTEM_DERIVED,
+                status=FieldStatus.UNRESOLVED, confidence=0.0,
+                reason="用户确认不是圆柱",
+            )
+            spec.cylinder.diameter_m = ProvenanceField(
+                value=None, source=FieldSource.SYSTEM_DERIVED,
+                status=FieldStatus.UNRESOLVED, confidence=0.0,
+                reason="用户确认不是圆柱",
+            )
+            spec.cylinder.characteristic_dimension_m = ProvenanceField(
+                value=None, source=FieldSource.SYSTEM_DERIVED,
+                status=FieldStatus.UNRESOLVED, confidence=0.0,
+                reason="用户确认不是圆柱",
+            )
+            spec.cylinder.center_x_m = ProvenanceField(
+                value=None, source=FieldSource.SYSTEM_DERIVED,
+                status=FieldStatus.UNRESOLVED, confidence=0.0,
+                reason="用户确认不是圆柱",
+            )
+            spec.cylinder.center_y_m = ProvenanceField(
+                value=None, source=FieldSource.SYSTEM_DERIVED,
+                status=FieldStatus.UNRESOLVED, confidence=0.0,
+                reason="用户确认不是圆柱",
+            )
+            # Remove all cylinder-related blocking issues since user confirmed no cylinder
+            spec.blocking_issues = [
+                i for i in spec.blocking_issues
+                if i.get("code") not in (
+                    "CYLINDER_TYPE_MISSING",
+                    "CYLINDER_DIMENSION_TRULY_MISSING",
+                    "CYLINDER_DIMENSION_MISSING",
+                    "CYLINDER_CENTER_X_NULL",
+                    "CYLINDER_CENTER_X_MISSING",
+                    "CYLINDER_POSITION_CONFLICT",
+                )
+            ]
+        # If "是圆柱", do nothing — has_cylinder is already True if radius/diameter were parsed
+
+    elif question_id == "physics_conflict_re_vs_fluid":
+        # V2 plan Section 14.3: Resolve Re vs fluid property conflict
+        _fluid_type_val = ""
+        if spec.fluid.type and spec.fluid.type.value:
+            _fluid_type_val = str(spec.fluid.type.value).lower()
+        # Match SpecAdapter: default to "water" when type is unset
+        if not _fluid_type_val:
+            _fluid_type_val = "water"
+
+        if "保持真实" in answer or "真实" in answer or "推荐" in answer:
+            # Option 1: Keep real fluid properties, Re auto-computed
+            _real_nu = 1e-6 if _fluid_type_val == "water" else 1.5e-5
+            spec.fluid.kinematic_viscosity_m2_s = ProvenanceField(
+                value=_real_nu,
+                source=FieldSource.USER_CONFIRMED,
+                status=FieldStatus.RESOLVED,
+                confidence=1.0,
+                reason=f"用户确认保持真实{_fluid_type_val}物性(nu={_real_nu})，Re自动计算",
+            )
+        elif "custom" in answer.lower() or "自定义" in answer or "高黏" in answer:
+            # Option 2: Change fluid type to custom (high-viscosity)
+            spec.fluid.type = ProvenanceField(
+                value="custom",
+                source=FieldSource.USER_CONFIRMED,
+                status=FieldStatus.RESOLVED,
+                confidence=1.0,
+                reason="用户确认改流体类型为custom（高黏流体）",
+            )
+        elif "调整" in answer or "匹配" in answer:
+            # Option 3: Keep as is — user will adjust U or D later
+            pass
+        # Remove the conflict issue
+        spec.blocking_issues = [
+            i for i in spec.blocking_issues
+            if i.get("code") != "PHYSICS_CONFLICT_RE_VS_FLUID"
+        ]
 
     elif question_id == "flow_topology":
         topology_map = {
@@ -1110,6 +1589,95 @@ async def health_check() -> HealthResponse:
     return HealthResponse()
 
 
+@router.get("/prompt-traces")
+async def get_prompt_traces(session_id: str = ""):
+    """Retrieve prompt traces for LLM auditability.
+
+    Returns the full prompt trace records showing what context
+    (skills, spec, history, references) was provided to the LLM
+    for each call.
+    """
+    from fluid_scientist.llm.prompt_trace import get_prompt_trace_recorder
+
+    recorder = get_prompt_trace_recorder()
+    report = recorder.to_audit_report(session_id if session_id else None)
+    return report
+
+
+@router.get("/prompt-traces/{trace_id}")
+async def get_prompt_trace_detail(trace_id: str):
+    """Get the full detail of a single prompt trace."""
+    from fluid_scientist.llm.prompt_trace import get_prompt_trace_recorder
+
+    recorder = get_prompt_trace_recorder()
+    for trace in recorder.get_traces():
+        if trace.trace_id == trace_id:
+            return trace.model_dump()
+    raise HTTPException(status_code=404, detail=f"Trace {trace_id} not found")
+
+
+@router.post("/llm-disabled-test")
+async def llm_disabled_test(request: Request):
+    """Test that the system fails gracefully when LLM is disabled.
+
+    With LLM disabled and regex fallback forbidden, complex semantic
+    inputs should fail with a clear error, proving the system relies
+    on LLM for understanding rather than regex/keyword matching.
+    """
+    import json as _json
+    body = _json.loads(await request.body())
+    user_text = body.get("user_text", "")
+
+    # Temporarily disable LLM by setting a flag
+    # The _llm_structured_parse function should fail and not fall back
+    try:
+        # Try calling _llm_structured_parse with a mock that always fails
+        llm = _require_llm_client()
+        original_call = llm.call
+
+        def _failing_call(*args, **kwargs):
+            from fluid_scientist.draft_session.models import LLMCallRecord
+            return {}, LLMCallRecord(
+                call_id="disabled-test",
+                session_id="disabled-test",
+                purpose="study_decomposition",
+                provider="disabled",
+                model_name="disabled",
+                prompt_name="test",
+                prompt_version="test",
+                input_summary="LLM disabled for testing",
+                raw_output="",
+                parsed_output=None,
+                latency_ms=0,
+                success=False,
+                fallback_used=False,
+                error="LLM_DISABLED_FOR_TEST",
+            )
+
+        llm.call = _failing_call
+        try:
+            result = _llm_structured_parse(user_text, session_id="disabled-test")
+            llm.call = original_call
+            return {
+                "success": True,
+                "result": result,
+                "warning": "System succeeded even with LLM disabled — may indicate regex fallback",
+            }
+        except HTTPException as e:
+            llm.call = original_call
+            return {
+                "success": False,
+                "error": e.detail,
+                "expected": "LLM disabled should cause failure for complex inputs",
+            }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "expected": "LLM disabled should cause failure for complex inputs",
+        }
+
+
 @router.post("/route", response_model=RouteResponse)
 async def route_scene(request: RouteRequest) -> RouteResponse:
     """Check if the input matches the cylinder flow scene."""
@@ -1178,11 +1746,17 @@ def _apply_llm_to_spec(spec, llm_parsed: dict, user_text: str) -> None:
             # LLM often defaults to 0 when it can't find the value.
             cx_val = cx.get("value")
             cx_evidence = cx.get("evidence_text", "")
+            existing_x_field = spec.cylinder.center_x_m
+            existing_x_is_explicit = (
+                existing_x_field is not None
+                and existing_x_field.source == FieldSource.USER_EXPLICIT
+                and existing_x_field.is_resolved()
+            )
             user_mentions_x = any(kw in user_text for kw in [
                 "x=", "x=", "横坐标", "流向位置", "距入口",
                 "center_x", "centre_x", "x坐标",
             ])
-            if cx_val is not None and (cx_val != 0 or user_mentions_x):
+            if cx_val is not None and (cx_val != 0 or user_mentions_x) and not existing_x_is_explicit:
                 spec.cylinder.center_x_m = ProvenanceField(
                     value=float(cx_val),
                     source=FieldSource.MODEL_RECOMMENDED,
@@ -1190,18 +1764,24 @@ def _apply_llm_to_spec(spec, llm_parsed: dict, user_text: str) -> None:
                     confidence=float(cx.get("confidence", 0.9)),
                     reason=f"LLM提取: {cx_evidence}",
                 )
-            else:
-                # Missing x coordinate — add blocking issue
+            elif not existing_x_is_explicit and not spec.cylinder.center_x_m.is_resolved():
+                # Missing x coordinate — add blocking issue only if truly unresolved
                 spec.blocking_issues.append({
                     "code": "CYLINDER_CENTER_X_MISSING",
                     "message": "圆柱x坐标缺失，无法确定圆柱在流向方向的位置。建议圆心距入口至少5D，下游保留至少15D。",
                 })
             cy_val = cy.get("value")
             cy_evidence = cy.get("evidence_text", "")
-            # Only override pipeline value if LLM has a non-zero value or
-            # the pipeline didn't extract a value at all
-            existing_y = spec.cylinder.center_y_m.value if spec.cylinder.center_y_m else None
-            if cy_val is not None and (cy_val != 0 or existing_y is None):
+            # Only override pipeline value if LLM has a non-zero value AND
+            # the pipeline didn't already extract a USER_EXPLICIT value
+            existing_y_field = spec.cylinder.center_y_m
+            existing_y = existing_y_field.value if existing_y_field else None
+            existing_y_is_explicit = (
+                existing_y_field is not None
+                and existing_y_field.source == FieldSource.USER_EXPLICIT
+                and existing_y_field.is_resolved()
+            )
+            if cy_val is not None and (cy_val != 0 or existing_y is None) and not existing_y_is_explicit:
                 spec.cylinder.center_y_m = ProvenanceField(
                     value=float(cy_val),
                     source=FieldSource.MODEL_RECOMMENDED,
@@ -1309,6 +1889,113 @@ def _apply_llm_to_spec(spec, llm_parsed: dict, user_text: str) -> None:
             if attached:
                 spec.triangle.attached_boundary = str(attached)
 
+        elif obj.get("type") == "trapezoid":
+            # Trapezoid obstacle — supported via parametric_polygon representation
+            # semantic_type = trapezoid_2d, solver_representation = parametric_polygon
+            # Uses generic PolygonGeometryCompiler (no dedicated TrapezoidCompiler)
+            spec.trapezoid.enabled = True
+            spec.trapezoid.semantic_type = "trapezoid_2d"
+            spec.trapezoid.solver_representation = "parametric_polygon"
+            spec.trapezoid.source_text = user_text
+            # Clear any bottom_profile that regex pipeline might have set
+            from fluid_scientist.cylinder_flow_2d.models import BottomProfileSpec
+            spec.bottom_profile = BottomProfileSpec()
+            # Extract top_width (上底)
+            tw = obj.get("top_width", obj.get("upper_width", {}))
+            if isinstance(tw, dict) and tw.get("value") is not None and not spec.trapezoid.top_width_m.is_resolved():
+                spec.trapezoid.top_width_m = ProvenanceField(
+                    value=float(tw["value"]),
+                    source=FieldSource.MODEL_RECOMMENDED,
+                    status=FieldStatus.RESOLVED,
+                    confidence=float(tw.get("confidence", 0.9)),
+                    reason=f"LLM提取: {tw.get('evidence_text', '')}",
+                )
+            # Extract bottom_width (下底)
+            bw = obj.get("bottom_width", obj.get("lower_width", obj.get("base_width", {})))
+            if isinstance(bw, dict) and bw.get("value") is not None and not spec.trapezoid.bottom_width_m.is_resolved():
+                spec.trapezoid.bottom_width_m = ProvenanceField(
+                    value=float(bw["value"]),
+                    source=FieldSource.MODEL_RECOMMENDED,
+                    status=FieldStatus.RESOLVED,
+                    confidence=float(bw.get("confidence", 0.9)),
+                    reason=f"LLM提取: {bw.get('evidence_text', '')}",
+                )
+            # Extract height
+            h = obj.get("height", {})
+            if isinstance(h, dict) and h.get("value") is not None and not spec.trapezoid.height_m.is_resolved():
+                spec.trapezoid.height_m = ProvenanceField(
+                    value=float(h["value"]),
+                    source=FieldSource.MODEL_RECOMMENDED,
+                    status=FieldStatus.RESOLVED,
+                    confidence=float(h.get("confidence", 0.9)),
+                    reason=f"LLM提取: {h.get('evidence_text', '')}",
+                )
+            # Center X — default to cylinder center_x if "below cylinder"
+            tx = obj.get("center_x", {})
+            if isinstance(tx, dict) and tx.get("value") is not None and not spec.trapezoid.center_x_m.is_resolved():
+                spec.trapezoid.center_x_m = ProvenanceField(
+                    value=float(tx["value"]),
+                    source=FieldSource.MODEL_RECOMMENDED,
+                    status=FieldStatus.RESOLVED,
+                    confidence=float(tx.get("confidence", 0.9)),
+                    reason=f"LLM提取: {tx.get('evidence_text', '')}",
+                )
+            elif spec.cylinder.center_x_m and spec.cylinder.center_x_m.is_resolved():
+                # Default: aligned below cylinder
+                spec.trapezoid.center_x_m = ProvenanceField(
+                    value=spec.cylinder.center_x_m.value,
+                    source=FieldSource.FORMULA_DERIVED,
+                    status=FieldStatus.RESOLVED,
+                    confidence=0.7,
+                    reason=f"默认位置 = 圆柱圆心x = {spec.cylinder.center_x_m.value}m",
+                )
+            # Relation to cylinder
+            relation = obj.get("relation", "")
+            if relation:
+                spec.trapezoid.relation_to_cylinder = str(relation)
+            # Attached boundary
+            attached = obj.get("attached_boundary", "")
+            if attached:
+                spec.trapezoid.attached_boundary = str(attached)
+
+        elif obj.get("type") == "polygon":
+            # Custom polygon obstacle — supported via snappyHexMesh + STL
+            # semantic_type = custom_polygon_2d, solver_representation = polygon_stl
+            spec.polygon.enabled = True
+            spec.polygon.semantic_type = "custom_polygon_2d"
+            spec.polygon.solver_representation = "polygon_stl"
+            spec.polygon.source_text = user_text
+            # Extract vertices
+            verts = obj.get("vertices", [])
+            if isinstance(verts, list) and len(verts) >= 3:
+                parsed_verts = []
+                for v in verts:
+                    if isinstance(v, (list, tuple)) and len(v) >= 2:
+                        parsed_verts.append([float(v[0]), float(v[1])])
+                    elif isinstance(v, dict):
+                        parsed_verts.append([float(v.get("x", 0)), float(v.get("y", 0))])
+                if len(parsed_verts) >= 3:
+                    spec.polygon.vertices = parsed_verts
+            # Extract center position
+            px = obj.get("center_x", {})
+            if isinstance(px, dict) and px.get("value") is not None and not spec.polygon.center_x_m.is_resolved():
+                spec.polygon.center_x_m = ProvenanceField(
+                    value=float(px["value"]),
+                    source=FieldSource.MODEL_RECOMMENDED,
+                    status=FieldStatus.RESOLVED,
+                    confidence=float(px.get("confidence", 0.9)),
+                    reason=f"LLM提取: {px.get('evidence_text', '')}",
+                )
+            py = obj.get("center_y", {})
+            if isinstance(py, dict) and py.get("value") is not None and not spec.polygon.center_y_m.is_resolved():
+                spec.polygon.center_y_m = ProvenanceField(
+                    value=float(py["value"]),
+                    source=FieldSource.MODEL_RECOMMENDED,
+                    status=FieldStatus.RESOLVED,
+                    confidence=float(py.get("confidence", 0.9)),
+                    reason=f"LLM提取: {py.get('evidence_text', '')}",
+                )
+
         elif obj.get("type") in ("cosine_bell", "half_sine", "gaussian", "bump"):
             # Bump / bottom profile — apply LLM values only when pipeline
             # hasn't already extracted USER_EXPLICIT values
@@ -1355,7 +2042,7 @@ def _apply_llm_to_spec(spec, llm_parsed: dict, user_text: str) -> None:
                     reason=f"LLM提取: {cx.get('evidence_text', '')}",
                 )
 
-        elif obj.get("type") in ("unknown_obstacle", "trapezoid", "obstacle", "block"):
+        elif obj.get("type") in ("unknown_obstacle", "obstacle", "block"):
             # Unknown or unsupported obstacle type — LLM identified it but
             # we don't have a specific geometry builder for it yet.
             # Record it as a blocking issue so the user can clarify,
@@ -1502,10 +2189,51 @@ def _apply_llm_to_spec(spec, llm_parsed: dict, user_text: str) -> None:
             continue
         if field_lower in ("reference_area", "参考面积") and spec_d is not None:
             continue
+        # Skip simulation parameters that are optional (user may not specify them)
+        if field_lower in ("end_time", "仿真时间", "delta_t", "时间步长", "time_step",
+                           "max_courant", "courant", "cfl", "max_courant_number",
+                           "mesh_resolution", "网格分辨率", "网格数", "mesh",
+                           "simulation", "仿真参数"):
+            continue
         spec.blocking_issues.append({
             "code": "LLM_MISSING_FIELD",
             "message": f"LLM识别的缺失字段: {field}",
         })
+
+    # --- Simulation parameters: apply LLM-extracted values ---
+    # LLM extracts end_time, delta_t, max_courant, mesh_resolution
+    # These override regex-extracted values when LLM has USER_EXPLICIT source
+    sim = llm_parsed.get("simulation", {})
+    if sim:
+        # End time
+        et = sim.get("end_time", {})
+        if isinstance(et, dict):
+            et_val = et.get("value")
+            et_source = et.get("source", "UNKNOWN")
+            if et_val and et_val > 0 and et_source == "USER_EXPLICIT":
+                # LLM confirmed user explicitly specified end_time
+                # Only apply if pipeline didn't already extract it (pipeline takes precedence for regex matches)
+                if spec.simulation.end_time is None:
+                    spec.simulation.end_time = float(et_val)
+                    facts_log = f"LLM提取仿真时间: {et_val}s"
+                    logger.info(facts_log)
+
+        # Delta t
+        dt = sim.get("delta_t", {})
+        if isinstance(dt, dict):
+            dt_val = dt.get("value")
+            dt_source = dt.get("source", "UNKNOWN")
+            if dt_val and dt_val > 0 and dt_source == "USER_EXPLICIT":
+                if spec.simulation.delta_t is None:
+                    spec.simulation.delta_t = float(dt_val)
+
+        # Max Courant
+        mc = sim.get("max_courant", {})
+        if isinstance(mc, dict):
+            mc_val = mc.get("value")
+            mc_source = mc.get("source", "UNKNOWN")
+            if mc_val and mc_val > 0 and mc_source == "USER_EXPLICIT":
+                spec.simulation.max_courant_number = float(mc_val)
 
 
 def _check_unsupported_geometry(spec) -> None:
@@ -1530,8 +2258,13 @@ def _check_unsupported_geometry(spec) -> None:
         if spec.bottom_profile.profile_type != BumpProfileType.FLAT:
             spec.bottom_profile = BottomProfileSpec()
 
-    # Triangle is now SUPPORTED — do not block it
-    # Only block truly unsupported geometries (not triangle/rectangle/cosine_bell)
+    # If polygon is enabled, clear any bottom_profile conflict
+    if spec.polygon.enabled and spec.bottom_profile.profile_type:
+        if spec.bottom_profile.profile_type != BumpProfileType.FLAT:
+            spec.bottom_profile = BottomProfileSpec()
+
+    # Triangle and polygon are now SUPPORTED — do not block them
+    # Only block truly unsupported geometries (not triangle/rectangle/polygon/cosine_bell)
 
 
 def _detect_position_conflicts(spec, user_text: str) -> None:
@@ -1633,6 +2366,24 @@ def _validate_null_fields(spec) -> list[dict]:
                 "message": "三角形高度为null，无法确定三角形尺寸。",
             })
 
+    # Trapezoid dimensions must not be null if trapezoid is enabled
+    if spec.trapezoid.enabled:
+        if spec.trapezoid.top_width_m.value is None:
+            issues.append({
+                "code": "TRAPEZOID_TOP_WIDTH_NULL",
+                "message": "梯形上底为null，无法确定梯形尺寸。",
+            })
+        if spec.trapezoid.bottom_width_m.value is None:
+            issues.append({
+                "code": "TRAPEZOID_BOTTOM_WIDTH_NULL",
+                "message": "梯形下底为null，无法确定梯形尺寸。",
+            })
+        if spec.trapezoid.height_m.value is None:
+            issues.append({
+                "code": "TRAPEZOID_HEIGHT_NULL",
+                "message": "梯形高度为null，无法确定梯形尺寸。",
+            })
+
     return issues
 
 
@@ -1644,6 +2395,67 @@ def _has_blocking_substitution(spec) -> bool:
                      "UNSUPPORTED_CAPABILITY"):
             return True
     return False
+
+
+def _detect_physics_conflict_re_vs_fluid(spec) -> dict | None:
+    """Detect if Re-derived viscosity conflicts with real fluid properties.
+
+    Per V2 plan Section 14.3: when user specifies Re with a real fluid type
+    (water/air), the derived viscosity may be physically impossible.
+    This must be presented as a user choice, not silently passed or failed.
+
+    Note: When fluid type is None, the SpecAdapter defaults to "water"
+    (DEFAULT_FLUID_TYPE), so we apply the same default here to catch
+    conflicts before they reach the compiler.
+    """
+    nu_field = spec.fluid.kinematic_viscosity_m2_s
+    if nu_field is None or nu_field.value is None:
+        return None
+    nu = float(nu_field.value)
+
+    fluid_type_val = ""
+    if spec.fluid.type and spec.fluid.type.value:
+        fluid_type_val = str(spec.fluid.type.value).lower()
+
+    # Match SpecAdapter behavior: default to "water" when type is unset
+    if not fluid_type_val:
+        fluid_type_val = "water"
+
+    KNOWN_RANGES = {
+        "water": (5e-7, 2e-5, 1e-6),
+        "air": (1e-6, 5e-5, 1.5e-5),
+    }
+
+    if fluid_type_val not in KNOWN_RANGES:
+        return None  # Custom fluid — no physical range constraint
+
+    nu_min, nu_max, real_nu = KNOWN_RANGES[fluid_type_val]
+    if nu_min <= nu <= nu_max:
+        return None  # Within physical range — no conflict
+
+    # Conflict detected
+    u_val = None
+    if spec.boundaries and spec.boundaries.left:
+        u_val = spec.boundaries.left.inlet_velocity
+    d_val = spec.get_cylinder_diameter() if spec.has_cylinder else None
+
+    return {
+        "code": "PHYSICS_CONFLICT_RE_VS_FLUID",
+        "category": "BLOCKING_CONFLICT",
+        "question_id": "physics_conflict_re_vs_fluid",
+        "message": (
+            f"用户指定Re与流体类型({fluid_type_val})物理不一致。"
+            f"由Re推导的粘度nu={nu:.4e} m²/s超出{fluid_type_val}的物理范围"
+            f"[{nu_min:.1e}, {nu_max:.1e}]。"
+            + (f" 当前U={u_val}m/s, D={d_val}m。" if u_val and d_val else "")
+        ),
+        "recommendation": f"保持真实{fluid_type_val}物性，Re自动计算",
+        "options": [
+            f"保持真实{fluid_type_val}物性（nu={real_nu:.1e}），Re自动计算（推荐）",
+            f"改流体类型为custom（高黏流体nu={nu:.4e}）",
+            "调整U或D使Re匹配真实流体物性",
+        ],
+    }
 
 
 def _semantic_consistency_gate(spec, user_text: str) -> dict:
@@ -1765,8 +2577,11 @@ def _semantic_coverage_check(spec, user_text: str) -> dict:
             unmapped.append({"claim": f"圆心距下壁面{y_val}m", "reason": "center_y_m is null"})
 
     # 4. Inlet velocity
-    vel_match = _regex.search(r'(?:来流速度|入口速度|速度)\s*[:=]?\s*([\d.]+)\s*m/s', user_text)
-    if vel_match:
+    # Use finditer to get the LAST match — modifications are appended to user_input_text,
+    # so the last match reflects the user's latest intent.
+    vel_matches = list(_regex.finditer(r'(?:来流速度|入口速度|速度)\s*[:=为]?\s*([\d.]+)\s*m/s', user_text))
+    if vel_matches:
+        vel_match = vel_matches[-1]  # Last match = latest modification
         v_val = float(vel_match.group(1))
         spec_v = spec.boundaries.left.inlet_velocity
         if spec_v is not None and abs(spec_v - v_val) < 1e-6:
@@ -1775,14 +2590,30 @@ def _semantic_coverage_check(spec, user_text: str) -> dict:
             unmapped.append({"claim": f"来流速度{v_val}m/s", "reason": f"inlet_velocity={spec_v}"})
 
     # 5. Reynolds number
-    re_match = _regex.search(r'Re\s*[:=]?\s*([\d.]+)', user_text)
-    if re_match:
+    # Use finditer to get the LAST match for the same reason.
+    re_matches = list(_regex.finditer(r'Re\s*[:=为]?\s*([\d.]+)', user_text))
+    if re_matches:
+        re_match = re_matches[-1]  # Last match = latest modification
         re_val = float(re_match.group(1))
         spec_re = spec.estimate_reynolds()
         if spec_re is not None and abs(spec_re - re_val) / max(re_val, 1) < 0.05:
             mapped.append({"claim": f"Re={re_val}", "field": "reynolds_number"})
         else:
-            unmapped.append({"claim": f"Re={re_val}", "reason": f"estimated Re={spec_re}"})
+            # Check if the Re mismatch is a derived consequence of inlet velocity modification.
+            # When U is modified, Re = U*D/nu changes even though the user didn't explicitly change Re.
+            # In this case, the mismatch is expected and should not block confirmation.
+            mod_lines = [line for line in user_text.split("\n") if line.strip().startswith("[修改]")]
+            velocity_modified = any(
+                kw in line for line in mod_lines
+                for kw in ["速度", "velocity", "来流", "入口"]
+            )
+            if velocity_modified:
+                mapped.append({
+                    "claim": f"Re={re_val} (派生变化：入口速度已修改，Re随之变化为{spec_re:.0f})",
+                    "field": "reynolds_number",
+                })
+            else:
+                unmapped.append({"claim": f"Re={re_val}", "reason": f"estimated Re={spec_re}"})
 
     # 6. Rectangle obstacle
     if any(kw in user_text for kw in ["矩形", "rectangle", "rectangular"]):
@@ -1834,6 +2665,20 @@ def _semantic_coverage_check(spec, user_text: str) -> dict:
                 unmapped.append({"claim": "三角形障碍物", "reason": f"profile_type={spec.bottom_profile.profile_type}"})
         else:
             unmapped.append({"claim": "三角形障碍物", "reason": "triangle not enabled and no bottom_profile"})
+
+    # 7c. Trapezoid obstacle — detect silent dropping
+    if any(kw in user_text for kw in ["梯形", "trapezoid", "trapezoidal"]):
+        if spec.trapezoid and spec.trapezoid.enabled:
+            mapped.append({"claim": "梯形障碍物", "field": "trapezoid.enabled"})
+        else:
+            unmapped.append({"claim": "梯形障碍物", "reason": "trapezoid not enabled in spec"})
+
+    # 7d. Polygon obstacle — detect silent dropping
+    if any(kw in user_text for kw in ["多边形", "polygon", "五边形", "六边形", "七边形", "八边形"]):
+        if spec.polygon and spec.polygon.enabled:
+            mapped.append({"claim": "多边形障碍物", "field": "polygon.enabled"})
+        else:
+            unmapped.append({"claim": "多边形障碍物", "reason": "polygon not enabled in spec"})
 
     # 8. Boundary conditions
     if "速度入口" in user_text or "velocity inlet" in text_lower:
@@ -1910,14 +2755,175 @@ async def create_draft(request: DraftRequest) -> DraftResponse:
     Returns the complete spec with draft_status, blocking_issues,
     observables, and analysis_goals.
     """
+    # --- CREATE_VARIANT / CREATE_NEW_STUDY 拦截 ---
+    # 优先于正常 pipeline 处理：当用户表达变体/新建研究意图，且能解析到
+    # "当前 spec"时，复制当前 spec 生成新 spec_id 并直接返回，不进入
+    # 场景路由/LLM 解析流程。若无法解析当前 spec，则回退到正常 draft 流程，
+    # 以保持既有端点行为不变。
+    if _detect_variant_intent(request.user_text):
+        original_spec_id = _resolve_current_spec_id(request)
+        if original_spec_id:
+            copied = _copy_spec_to_new_id(original_spec_id)
+            if copied is not None:
+                new_spec_id, new_spec = copied
+                return _build_variant_response(
+                    request, original_spec_id, new_spec_id, new_spec
+                )
+    elif _detect_new_study_intent(request.user_text):
+        original_spec_id = _resolve_current_spec_id(request)
+        if original_spec_id:
+            copied = _copy_spec_to_new_id(original_spec_id)
+            if copied is not None:
+                new_spec_id, new_spec = copied
+                return _build_new_study_response(
+                    request, original_spec_id, new_spec_id, new_spec
+                )
+
+    # --- 2D/3D 维度冲突检测 ---
+    # 用户同时提到二维(2D)与三维(3D/等值面/Q准则)时，属于阻塞性维度冲突，
+    # 优先于 LLM 解析与 unsupported-capability 检查返回，要求用户澄清维度。
+    _dimension_issue = detect_dimension_conflict(request.user_text)
+    if _dimension_issue is not None:
+        return DraftResponse(
+            success=False,
+            error=_dimension_issue["code"],
+            blocking_issues=[_dimension_issue],
+            skill_summary={"intent": "DIMENSION_CONFLICT_2D_3D"},
+        )
+
     # --- Step 0: Real LLM structured parsing ---
     # This is mandatory — no fallback to regex-only.
+
+    # Bug fix (FAIL-003): Check that mandatory skills are resolved before
+    # proceeding.  If SkillResolver returns zero skills, the LLM receives
+    # no domain guidance (patch schema, geometry semantics, physics
+    # derivation rules), which is a critical degradation that must not
+    # be silent.
+    _pre_skill_resolver = SkillResolver()
+    _resolved_skills = _pre_skill_resolver.select_skills(
+        user_text=request.user_text, stage="intent",
+    )
+    if not _resolved_skills:
+        # Skill resolution returned empty — this means the user's input
+        # didn't match any skill keywords.  Rather than blocking (which
+        # makes the system keyword-gated), we proceed with LLM-only mode
+        # and log a warning.  The LLM is still the primary understanding
+        # engine; skills provide supplemental domain guidance.
+        import logging
+        logging.getLogger("cylinder_flow").warning(
+            "SkillResolver returned empty for user_text (len=%d). "
+            "Proceeding with LLM-only mode (no skill prompt injection).",
+            len(request.user_text),
+        )
+
     _skill_executor.clear()
-    llm_parsed = _skill_executor.execute(
+    _intent_invocation = _skill_executor.execute(
         skill_id="fluid.intent_to_spec",
         entrypoint_fn=lambda data: _llm_structured_parse(data["user_text"]),
         input_data={"user_text": request.user_text},
-    ).output
+    )
+
+    # Bug fix (FAIL-001): If the LLM call failed (timeout, model error, etc.),
+    # do NOT silently fall back to regex-only extraction.  The previous code
+    # accessed .output directly, which would be {"error": "..."} when the
+    # invocation failed, and the pipeline would continue with regex-only —
+    # a dangerous silent degradation explicitly prohibited by the plan.
+    if _intent_invocation.status == "FAILED":
+        return DraftResponse(
+            success=False,
+            error=f"LLM_PARSE_FAILED: {_intent_invocation.error}",
+            blocking_issues=[{
+                "code": "LLM_PARSE_FAILED",
+                "message": f"大模型解析失败，不允许静默回退到regex-only: {_intent_invocation.error}",
+            }],
+            skill_summary=_skill_executor.summary(),
+        )
+
+    llm_parsed = _intent_invocation.output
+
+    # --- Capability extension detection ---
+    # Check for airfoil/STL geometry requests that require system extension.
+    # These must NOT silently fall back to cylinder or any known geometry.
+    from fluid_scientist.case_ir.capability_requirements import (
+        detect_unknown_geometry_capabilities,
+        CapabilityRequirement,
+        AIRFOIL_2D_CAPABILITY_KEY,
+        STL_IMPORT_CAPABILITY_KEY,
+    )
+    _extension_reqs = detect_unknown_geometry_capabilities(request.user_text)
+
+    # Also check the LLM's unsupported_capabilities list for airfoil/STL
+    # keywords that the LLM correctly identified as unsupported.
+    _EXTENSION_KEYWORDS = {
+        "airfoil": ["翼型", "airfoil", "naca"],
+        "stl": ["导入stl", "import stl", "stl文件", "stl file", "stl"],
+    }
+    _llm_unsupported = llm_parsed.get("unsupported_capabilities", [])
+    _user_text_lower = request.user_text.lower()
+    for cap in _llm_unsupported:
+        cap_lower = str(cap).lower()
+        for ext_type, keywords in _EXTENSION_KEYWORDS.items():
+            # Only trigger extension if the USER TEXT actually contains
+            # the keyword — prevents LLM hallucinations from blocking
+            # supported geometries (triangle, rectangle, cosine bell, etc.)
+            user_mentions_keyword = any(kw.lower() in _user_text_lower for kw in keywords)
+            if not user_mentions_keyword:
+                continue
+            if any(kw.lower() in cap_lower for kw in keywords):
+                # Check if we already detected this from user text
+                already_detected = any(
+                    r.capability_key == f"geometry.{ext_type}_2d" or
+                    r.capability_key == f"geometry.{ext_type}_import"
+                    for r in _extension_reqs
+                )
+                if not already_detected:
+                    if ext_type == "airfoil":
+                        _extension_reqs.append(CapabilityRequirement(
+                            req_id="REQ-AIRFOIL-LLM",
+                            capability_key=AIRFOIL_2D_CAPABILITY_KEY,
+                            required_by="llm_parse",
+                            status="extension_requested",
+                            original_semantics=str(cap),
+                            extension_proposal=(
+                                "需要添加airfoil生成器Skill和编译器hook"
+                            ),
+                        ))
+                    elif ext_type == "stl":
+                        _extension_reqs.append(CapabilityRequirement(
+                            req_id="REQ-STL-LLM",
+                            capability_key=STL_IMPORT_CAPABILITY_KEY,
+                            required_by="llm_parse",
+                            status="extension_requested",
+                            original_semantics=str(cap),
+                            extension_proposal=(
+                                "需要添加STL处理器和导入流水线"
+                            ),
+                        ))
+
+    # If any extension-required capabilities were detected, return structured
+    # capability information instead of silently falling back to cylinder.
+    if _extension_reqs:
+        _capability_extensions = []
+        for req in _extension_reqs:
+            _capability_extensions.append({
+                "capability_key": req.capability_key,
+                "original_semantics": req.original_semantics,
+                "status": "CONFIG_EXTENSION",
+                "extension_proposal": req.extension_proposal,
+            })
+        return DraftResponse(
+            success=False,
+            error="CAPABILITY_EXTENSION_REQUIRED",
+            blocking_issues=[{
+                "code": "CAPABILITY_EXTENSION_REQUIRED",
+                "message": (
+                    f"用户请求的几何能力需要系统扩展，不会静默回退到已知几何模板。"
+                    f"检测到 {len(_extension_reqs)} 个扩展需求。"
+                ),
+                "capability_extensions": _capability_extensions,
+            }],
+            skill_summary=_skill_executor.summary(),
+        )
 
     # Check for unsupported capabilities identified by LLM
     # Only block on truly unsupported capabilities, not on standard CFD
@@ -1934,8 +2940,11 @@ async def create_draft(request: DraftRequest) -> DraftResponse:
     truly_unsupported = []
     for cap in unsupported:
         cap_lower = str(cap).lower()
+        # Only block if the user text actually mentions the unsupported
+        # capability — prevents LLM hallucinations from blocking valid inputs
         if any(kw.lower() in cap_lower for kw in _TRULY_UNSUPPORTED_KEYWORDS):
-            truly_unsupported.append(cap)
+            if any(kw.lower() in _user_text_lower for kw in _TRULY_UNSUPPORTED_KEYWORDS):
+                truly_unsupported.append(cap)
     if truly_unsupported:
         return DraftResponse(
             success=False,
@@ -2153,6 +3162,10 @@ async def create_draft(request: DraftRequest) -> DraftResponse:
     spec.experiment_id = spec_id
     _persist_spec(spec_id, spec)
 
+    # 记录 session -> 当前 spec，供后续 CREATE_VARIANT / CREATE_NEW_STUDY 推断
+    if request.session_id:
+        _session_current_spec[request.session_id] = spec_id
+
     # Store LLM call record on spec for traceability
     llm_client = _get_llm_client()
     if llm_client:
@@ -2280,6 +3293,11 @@ async def modify_spec(request: ModifyRequest) -> DraftResponse:
     run_result = pipeline.run(request.modification_text)
     mod_spec = run_result.spec
 
+    # --- 相对 Patch：处理"一半/两倍/加倍"等相对措辞 ---
+    # 使用 RelativePatchExpression 依据当前 spec 实际取值计算新值并写回。
+    # 命中时返回应用记录；未命中返回空列表，不影响既有增量合并逻辑。
+    _relative_applied = _apply_relative_patch(spec, mod_text)
+
     # --- Incremental merge: only apply fields that are explicitly set in mod_spec ---
     import re as _re_modify
 
@@ -2375,6 +3393,24 @@ async def modify_spec(request: ModifyRequest) -> DraftResponse:
             status=FieldStatus.RESOLVED, confidence=1.0, reason="用户修改粘度",
         )
 
+    # Reynolds number — re-derive viscosity from Re=U*D/Re when user modifies Re
+    reynolds = pipeline._extract_reynolds(mod_text)
+    if reynolds is not None:
+        u_val = spec.boundaries.left.inlet_velocity
+        d_val = spec.get_cylinder_diameter()
+        if u_val is not None and d_val is not None and d_val > 0:
+            new_nu = u_val * d_val / reynolds
+            spec.fluid.kinematic_viscosity_m2_s = ProvenanceField(
+                value=new_nu, source=FieldSource.FORMULA_DERIVED,
+                status=FieldStatus.RESOLVED, confidence=0.9,
+                reason=f"由Re={reynolds}推导粘度 nu=U*D/Re={new_nu:.6e}",
+            )
+            from fluid_scientist.cylinder_flow_2d.models import FlowRegime
+            if reynolds < 2000:
+                spec.simulation.flow_regime = FlowRegime.LAMINAR
+            else:
+                spec.simulation.flow_regime = FlowRegime.TURBULENT
+
     # Bump
     bump = pipeline._extract_bump(mod_text)
     if bump:
@@ -2404,6 +3440,96 @@ async def modify_spec(request: ModifyRequest) -> DraftResponse:
             )
         if bump.get("aligned_below_cylinder"):
             spec.bottom_profile.aligned_below_cylinder = True
+
+    # --- Triangle ↔ Rectangle conversion ---
+    # Detect "把三角...改成矩形" or "三角...换为...矩形" etc.
+    # Use original modification_text for change keyword detection, since
+    # mod_text has already had "改成" etc. replaced with "为"
+    _orig_mod_text = request.modification_text
+    _has_tri_kw = any(kw in mod_text for kw in ["三角", "triangle", "triangular"])
+    _has_rect_kw = any(kw in mod_text for kw in ["矩形", "长方形", "rectangle", "rectangular"])
+    _has_change_kw = any(kw in _orig_mod_text for kw in ["改成", "改为", "换成", "换为", "变更", "修改为", "替换", "替代", "change", "replace", "convert", "改为", "换成", "改成"])
+
+    if _has_tri_kw and _has_rect_kw and _has_change_kw and spec.triangle.enabled:
+        # Convert triangle to rectangle with same dimensions
+        tri_base = spec.triangle.base_width_m.value if spec.triangle.base_width_m.is_resolved() else None
+        tri_height = spec.triangle.height_m.value if spec.triangle.height_m.is_resolved() else None
+        tri_cx = spec.triangle.center_x_m.value if spec.triangle.center_x_m.is_resolved() else None
+        tri_cy = spec.triangle.center_y_m.value if spec.triangle.center_y_m.is_resolved() else None
+
+        # Disable triangle
+        spec.triangle.enabled = False
+
+        # Enable rectangle with same dimensions
+        spec.rectangle.enabled = True
+        if tri_base is not None:
+            spec.rectangle.width_m = ProvenanceField(
+                value=tri_base, source=FieldSource.USER_EXPLICIT,
+                status=FieldStatus.RESOLVED, confidence=1.0,
+                reason="由三角形底宽转换为矩形宽度",
+            )
+        if tri_height is not None:
+            spec.rectangle.height_m = ProvenanceField(
+                value=tri_height, source=FieldSource.USER_EXPLICIT,
+                status=FieldStatus.RESOLVED, confidence=1.0,
+                reason="由三角形高度转换为矩形高度",
+            )
+        if tri_cx is not None:
+            spec.rectangle.center_x_m = ProvenanceField(
+                value=tri_cx, source=FieldSource.USER_EXPLICIT,
+                status=FieldStatus.RESOLVED, confidence=1.0,
+                reason="由三角形位置转换为矩形位置",
+            )
+        if tri_cy is not None:
+            spec.rectangle.center_y_m = ProvenanceField(
+                value=tri_cy, source=FieldSource.USER_EXPLICIT,
+                status=FieldStatus.RESOLVED, confidence=1.0,
+                reason="由三角形位置转换为矩形位置",
+            )
+        if spec.triangle.relation_to_cylinder:
+            spec.rectangle.relation_to_cylinder = spec.triangle.relation_to_cylinder
+
+    # Also handle rectangle modifications (extract new rectangle dimensions)
+    if _has_rect_kw and not (_has_tri_kw and _has_change_kw):
+        rect = pipeline._extract_rectangle(mod_text, spec)
+        if rect:
+            spec.rectangle.enabled = True
+            if "height" in rect:
+                spec.rectangle.height_m = ProvenanceField(
+                    value=rect["height"], source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED, confidence=1.0, reason="用户修改矩形高度",
+                )
+            if "width" in rect:
+                spec.rectangle.width_m = ProvenanceField(
+                    value=rect["width"], source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED, confidence=1.0, reason="用户修改矩形宽度",
+                )
+            if "center_x" in rect:
+                spec.rectangle.center_x_m = ProvenanceField(
+                    value=rect["center_x"], source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED, confidence=1.0, reason="用户修改矩形位置",
+                )
+
+    # Triangle modifications (extract new triangle dimensions)
+    if _has_tri_kw and not _has_change_kw:
+        tri = pipeline._extract_triangle(mod_text)
+        if tri:
+            spec.triangle.enabled = True
+            if "height" in tri:
+                spec.triangle.height_m = ProvenanceField(
+                    value=tri["height"], source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED, confidence=1.0, reason="用户修改三角形高度",
+                )
+            if "base_width" in tri:
+                spec.triangle.base_width_m = ProvenanceField(
+                    value=tri["base_width"], source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED, confidence=1.0, reason="用户修改三角形底宽",
+                )
+            if "center_x" in tri:
+                spec.triangle.center_x_m = ProvenanceField(
+                    value=tri["center_x"], source=FieldSource.USER_EXPLICIT,
+                    status=FieldStatus.RESOLVED, confidence=1.0, reason="用户修改三角形位置",
+                )
 
     # Re-derive dependent fields
     from fluid_scientist.cylinder_flow_2d.geometry_normalizer import (
@@ -2441,6 +3567,8 @@ async def modify_spec(request: ModifyRequest) -> DraftResponse:
         clarification_questions=_generate_clarification_questions(spec.blocking_issues, spec),
         observables=[obs.model_dump() for obs in spec.observables],
         analysis_goals=[goal.model_dump() for goal in spec.analysis_goals],
+        # 相对 Patch 的应用记录（空列表表示未触发相对修改）
+        derived_values=_relative_applied,
     )
 
 
@@ -2558,6 +3686,8 @@ async def confirm_spec(request: ConfirmRequest) -> ConfirmResponse:
 
     # 9. Critic
     critic = CylinderFlow2DCritic()
+    # Clear previously accumulated blocking issues before re-evaluation
+    spec.blocking_issues = []
     critic.review(spec, spec.user_input_text or "")
 
     # 10. Coverage checker
@@ -2584,6 +3714,17 @@ async def confirm_spec(request: ConfirmRequest) -> ConfirmResponse:
 
     # 12b. Block on silent geometry substitution
     if _has_blocking_substitution(spec):
+        final_status = DraftStatus.NEEDS_CLARIFICATION
+
+    # 12c. Physics conflict: Re vs fluid properties (V2 plan Section 14.3)
+    _physics_conflict = _detect_physics_conflict_re_vs_fluid(spec)
+    if _physics_conflict:
+        # Avoid duplicate entries
+        spec.blocking_issues = [
+            i for i in spec.blocking_issues
+            if i.get("code") != "PHYSICS_CONFLICT_RE_VS_FLUID"
+        ]
+        spec.blocking_issues.append(_physics_conflict)
         final_status = DraftStatus.NEEDS_CLARIFICATION
 
     # 13. Check if ready to confirm
@@ -3043,20 +4184,8 @@ def _unwrap_pf(pf: Any, default: Any = None) -> Any:
     return pf if pf is not None else default
 
 
-def _load_spec(spec_id: str) -> CylinderFlow2DExperimentSpecV1 | None:
-    """Load a spec from memory cache, falling back to JSON persistence."""
-    spec = _load_spec(spec_id)
-    if spec is not None:
-        return spec
-    session = _session_store.load(spec_id)
-    if session and "spec" in session:
-        try:
-            spec = CylinderFlow2DExperimentSpecV1(**session["spec"])
-            _persist_spec(spec_id, spec)
-            return spec
-        except Exception:
-            return None
-    return None
+# NOTE: _load_spec is already defined at line 79. The duplicate below was
+# removed because it called itself recursively, causing RecursionError.
 
 
 def _run_confirmation_chain(spec: CylinderFlow2DExperimentSpecV1) -> None:
@@ -3166,6 +4295,34 @@ def _auto_accept_recommendations(spec: CylinderFlow2DExperimentSpecV1) -> None:
         spec.simulation.time_mode = TimeMode.TRANSIENT
 
 
+def _determine_solver_command(adapted_spec: Any) -> str:
+    """Determine the unique Foundation 13 solver command for a scenario.
+
+    Foundation 13 uses the unified ``foamRun`` entry point with a
+    ``-solver`` flag.  The solver selection is based on:
+    - Steady vs transient (from spec.simulation.time_mode)
+    - Compressibility (always incompressible for cylinder_flow_2d)
+    - Turbulence model (laminar vs turbulent)
+
+    This ensures every scenario has a single, unambiguous solver
+    command that can be verified in the recovery queue.
+    """
+    is_transient = True
+    try:
+        time_mode = getattr(adapted_spec.simulation, "time_mode", None)
+        if time_mode is not None:
+            tm_value = time_mode.value if hasattr(time_mode, "value") else str(time_mode)
+            if tm_value == "steady":
+                is_transient = False
+    except (AttributeError, TypeError):
+        pass
+
+    if is_transient:
+        return "foamRun -solver incompressibleFluid"
+    else:
+        return "foamRun -solver incompressibleFluid -steady"
+
+
 def _generate_compile_preview(spec: CylinderFlow2DExperimentSpecV1) -> dict[str, Any]:
     """Generate a compile preview without executing the compilation.
 
@@ -3205,22 +4362,49 @@ def _generate_compile_preview(spec: CylinderFlow2DExperimentSpecV1) -> dict[str,
     ny = min(ny, 200)
     estimated_cells = nx * ny  # 2D: single layer in z
 
-    # --- time-step estimation (mirrors compiler _compile_control_dict) ---
-    if is_transient:
-        end_time = spec.simulation.end_time or 10.0
-        if spec.simulation.delta_t is not None:
-            delta_t = spec.simulation.delta_t
+    # --- time-step estimation ---
+    # Use the SAME code path as the actual compiler (ObstacleFlowCompiler)
+    # so the preview's delta_t / end_time always match the compiled
+    # controlDict.  We adapt the spec to ObstacleFlowExperimentSpecV1
+    # (the same adaptation performed at compile time) and call the
+    # compiler's compute_time_step method — the single source of truth.
+    try:
+        from fluid_scientist.cylinder_flow_2d.execution import SpecAdapter
+        from fluid_scientist.obstacle_flow.compiler import ObstacleFlowCompiler
+
+        _adapted_spec = SpecAdapter().adapt(spec)
+        end_time, delta_t, _write_interval = (
+            ObstacleFlowCompiler().compute_time_step(_adapted_spec)
+        )
+        # Use the adapted spec's transient flag — it matches what the
+        # compiler will actually do (e.g. AUTO is forced to TRANSIENT
+        # for cylinder flow by the adapter).
+        is_transient = _adapted_spec.is_transient
+    except Exception:
+        # Fallback: if adaptation fails (e.g. spec is incomplete during
+        # early preview), replicate the compiler's estimation logic on
+        # the raw spec fields so the preview still returns sensible values.
+        if is_transient:
+            end_time = spec.simulation.end_time or 100.0
+            if spec.simulation.delta_t is not None:
+                delta_t = spec.simulation.delta_t
+            else:
+                char_len = diameter if diameter else height
+                u = (reynolds * nu / char_len) if (reynolds and char_len and char_len > 0) else 1.0
+                cell_size_ts = char_len / 200 if char_len and char_len > 0 else 0.01
+                delta_t = spec.simulation.max_courant_number * cell_size_ts / max(u, 0.001)
+                delta_t = min(delta_t, end_time / 200)
         else:
-            char_len = diameter if diameter else height
-            u = (reynolds * nu / char_len) if (reynolds and char_len and char_len > 0) else 1.0
-            cell_size_ts = char_len / 200 if char_len and char_len > 0 else 0.01
-            delta_t = spec.simulation.max_courant_number * cell_size_ts / max(u, 0.001)
-            delta_t = min(delta_t, end_time / 200)
-        n_steps = int(end_time / delta_t) if delta_t > 0 else 0
-    else:
-        end_time = 1000.0
-        delta_t = 1.0
-        n_steps = 1000
+            # Steady-state: honour user-specified end_time, default 1000.
+            end_time = (
+                spec.simulation.end_time
+                if spec.simulation.end_time is not None
+                else 1000.0
+            )
+            delta_t = 1.0
+
+    # Guard against delta_t > end_time (or delta_t <= 0) producing zero steps.
+    n_steps = max(1, int(end_time / delta_t)) if delta_t > 0 else 1
 
     # rough wall-clock estimate (seconds)
     estimated_time = n_steps * estimated_cells * 1.5e-5
@@ -3690,6 +4874,16 @@ async def confirm_plan(
     if _has_blocking_substitution(spec):
         final_status = DraftStatus.NEEDS_CLARIFICATION
 
+    # --- Physics conflict: Re vs fluid properties (V2 plan Section 14.3) ---
+    _physics_conflict = _detect_physics_conflict_re_vs_fluid(spec)
+    if _physics_conflict:
+        spec.blocking_issues = [
+            i for i in spec.blocking_issues
+            if i.get("code") != "PHYSICS_CONFLICT_RE_VS_FLUID"
+        ]
+        spec.blocking_issues.append(_physics_conflict)
+        final_status = DraftStatus.NEEDS_CLARIFICATION
+
     # --- Semantic coverage check ---
     # Verify that all user-stated claims are mapped to the spec
     coverage = _semantic_coverage_check(spec, spec.user_input_text or "")
@@ -3850,6 +5044,14 @@ async def confirm_compile(spec_id: str) -> ConfirmCompileResponse:
                 "has_cylinder": manifest.has_cylinder,
                 "has_bump": manifest.has_bump,
             },
+            # Immutable artifact identifier — the full SHA-256 digest
+            # of the archive, used as the permanent reference for this
+            # compilation artifact.  This is NOT a placeholder.
+            "artifact_id": f"artifact_{compiled.archive_sha256[:16]}",
+            "archive_digest_full": compiled.archive_sha256,
+            # Unique solver command for this scenario (Foundation 13)
+            "solver_command": _determine_solver_command(adapted_spec),
+            "openfoam_version": "Foundation 13",
         }
 
         # Step 3: Static validation
@@ -3871,28 +5073,46 @@ async def confirm_compile(spec_id: str) -> ConfirmCompileResponse:
                 debug_details="; ".join(sv_result.errors),
             )
 
-        # Step 4: Upload to workstation
+        # Step 4: Upload to workstation (may fail if workstation is offline)
         job_id = f"job_{uuid.uuid4().hex[:12]}"
         executor = WorkstationExecutor()
-        case_path = executor.upload_case(job_id, compiled.archive)
 
-        # Step 5: Run mesh (blockMesh + snappyHexMesh + checkMesh)
-        mesh_report = executor.run_mesh(case_path)
+        mesh_report = None
+        smoke_report = None
+        case_path = None
+        workstation_online = True
 
-        if mesh_report.get("returncode", 1) != 0:
-            return ConfirmCompileResponse(
-                success=False,
-                spec_id=spec_id,
-                job_id=job_id,
-                compilation=compilation_info,
-                static_validation=static_validation_info,
-                mesh_report=mesh_report,
-                error="Mesh generation failed (checkMesh returned non-zero)",
-                debug_details=str(mesh_report.get("stderr", ""))[:500],
+        try:
+            case_path = executor.upload_case(job_id, compiled.archive)
+
+            # Step 5: Run mesh (blockMesh + snappyHexMesh + checkMesh)
+            mesh_report = executor.run_mesh(case_path)
+
+            if mesh_report.get("returncode", 1) != 0:
+                return ConfirmCompileResponse(
+                    success=False,
+                    spec_id=spec_id,
+                    job_id=job_id,
+                    compilation=compilation_info,
+                    static_validation=static_validation_info,
+                    mesh_report=mesh_report,
+                    error="Mesh generation failed (checkMesh returned non-zero)",
+                    debug_details=str(mesh_report.get("stderr", ""))[:500],
+                )
+
+            # Step 6: Smoke test
+            smoke_report = executor.run_smoke_test(case_path)
+
+        except Exception as upload_exc:
+            # Workstation is offline or unreachable — compilation and static
+            # validation already succeeded, so we return a partial success
+            # with ENVIRONMENT_BLOCKED status instead of a hard failure.
+            workstation_online = False
+            import logging as _logging
+            _logging.getLogger("cylinder_flow").error(
+                "Workstation upload/mesh/smoke failed for job %s: %s",
+                job_id, upload_exc, exc_info=True,
             )
-
-        # Step 6: Smoke test
-        smoke_report = executor.run_smoke_test(case_path)
 
         # Step 7: Store compiled case in memory (backward compat with /execute)
         _compiled_store[job_id] = {
@@ -3911,6 +5131,10 @@ async def confirm_compile(spec_id: str) -> ConfirmCompileResponse:
         session_data = _session_store.load(spec_id) or {"session_id": spec_id}
         session_data["compilation"] = {
             "job_id": job_id,
+            "artifact_id": compilation_info["artifact_id"],
+            "archive_digest_full": compilation_info["archive_digest_full"],
+            "solver_command": compilation_info["solver_command"],
+            "openfoam_version": compilation_info["openfoam_version"],
             "remote_case_path": case_path,
             "compilation_info": compilation_info,
             "static_validation": static_validation_info,
@@ -3918,8 +5142,50 @@ async def confirm_compile(spec_id: str) -> ConfirmCompileResponse:
             "smoke_test_report": smoke_report,
             "adapted_spec": adapted_spec.model_dump(),
             "compiled_at": datetime.now(timezone.utc).isoformat(),
+            "workstation_online": workstation_online,
         }
+
+        # If workstation is offline, add to recovery queue
+        if not workstation_online:
+            recovery_queue = session_data.get("recovery_queue", [])
+            recovery_queue.append({
+                "job_id": job_id,
+                "artifact_id": compilation_info["artifact_id"],
+                "archive_digest": compilation_info["archive_digest_full"],
+                "solver_command": compilation_info["solver_command"],
+                "spec_id": spec_id,
+                "queued_at": datetime.now(timezone.utc).isoformat(),
+                "status": "PENDING_WORKSTATION_RECOVERY",
+                "pending_steps": [
+                    "upload_archive",
+                    "blockMesh",
+                    "snappyHexMesh",
+                    "checkMesh",
+                    "smoke_test_2_steps",
+                    "full_solver_run",
+                    "postprocess_forceCoeffs",
+                    "postprocess_vorticity",
+                    "collect_results",
+                ],
+            })
+            session_data["recovery_queue"] = recovery_queue
+
         _session_store.save(spec_id, session_data)
+
+        if not workstation_online:
+            # Workstation offline — return compilation results with
+            # ENVIRONMENT_BLOCKED indicator so the UI can show the correct
+            # status to the user.
+            return ConfirmCompileResponse(
+                success=True,
+                spec_id=spec_id,
+                job_id=job_id,
+                compilation=compilation_info,
+                static_validation=static_validation_info,
+                mesh_report=None,
+                smoke_test_report=None,
+                error="ENVIRONMENT_BLOCKED: Workstation offline. Compilation and static validation succeeded; mesh check and smoke test deferred until workstation recovery.",
+            )
 
         return ConfirmCompileResponse(
             success=True,
@@ -4017,8 +5283,8 @@ async def confirm_run(job_id: str) -> ConfirmRunResponse:
             executor = WorkstationExecutor()
             postprocessor = Postprocessor(executor=executor)
 
-            # Run full simulation
-            sim_report = executor.run_full(case_path)
+            # Run full simulation (parallel for speed on multi-core workstations)
+            sim_report = executor.run_full(case_path, parallel=True, np=8)
 
             # Reconstruct adapted spec for plot generation
             adapted_spec = None

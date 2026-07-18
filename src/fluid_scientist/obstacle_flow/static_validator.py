@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 
 from fluid_scientist.obstacle_flow.models import (
     BoundaryType,
+    ObservableType,
     ObstacleFlowExperimentSpecV1,
     PressureGradientUnit,
 )
@@ -98,6 +99,9 @@ class ObstacleFlowStaticValidator:
         # Check solver configuration
         self._check_solver_config(files, result)
 
+        # Check that forceCoeffs is present when a cylinder exists
+        self._check_cylinder_force_coeffs(spec, files, result)
+
         # Check fvModels if forcing enabled
         self._check_fv_models(spec, files, result)
 
@@ -127,20 +131,63 @@ class ObstacleFlowStaticValidator:
         files: dict[str, str],
         result: StaticValidationResult,
     ) -> None:
-        """Check that patch names are consistent across field and mesh files."""
-        # Extract patches from 0/U
+        """Check that patch names are consistent across field and mesh files.
+
+        Patch name mismatches between 0/U, 0/p, and blockMeshDict are
+        HARD ERRORS, not warnings — a patch referenced in a field file
+        but not present in blockMeshDict will cause OpenFOAM to crash at
+        runtime.  This was previously a warning (false pass), now fixed.
+        """
+        # Extract patches from 0/U and 0/p
         u_content = files.get("0/U", "")
+        p_content = files.get("0/p", "")
         u_patches = self._extract_patches(u_content)
+        p_patches = self._extract_patches(p_content)
 
         # Extract patches from blockMeshDict
         bm_content = files.get("system/blockMeshDict", "")
         bm_patches = self._extract_blockmesh_patches(bm_content)
 
-        # Check that field patches are a subset of mesh patches
+        # snappyHexMesh creates obstacle patches that are NOT present in the
+        # base blockMeshDict (they are injected at runtime).  Add them so
+        # the consistency check does not flag them as missing.
+        if spec.has_cylinder:
+            bm_patches.add("cylinder")
+        if spec.has_rectangle:
+            bm_patches.add("rectangle")
+        if spec.has_triangle:
+            bm_patches.add("triangle")
+        if spec.has_trapezoid:
+            bm_patches.add("trapezoid")
+
+        # Check that all field patches exist in blockMeshDict (HARD ERROR)
         for patch in u_patches:
             if patch not in bm_patches and patch != "defaultFaces":
-                result.add_warning(
-                    f"Patch '{patch}' in 0/U not found in blockMeshDict"
+                result.add_error(
+                    f"Patch '{patch}' in 0/U not found in blockMeshDict — "
+                    f"this will cause OpenFOAM to crash at runtime"
+                )
+
+        for patch in p_patches:
+            if patch not in bm_patches and patch != "defaultFaces":
+                result.add_error(
+                    f"Patch '{patch}' in 0/p not found in blockMeshDict — "
+                    f"this will cause OpenFOAM to crash at runtime"
+                )
+
+        # Check that 0/U and 0/p have the same patch set
+        if u_patches != p_patches:
+            only_in_u = u_patches - p_patches
+            only_in_p = p_patches - u_patches
+            if only_in_u:
+                result.add_error(
+                    f"Patches in 0/U but not in 0/p: {only_in_u} — "
+                    f"field files must have identical patch sets"
+                )
+            if only_in_p:
+                result.add_error(
+                    f"Patches in 0/p but not in 0/U: {only_in_p} — "
+                    f"field files must have identical patch sets"
                 )
 
         # Check cylinder patch exists if cylinder present
@@ -340,6 +387,36 @@ class ObstacleFlowStaticValidator:
                 "Legacy solvers (pimpleFoam, simpleFoam) are forbidden — use incompressibleFluid"
             )
 
+    def _check_cylinder_force_coeffs(
+        self,
+        spec: ObstacleFlowExperimentSpecV1,
+        files: dict[str, str],
+        result: StaticValidationResult,
+    ) -> None:
+        """Check that forceCoeffs is present when force observables exist.
+
+        If the spec requests CYLINDER_DRAG or CYLINDER_LIFT observables
+        but the compiled controlDict lacks the ``forceCoeffs`` function
+        object, the observables were likely deleted from the compiled
+        output or the compilation silently dropped them — this is an
+        error.
+        """
+        has_force_obs = any(
+            o.type in (ObservableType.CYLINDER_DRAG, ObservableType.CYLINDER_LIFT)
+            for o in spec.observables
+        )
+        if not has_force_obs:
+            return
+
+        cd = files.get("system/controlDict", "")
+        if "forceCoeffs" not in cd:
+            result.add_error(
+                "Force observables (CYLINDER_DRAG / CYLINDER_LIFT) are present "
+                "in the spec but 'forceCoeffs' function object is missing from "
+                "system/controlDict — the force measurement was likely deleted "
+                "from the compiled output."
+            )
+
     def _check_fv_models(
         self,
         spec: ObstacleFlowExperimentSpecV1,
@@ -365,35 +442,92 @@ class ObstacleFlowStaticValidator:
             result.add_error("fvModels must contain bodyForce for pressure gradient")
 
     def _extract_patches(self, content: str) -> set[str]:
-        """Extract patch names from an OpenFOAM field file."""
+        """Extract patch names from an OpenFOAM field file.
+
+        Only identifiers that are direct children of the ``boundaryField``
+        block are returned.  This avoids false positives such as
+        ``FoamFile`` (the file header) or ``uniformValue`` (a nested
+        sub-dictionary inside a patch entry).
+        """
         patches: set[str] = set()
-        # Look for lines like "    patchName" followed by "{"
-        lines = content.split("\n")
+        # Isolate the boundaryField { ... } block
+        m = re.search(r"boundaryField\s*\{", content)
+        if not m:
+            return patches
+        start = m.end()
+        depth = 1
+        end = start
+        while end < len(content) and depth > 0:
+            if content[end] == "{":
+                depth += 1
+            elif content[end] == "}":
+                depth -= 1
+            end += 1
+        bf = content[start : end - 1]
+
+        # Within boundaryField, a patch entry is a bare word at depth 0
+        # followed by ``{`` (either on the same line or the next line).
+        bf_depth = 0
+        lines = bf.split("\n")
         for i, line in enumerate(lines):
             stripped = line.strip()
-            if i + 1 < len(lines) and stripped and not stripped.startswith("//"):
-                next_stripped = lines[i + 1].strip() if i + 1 < len(lines) else ""
-                if next_stripped == "{" and not stripped.startswith("boundaryField"):
-                    if stripped not in ("boundaryField",):
-                        patches.add(stripped)
+            if not stripped or stripped.startswith("//"):
+                continue
+            opens = stripped.count("{")
+            closes = stripped.count("}")
+            if bf_depth == 0 and opens > 0:
+                before = stripped.split("{")[0].strip()
+                if re.match(r"^\w+$", before):
+                    patches.add(before)
+                elif i > 0:
+                    prev = lines[i - 1].strip()
+                    if re.match(r"^\w+$", prev):
+                        patches.add(prev)
+            bf_depth += opens - closes
         return patches
 
     def _extract_blockmesh_patches(self, content: str) -> set[str]:
-        """Extract patch names from blockMeshDict boundary section."""
+        """Extract patch names from blockMeshDict boundary section.
+
+        Tracks parenthesis *and* brace depth so that the ``)`` closing a
+        ``faces`` sub-list does not prematurely terminate parsing of the
+        boundary list.
+        """
         patches: set[str] = set()
         in_boundary = False
+        paren_depth = 0  # depth of ( ) — 1 means inside the boundary list
+        brace_depth = 0  # depth of { } — 0 means between patch entries
         lines = content.split("\n")
-        for i, line in enumerate(lines):
+        for line in lines:
             stripped = line.strip()
-            if stripped == "boundary":
-                in_boundary = True
+            if not in_boundary:
+                if stripped == "boundary":
+                    in_boundary = True
                 continue
-            if in_boundary:
-                if stripped.startswith(")"):
-                    break
-                if stripped and not stripped.startswith("//") and not stripped.startswith("{"):
-                    if not stripped.startswith("type") and not stripped.startswith("faces") and not stripped.startswith("neighbourPatch"):
-                        patches.add(stripped)
+            opens_p = stripped.count("(")
+            closes_p = stripped.count(")")
+            opens_b = stripped.count("{")
+            closes_b = stripped.count("}")
+            # A patch name sits at paren_depth==1 (inside the boundary
+            # list) and brace_depth==0 (between patch entries, not inside
+            # a patch's sub-dictionary).
+            if paren_depth == 1 and brace_depth == 0:
+                if (
+                    stripped
+                    and not stripped.startswith("//")
+                    and not stripped.startswith("{")
+                    and not stripped.startswith(")")
+                    and not stripped.startswith("(")
+                    and not stripped.startswith("type")
+                    and not stripped.startswith("faces")
+                    and not stripped.startswith("neighbourPatch")
+                    and re.match(r"^\w+$", stripped)
+                ):
+                    patches.add(stripped)
+            paren_depth += opens_p - closes_p
+            brace_depth += opens_b - closes_b
+            if paren_depth <= 0:
+                break
         return patches
 
 

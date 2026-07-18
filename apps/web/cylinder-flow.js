@@ -345,6 +345,33 @@
       ]));
     }
 
+    // Triangle obstacle
+    const tri = spec.triangle || {};
+    if (tri.enabled) {
+      viewer.appendChild(section("三角障碍物", [
+        fieldRow("类型", "三角形", "inferred"),
+        fieldRow("底宽", pvNum(tri.base_width_m, "m"), "inferred"),
+        fieldRow("高度", pvNum(tri.height_m, "m"), "inferred"),
+        fieldRow("中心 X", pvNum(tri.center_x_m, "m"), "inferred"),
+        tri.apex_direction ? fieldRow("尖端方向", tri.apex_direction, "inferred") : null,
+        tri.relation_to_cylinder ? fieldRow("与圆柱关系", tri.relation_to_cylinder, "inferred") : null,
+      ]));
+    }
+
+    // Trapezoid obstacle
+    const trap = spec.trapezoid || {};
+    if (trap.enabled) {
+      viewer.appendChild(section("梯形障碍物", [
+        fieldRow("类型", "梯形", "inferred"),
+        fieldRow("上底", pvNum(trap.top_width_m, "m"), "inferred"),
+        fieldRow("下底", pvNum(trap.bottom_width_m, "m"), "inferred"),
+        fieldRow("高度", pvNum(trap.height_m, "m"), "inferred"),
+        fieldRow("中心 X", pvNum(trap.center_x_m, "m"), "inferred"),
+        trap.solver_representation ? fieldRow("求解器表示", trap.solver_representation, "inferred") : null,
+        trap.relation_to_cylinder ? fieldRow("与圆柱关系", trap.relation_to_cylinder, "inferred") : null,
+      ]));
+    }
+
     // Fluid
     const fluid = spec.fluid || {};
     viewer.appendChild(section("流体属性", [
@@ -1093,6 +1120,15 @@
       summaryList.push(`三角形障碍物: 底宽${tw} × 高${th} (尖端${tri.apex_direction || "向上"})`);
     }
 
+    // Trapezoid obstacle
+    const trap = spec.trapezoid || {};
+    if (trap.enabled) {
+      const tw = trap.top_width_m && trap.top_width_m.value != null ? `${trap.top_width_m.value}m` : "?";
+      const bw = trap.bottom_width_m && trap.bottom_width_m.value != null ? `${trap.bottom_width_m.value}m` : "?";
+      const th = trap.height_m && trap.height_m.value != null ? `${trap.height_m.value}m` : "?";
+      summaryList.push(`梯形障碍物: 上底${tw} × 下底${bw} × 高${th} (${trap.solver_representation || "parametric_polygon"})`);
+    }
+
     // Bottom profile
     const bpSd = sd["底部轮廓"] || {};
     if (bpSd.type && bpSd.type !== "平直") {
@@ -1215,6 +1251,7 @@
         AWAITING_CONFIRMATION: "等待确认",
         READY_TO_CONFIRM: "可以确认",
         SPEC_CONFIRMED: "已确认",
+        COMPILED: "已编译",
       };
       parts.push(el("div", {
         style: "font-size:11px;color:var(--faint,#6c726d);margin-top:6px;",
@@ -1415,10 +1452,24 @@
 
   // ---- Step 3: Show "确认研究方案" button ----
   function showPlanConfirmButton() {
+    // Disable any existing confirm buttons to prevent duplicates
+    const timeline = byId("conversation-timeline");
+    if (timeline) {
+      const oldButtons = timeline.querySelectorAll('button[data-confirm-button="true"]');
+      oldButtons.forEach(oldBtn => {
+        oldBtn.disabled = true;
+        oldBtn.textContent = "已失效（方案已修改）";
+        oldBtn.style.opacity = "0.4";
+        oldBtn.style.cursor = "default";
+        oldBtn.removeAttribute("data-confirm-button");
+      });
+    }
+
     const btn = createConfirmButton("确认研究方案", () => confirmPlan(), (btn) => {
       btn.textContent = "✓ 方案已确认";
       btn.style.opacity = "0.6";
     });
+    btn.setAttribute("data-confirm-button", "true");
     addConversationMessage("assistant", [
       el("div", { text: "方案已就绪，请点击下方按钮确认研究方案，确认后将进入编译阶段。" }),
       btn,
@@ -1459,7 +1510,8 @@
           addConversationMessage("system", "方案存在阻塞问题: " + (result.error || "请检查方案配置"));
           cylState.active = false;
           cylState.stage = Stage.DRAFT;
-          return;
+          // Throw error so the confirm button is reset by createConfirmButton's catch block
+          throw new Error("方案存在阻塞问题，请修正后重试");
         }
         throw new Error(result.error || "Confirm plan failed");
       }
@@ -1467,9 +1519,15 @@
       // Spec is now frozen (SPEC_CONFIRMED)
       cylState.specConfirmed = true;
       cylState.draftStatus = "SPEC_CONFIRMED";
+      if (cylState.spec) {
+        cylState.spec.draft_status = "SPEC_CONFIRMED";
+      }
 
       hideProgress();
       updateProgressMessage("方案已确认 (Gate 1 通过)。");
+
+      // Re-render spec panel to update the status badge
+      renderSpecPanel(cylState.spec, cylState.semanticDisplay);
 
       const confirmMsg = result.already_confirmed
         ? "研究方案已确认（之前已确认）。以下是编译预览："
@@ -1602,6 +1660,12 @@
 
       cylState.jobId = compiled.job_id;
       cylState.flowMode = compiled.flow_mode;
+      // Update spec status to reflect compiled state
+      cylState.draftStatus = "COMPILED";
+      if (cylState.spec) {
+        cylState.spec.draft_status = "COMPILED";
+      }
+      renderSpecPanel(cylState.spec, cylState.semanticDisplay);
       saveCylState();
 
       updateProgressMessage(`Case 编译完成: ${compiled.file_count} 个文件, 流动模式: ${compiled.flow_mode || "cylinder_flow"}`);
@@ -2148,7 +2212,50 @@
     showError(err.message);
     hideProgress();
     updateProgressMessage("失败: " + err.message);
-    addConversationMessage("system", "执行失败: " + err.message);
+
+    // Build user-friendly error message with guidance
+    const errParts = [];
+    errParts.push(el("div", {
+      style: "font-weight:600;margin-bottom:6px;color:#c0392b;",
+      text: "执行失败",
+    }));
+
+    // Classify error and provide targeted guidance
+    const errMsg = err.message || "";
+    let guidance = "";
+    if (errMsg.includes("upload") || errMsg.includes("archive") || errMsg.includes("SSH") || errMsg.includes("connection")) {
+      guidance = "无法连接到执行平台。请检查工作站配置（左侧面板「工作站配置」），确保 SSH 连接正常后再重试。";
+    } else if (errMsg.includes("mesh") || errMsg.includes("blockMesh") || errMsg.includes("snappyHexMesh")) {
+      guidance = "网格生成失败。请检查几何参数是否合理（如圆柱尺寸不要超过计算域），或尝试调整网格参数后重新确认方案。";
+    } else if (errMsg.includes("smoke") || errMsg.includes("checkMesh")) {
+      guidance = "验证未通过。请查看上方详细日志，检查网格质量和物理参数设置。";
+    } else if (errMsg.includes("Spec not found")) {
+      guidance = "服务已重启，方案数据丢失。请重新输入研究目标创建新方案。";
+    } else {
+      guidance = "请查看上方错误详情。如问题持续，请检查模型配置和网络连接后重试。";
+    }
+
+    errParts.push(el("div", {
+      style: "font-size:12px;margin-bottom:8px;",
+      text: errMsg,
+    }));
+    errParts.push(el("div", {
+      style: "font-size:12px;color:#555;margin-bottom:10px;",
+      text: guidance,
+    }));
+
+    // Add retry button if we have a specId (can re-compile and re-execute)
+    if (cylState.specId && cylState.specConfirmed) {
+      const retryBtn = createConfirmButton("重新编译并执行", () => {
+        compileAndValidate();
+      }, (btn) => {
+        btn.textContent = "✓ 已重新启动";
+        btn.style.opacity = "0.6";
+      });
+      errParts.push(retryBtn);
+    }
+
+    addConversationMessage("system", errParts);
   }
 
   // ---- Polling (preserves original logic, adds smoke-test checkpoint) ----
@@ -2528,7 +2635,8 @@
         } else if (status.status === "FAILED" || status.status === "ERROR") {
           cylState.stage = null;
           setStatusBadge("FAILED");
-          addConversationMessage("system", "之前的仿真任务失败: " + (status.error || "未知错误"));
+          // Use onPipelineError for consistent error display with retry button
+          onPipelineError(new Error(status.error || "之前的仿真任务失败"));
         }
       } catch (e) {
         console.warn("[CylinderFlow] Failed to restore job status:", e.message);

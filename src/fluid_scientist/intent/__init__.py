@@ -31,6 +31,7 @@ class ConflictType(str, Enum):
     BOUNDARY_CONFLICT = "boundary_conflict"
     UNSUPPORTED_CAPABILITY = "unsupported_capability"
     MISSING_REQUIRED_FIELD = "missing_required_field"
+    DIMENSION_CONFLICT = "dimension_conflict"
 
 
 class ConflictSeverity(str, Enum):
