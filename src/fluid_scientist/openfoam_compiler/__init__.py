@@ -28,10 +28,22 @@ Example
 from __future__ import annotations
 
 from .compiler import CompiledCase, OpenFOAMCompiler
+from .compile_plan import (
+    CompileDiagnosticAdvice,
+    CompilePlan,
+    CompilePlanAST,
+    DeterministicCompilePlanCompiler,
+    RenderedFoundation13Case,
+)
 from .validators import CompiledCaseValidator
 
 __all__ = [
     "CompiledCase",
     "OpenFOAMCompiler",
     "CompiledCaseValidator",
+    "CompileDiagnosticAdvice",
+    "CompilePlan",
+    "CompilePlanAST",
+    "DeterministicCompilePlanCompiler",
+    "RenderedFoundation13Case",
 ]
