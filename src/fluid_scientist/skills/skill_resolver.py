@@ -22,6 +22,10 @@ import yaml
 
 logger = logging.getLogger(__name__)
 
+
+class SkillResolutionError(RuntimeError):
+    """Raised when requested Skill context is missing or irrelevant."""
+
 # Default skills directory
 SKILLS_DIR = Path(__file__).resolve().parents[3] / "data" / "skills"
 
@@ -220,6 +224,36 @@ class SkillResolver:
     def get_manifest(self, skill_id: str) -> SkillManifest | None:
         """Get a specific manifest by ID."""
         return self._manifests.get(skill_id)
+
+    def resolve_documents(
+        self,
+        skill_ids: list[str],
+        *,
+        user_text: str | None = None,
+    ) -> list[dict[str, str]]:
+        """Resolve effective Skill documents or fail closed.
+
+        ``user_text`` enables the Wrong Skill guard: every requested Skill
+        must also be selected by the resolver for that message.
+        """
+
+        relevant_ids: set[str] | None = None
+        if user_text is not None:
+            relevant_ids = {
+                item.skill_id for item in self.select_skills(user_text=user_text)
+            }
+        documents: list[dict[str, str]] = []
+        for skill_id in skill_ids:
+            manifest = self.get_manifest(skill_id)
+            if manifest is None or not manifest.enabled or not manifest.prompt_fragment.strip():
+                raise SkillResolutionError(f"SKILL_MISSING: {skill_id}")
+            if relevant_ids is not None and skill_id not in relevant_ids:
+                raise SkillResolutionError(f"WRONG_SKILL: {skill_id}")
+            documents.append({
+                "skill_id": skill_id,
+                "content": manifest.prompt_fragment,
+            })
+        return documents
 
     def reload(self) -> None:
         """Reload all manifests (useful for development)."""

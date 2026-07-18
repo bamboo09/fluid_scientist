@@ -1,26 +1,25 @@
 skill_id: fluid.spatial_reasoning
-name: "空间关系推理技能"
-description: "验证和保持用户描述的空间关系"
+name: "Spatial Relation Reasoning"
+description: "Resolve relative placement while preserving its evidence and uncertainty."
 stage: geometry
-priority: 82
+priority: 78
 enabled: true
-version: "1.0"
+version: "2.0"
 selection_keywords:
+  - 下方
+  - 上方
   - 正下方
   - 贴附
-  - 正中央
-  - 位于
+  - 居中
+  - 距离
   - below
   - above
-  - centered
   - attached
+  - centered
 prompt_fragment: |
-  ## 空间关系规则
-  - "位于圆柱正下方" → obstacle.center_x == cylinder.center_x
-  - "贴附下壁面" → obstacle底部y=0
-  - "正中央" → cylinder.center_x == domain.length / 2
-  - "距下壁Xm" → cylinder.center_y == X + radius
-  - 空间关系必须在compiled case中保持
-  - 空间关系冲突（如"距下壁2m"和"正中央"给出不同y）必须检测并报告
-compiler_hooks:
-  enforce_spatial_relations: "true"
+  ## Spatial reasoning rules
+  - Store relations such as below(entity), attached_to(boundary) and centered_on(entity) explicitly.
+  - Only derive coordinates when the referenced entity and all required dimensions are resolved.
+  - A relative relation without sufficient coordinates remains valid semantic information and may create a clarification.
+  - Detect contradictions between explicit coordinates and relative placement.
+  - Cite the exact relation phrase from the user for each relation and derived coordinate.
