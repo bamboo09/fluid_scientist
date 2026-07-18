@@ -63,7 +63,7 @@ def test_demo_endpoint_rejects_short_question() -> None:
 def test_static_workbench_does_not_expose_skill_navigation() -> None:
     html = client().get("/").text
 
-    assert "实验结果与可信度检查" in html
+    assert "连接实验规划模型" in html
     assert "Skill 候选" not in html
 
 
@@ -722,4 +722,18 @@ def test_custom_openfoam_case_can_be_validated_before_submission() -> None:
             payload = text.encode()
             info = tarfile.TarInfo(name)
             info.size = len(payload)
-            bundle.addfile(info, io.BytesIO(pay
+            bundle.addfile(info, io.BytesIO(payload))
+
+    response = client().post(
+        "/api/custom-cases/validate",
+        content=output.getvalue(),
+        headers={"content-type": "application/gzip"},
+    )
+
+    assert response.status_code == 200
+    manifest = response.json()
+    assert manifest["solver"] == "incompressibleFluid"
+    assert manifest["has_mesh"] is False
+    assert manifest["needs_block_mesh"] is True
+    assert manifest["archive_sha256"].startswith("sha256:")
+    assert set(files).issubset(manifest["members"])

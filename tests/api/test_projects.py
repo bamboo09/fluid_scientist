@@ -94,19 +94,18 @@ def test_workbench_exposes_conversation_driven_project_and_gate_workflow(tmp_pat
     client = make_client(f"sqlite:///{tmp_path / 'projects.db'}")
 
     html = client.get("/").text
-    script = client.get("/assets/app.js").text
+    script = client.get("/assets/v5-app.js").text
 
-    assert 'id="experiment-prompt"' in html
-    assert 'id="design-experiment"' in html
+    assert 'id="research-input"' in html
+    assert 'id="composer-form"' in html
+    assert 'id="draft-viewer"' in html
     assert "Skill 候选" not in html
 
-    assert 'requestJson("/api/projects"' in script
-    assert 'approveGate(currentProject, "GATE_1")' in script
-    assert 'applyWorkflowAction(currentProject, "RETRIEVE_EVIDENCE")' in script
-    assert 'applyWorkflowAction(currentProject, "DESIGN_PILOT")' in script
-    assert '`/api/projects/${project.project_id}/approvals`' in script
-    assert '`/api/projects/${project.project_id}/actions`' in script
-    assert 'gate: "GATE_2"' in script
+    assert 'byId("composer-form").addEventListener("submit"' in script
+    assert 'sendUserMessage(byId("research-input").value)' in script
+    assert 'byId("draft-viewer")' in script
+    assert 'api("/api/v5/sessions"' in script
+    assert 'api(`/api/v5/sessions/${id}/messages`' in script
 
 
 def test_app_uses_configured_database_when_repository_is_not_injected(tmp_path) -> None:

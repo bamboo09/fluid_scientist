@@ -15,6 +15,13 @@ from fluid_scientist.capabilities.config_extension import (
     ConfigExtensionExecution,
     ConfigExtensionExecutor,
 )
+from fluid_scientist.capabilities.gap_analyzer import (
+    AtomicRequirementSet,
+    CapabilityGapAnalyzer,
+    CapabilityResolutionPlan,
+    RequirementClassification,
+    RequirementClassificationResult,
+)
 from fluid_scientist.capabilities.orchestrator import (
     ExtensionLifecycleStatus,
     ExtensionRunRecord,
@@ -45,14 +52,17 @@ from fluid_scientist.capabilities.registry import (
 
 __all__ = [
     "CAPABILITY_TYPES",
+    "AtomicRequirementSet",
     "Capability",
     "CapabilityHealthIssue",
     "CapabilityHealthRecord",
     "CapabilityHealthReport",
+    "CapabilityGapAnalyzer",
     "CapabilityRegistry",
     "CapabilityRequirement",
     "CapabilityRequirementGraph",
     "CapabilityResolution",
+    "CapabilityResolutionPlan",
     "CapabilityStatus",
     "CapabilityType",
     "CodeExtensionSpec",
@@ -65,6 +75,8 @@ __all__ = [
     "MissingCapability",
     "PipelineCheckpoint",
     "RequirementGraphResolver",
+    "RequirementClassification",
+    "RequirementClassificationResult",
     "ResolutionStatus",
     "ResolutionStrategy",
     "StrictModel",
