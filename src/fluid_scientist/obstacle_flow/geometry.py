@@ -325,6 +325,74 @@ class TriangleGeometryBuilder:
         )
 
 
+# ---------------------------------------------------------------------------
+# Trapezoid geometry
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class TrapezoidGeometry:
+    """Computed trapezoid geometry: 4 vertices + bounding box."""
+
+    center_x: float
+    center_y: float
+    top_width: float
+    bottom_width: float
+    height: float
+    thickness: float
+    # Vertices in order: bottom-left, bottom-right, top-right, top-left
+    v0: tuple[float, float]  # bottom-left
+    v1: tuple[float, float]  # bottom-right
+    v2: tuple[float, float]  # top-right
+    v3: tuple[float, float]  # top-left
+    bbox_x_min: float
+    bbox_x_max: float
+    bbox_y_min: float
+    bbox_y_max: float
+
+
+class TrapezoidGeometryBuilder:
+    """Builds trapezoid geometry data from spec.
+
+    Computes 4 vertices from center / top_width / bottom_width / height.
+    Wide base (bottom_width) sits on the wall (y=0), narrow top (top_width)
+    faces upward.
+    """
+
+    def build(self, trap: TrapezoidSpec) -> TrapezoidGeometry:
+        """Compute trapezoid vertices from spec."""
+        cx = trap.center_x
+        cy = trap.center_y
+        h = trap.height
+        half_bot = trap.bottom_width / 2.0
+        half_top = trap.top_width / 2.0
+
+        # Wide base at bottom, narrow top at top
+        v0 = (cx - half_bot, cy)         # bottom-left
+        v1 = (cx + half_bot, cy)         # bottom-right
+        v2 = (cx + half_top, cy + h)     # top-right
+        v3 = (cx - half_top, cy + h)     # top-left
+
+        xs = [v0[0], v1[0], v2[0], v3[0]]
+        ys = [v0[1], v1[1], v2[1], v3[1]]
+        return TrapezoidGeometry(
+            center_x=cx,
+            center_y=cy,
+            top_width=trap.top_width,
+            bottom_width=trap.bottom_width,
+            height=h,
+            thickness=trap.thickness,
+            v0=v0,
+            v1=v1,
+            v2=v2,
+            v3=v3,
+            bbox_x_min=min(xs),
+            bbox_x_max=max(xs),
+            bbox_y_min=min(ys),
+            bbox_y_max=max(ys),
+        )
+
+
 __all__ = [
     "BumpProfile",
     "BumpProfileGenerator",
@@ -334,4 +402,6 @@ __all__ = [
     "RectangleGeometryBuilder",
     "TriangleGeometry",
     "TriangleGeometryBuilder",
+    "TrapezoidGeometry",
+    "TrapezoidGeometryBuilder",
 ]

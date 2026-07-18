@@ -699,18 +699,32 @@ class AmbiguityAndConflictAuditor:
 
         # 圆柱半径/直径都缺失
         # 检查用户是否提到了圆柱（即使尺寸未给）
+        # Only flag as missing if the user text actually mentions cylinder-related keywords,
+        # AND the cylinder type was set to "cylinder" in the spec.
+        # This prevents false positives when LLM hallucinates cylinder type for
+        # triangle/rectangle/other obstacle inputs.
         cylinder_mentioned = spec.cylinder.type == "cylinder"
         if cylinder_mentioned:
-            r = spec.cylinder.radius_m.value
-            d = spec.cylinder.diameter_m.value
-            if r is None and d is None and "cylinder_diameter" not in derived_fields:
-                result.issues.append(AuditIssue(
-                    category=IssueCategory.TRUE_MISSING_FIELD,
-                    code="CYLINDER_DIMENSION_TRULY_MISSING",
-                    title="圆柱尺寸缺失",
-                    description="用户提到了圆柱绕流，但圆柱半径或直径未指定，且无法从其他参数推导。",
-                    blocks=True,
-                ))
+            # Verify user actually mentioned cylinder in the input text
+            user_lower = (user_text or spec.user_input_text or "").lower()
+            cylinder_keywords = ["圆柱", "圆筒", "cylinder", "circular", "圆形障碍", "圆棒"]
+            user_mentions_cylinder = any(kw in user_lower for kw in cylinder_keywords)
+            if not user_mentions_cylinder:
+                # User did NOT mention cylinder — this is a spec misidentification.
+                # Don't block on cylinder dimension; the actual obstacle (triangle, etc.)
+                # is already handled by its own geometry fields.
+                pass
+            else:
+                r = spec.cylinder.radius_m.value
+                d = spec.cylinder.diameter_m.value
+                if r is None and d is None and "cylinder_diameter" not in derived_fields:
+                    result.issues.append(AuditIssue(
+                        category=IssueCategory.TRUE_MISSING_FIELD,
+                        code="CYLINDER_DIMENSION_TRULY_MISSING",
+                        title="圆柱尺寸缺失",
+                        description="用户提到了圆柱绕流，但圆柱半径或直径未指定，且无法从其他参数推导。",
+                        blocks=True,
+                    ))
 
         # 入口速度缺失
         u = spec.boundaries.left.inlet_velocity

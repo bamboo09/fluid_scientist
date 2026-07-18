@@ -214,6 +214,43 @@ def _require_llm_client() -> LLMClient:
     return _llm_client
 
 
+@router.get("/model-config")
+async def get_model_config() -> dict:
+    """Return current LLM model configuration status."""
+    if _llm_client is not None:
+        return {
+            "configured": True,
+            "provider": _llm_client._provider,
+            "model": _llm_client._model_name,
+        }
+    config = _load_llm_config()
+    if config and config.get("provider"):
+        return {
+            "configured": True,
+            "provider": config["provider"],
+            "model": config["model"],
+        }
+    return {"configured": False}
+
+
+@router.post("/model-config")
+async def set_model_config(payload: dict) -> dict:
+    """Configure LLM model provider and credentials."""
+    provider = payload.get("provider", "glm")
+    model = payload.get("model", "glm-4-flash")
+    api_key = payload.get("api_key", "")
+    base_url = payload.get("base_url")
+    if not api_key or len(api_key) < 5:
+        raise HTTPException(status_code=400, detail="API key is too short")
+    configure_llm_client(
+        provider=provider,
+        model=model,
+        api_key=api_key,
+        base_url=base_url,
+    )
+    return {"configured": True, "provider": provider, "model": model}
+
+
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
