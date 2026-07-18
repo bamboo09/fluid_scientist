@@ -1855,7 +1855,7 @@ class CylinderFlow2DV1Pipeline:
                 pos = match.start()
                 role_window = text_lower[max(0, pos - 16):pos + len(kw) + 20]
                 domain_role = any(token in role_window for token in (
-                    "计算域", "流场区域", "求解域", "domain", "computational region",
+                    "计算域", "流场", "流场区域", "求解域", "domain", "computational region",
                 ))
                 obstacle_role = any(token in role_window for token in (
                     "障碍", "凸起", "固体", "物体", "obstacle", "solid", "block",

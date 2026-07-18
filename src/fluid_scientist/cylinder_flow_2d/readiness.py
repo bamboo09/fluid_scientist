@@ -63,7 +63,25 @@ class CylinderFlow2DDraftReadinessEvaluator:
         self, spec: CylinderFlow2DExperimentSpecV1
     ) -> list[dict]:
         """Collect all blocking issues. Returns empty list if none."""
-        issues: list[dict] = []
+        # Preserve blockers contributed by the LLM/audit/capability layers.
+        # Callers that intentionally resolved them clear ``blocking_issues``
+        # before re-evaluation (the confirmation chain already does this).
+        external_prefixes = ("LLM_", "CANDIDATE_", "CAPABILITY_", "UNSUPPORTED_")
+        external_codes = {
+            "TOP_BOUNDARY_AMBIGUITY",
+            "BOTTOM_BOUNDARY_AMBIGUITY",
+            "PHYSICS_CONFLICT_RE_VS_FLUID",
+        }
+        issues: list[dict] = [
+            dict(issue)
+            for issue in spec.blocking_issues
+            if isinstance(issue, dict)
+            and issue.get("severity") != "non_blocking"
+            and (
+                str(issue.get("code", "")).startswith(external_prefixes)
+                or issue.get("code") in external_codes
+            )
+        ]
 
         # 1. Cylinder type must exist (or bump profile / triangle / rectangle must be enabled)
         if not spec.has_cylinder and not spec.has_bottom_profile and not spec.has_triangle and not spec.has_rectangle and not spec.has_trapezoid:
@@ -183,7 +201,15 @@ class CylinderFlow2DDraftReadinessEvaluator:
                             "severity": "blocking",
                         })
 
-        return issues
+        deduplicated: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+        for issue in issues:
+            identity = (str(issue.get("code", "")), str(issue.get("message", "")))
+            if identity in seen:
+                continue
+            seen.add(identity)
+            deduplicated.append(issue)
+        return deduplicated
 
     def _is_minimum_complete(
         self, spec: CylinderFlow2DExperimentSpecV1

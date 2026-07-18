@@ -100,10 +100,10 @@
   // ---- Value formatting ----
   const sourceLabels = {
     USER_CONFIRMED: "用户确认",
-    USER_EXPLICIT: "用户输入",
-    FORMULA_DERIVED: "公式派生",
+    USER_EXPLICIT: "用户明确",
+    FORMULA_DERIVED: "公式推导",
     SYSTEM_DERIVED: "系统派生",
-    MODEL_RECOMMENDED: "模型推荐",
+    MODEL_RECOMMENDED: "模型建议",
     SYSTEM_DEFAULT: "系统默认",
   };
 
@@ -253,12 +253,72 @@
     const statusLabelsMap = {
       confirmed: "已确认", pending: "已填充", inferred: "模型推断",
       "user-provided": "用户提供", missing: "待补充", conflict: "存在冲突",
+      USER_CONFIRMED: "用户确认", USER_EXPLICIT: "用户明确",
+      FORMULA_DERIVED: "公式推导", SYSTEM_DERIVED: "系统派生",
+      MODEL_RECOMMENDED: "模型建议", SYSTEM_DEFAULT: "系统默认",
     };
     return el("div", { class: "field-row" }, [
       el("span", { class: "field-label-inline", text: label }),
       el("span", { class: "field-value-inline", text: value }),
       status ? el("span", { class: `field-status ${status}`, text: statusLabelsMap[status] || status }) : null,
     ]);
+  }
+
+  function provenanceStatus(field, fallback = "inferred") {
+    if (field && typeof field === "object" && field.source) return field.source;
+    return fallback;
+  }
+
+  function displayChangeValue(value) {
+    if (value == null) return "—";
+    if (typeof value === "object") {
+      if (Object.prototype.hasOwnProperty.call(value, "value")) return String(value.value ?? "—");
+      return JSON.stringify(value);
+    }
+    return String(value);
+  }
+
+  function appendChangeSummary(changes, specVersion) {
+    const viewer = byId("draft-viewer");
+    if (!viewer || !Array.isArray(changes) || !changes.length) return;
+    const relevant = changes.filter((change) =>
+      !["updated_at", "user_input_text"].some((suffix) => String(change.path || "").endsWith(suffix))
+    );
+    if (!relevant.length) return;
+    viewer.appendChild(section(`本次修改 · Spec v${specVersion || "—"}`, relevant.map((change) =>
+      fieldRow(
+        change.path || "字段",
+        `before: ${displayChangeValue(change.before)} → after: ${displayChangeValue(change.after)}`,
+        "USER_EXPLICIT",
+      )
+    )));
+  }
+
+  function blockerField(issue) {
+    if (issue.field_path || issue.field) return issue.field_path || issue.field;
+    const codeFields = {
+      LLM_MISSING_FIELD: "fluid.density_kg_m3",
+      TOP_BOUNDARY_AMBIGUITY: "boundaries.top",
+      CANDIDATE_CONFLICT: "obstacle.type",
+    };
+    return codeFields[issue.code] || issue.code || "未标注字段";
+  }
+
+  function blockerReason(issue) {
+    if (issue.code === "LLM_MISSING_FIELD") {
+      const field = issue.field || String(issue.message || "").split(":").pop().trim() || "必需字段";
+      return `模型未获得字段“${field}”的明确证据，系统不会静默填入材料或求解参数。`;
+    }
+    return issue.message || issue.check || "该字段尚未满足确认条件。";
+  }
+
+  function blockerAction(issue) {
+    if (issue.resolution_action) return issue.resolution_action;
+    if (issue.recommendation) return `确认建议：${issue.recommendation}`;
+    if (Array.isArray(issue.options) && issue.options.length) {
+      return `请选择：${issue.options.join(" / ")}`;
+    }
+    return `请补充或确认字段 ${blockerField(issue)}，然后重新校验。`;
   }
 
   function section(title, children) {
@@ -300,8 +360,8 @@
     const domSd = sd["计算域"] || {};
     viewer.appendChild(section("计算域", [
       fieldRow("维度", dom.dimensionality || domSd.dimensionality || "2D", "inferred"),
-      fieldRow("长度", pvNum(dom.length_m, "m") || pvNum(domSd.length_m, "m"), "inferred"),
-      fieldRow("高度", pvNum(dom.height_m, "m") || pvNum(domSd.height_m, "m"), "inferred"),
+      fieldRow("长度", pvNum(dom.length_m, "m") || pvNum(domSd.length_m, "m"), provenanceStatus(dom.length_m)),
+      fieldRow("高度", pvNum(dom.height_m, "m") || pvNum(domSd.height_m, "m"), provenanceStatus(dom.height_m)),
     ]));
 
     // Cylinder / Obstacle
@@ -311,10 +371,10 @@
     if (hasCyl) {
       viewer.appendChild(section("圆柱障碍物", [
         fieldRow("类型", cylSd.type || "圆柱", "inferred"),
-        fieldRow("直径", pvNum(cyl.diameter_m, "m") || pvNum(cylSd.diameter_m, "m"), "inferred"),
-        fieldRow("半径", pvNum(cyl.radius_m, "m") || pvNum(cylSd.radius_m, "m"), "inferred"),
-        fieldRow("圆心 X", pvNum(cyl.center_x_m, "m") || pvNum(cylSd.center_x_m, "m"), "inferred"),
-        fieldRow("圆心 Y", pvNum(cyl.center_y_m, "m") || pvNum(cylSd.center_y_m, "m"), "inferred"),
+        fieldRow("直径", pvNum(cyl.diameter_m, "m") || pvNum(cylSd.diameter_m, "m"), provenanceStatus(cyl.diameter_m)),
+        fieldRow("半径", pvNum(cyl.radius_m, "m") || pvNum(cylSd.radius_m, "m"), provenanceStatus(cyl.radius_m)),
+        fieldRow("圆心 X", pvNum(cyl.center_x_m, "m") || pvNum(cylSd.center_x_m, "m"), provenanceStatus(cyl.center_x_m)),
+        fieldRow("圆心 Y", pvNum(cyl.center_y_m, "m") || pvNum(cylSd.center_y_m, "m"), provenanceStatus(cyl.center_y_m)),
         cyl.wall_type ? fieldRow("壁面类型", String(cyl.wall_type), "inferred") : null,
         cyl.angular_velocity_rad_s ? fieldRow("角速度", String(cyl.angular_velocity_rad_s) + " rad/s", "inferred") : null,
       ]));
@@ -363,10 +423,10 @@
     if (trap.enabled) {
       viewer.appendChild(section("梯形障碍物", [
         fieldRow("类型", "梯形", "inferred"),
-        fieldRow("上底", pvNum(trap.top_width_m, "m"), "inferred"),
-        fieldRow("下底", pvNum(trap.bottom_width_m, "m"), "inferred"),
-        fieldRow("高度", pvNum(trap.height_m, "m"), "inferred"),
-        fieldRow("中心 X", pvNum(trap.center_x_m, "m"), "inferred"),
+        fieldRow("上底", pvNum(trap.top_width_m, "m"), provenanceStatus(trap.top_width_m)),
+        fieldRow("下底", pvNum(trap.bottom_width_m, "m"), provenanceStatus(trap.bottom_width_m)),
+        fieldRow("高度", pvNum(trap.height_m, "m"), provenanceStatus(trap.height_m)),
+        fieldRow("中心 X", pvNum(trap.center_x_m, "m"), provenanceStatus(trap.center_x_m)),
         trap.solver_representation ? fieldRow("求解器表示", trap.solver_representation, "inferred") : null,
         trap.relation_to_cylinder ? fieldRow("与圆柱关系", trap.relation_to_cylinder, "inferred") : null,
       ]));
@@ -375,10 +435,10 @@
     // Fluid
     const fluid = spec.fluid || {};
     viewer.appendChild(section("流体属性", [
-      fieldRow("类型", pv(fluid.type) === "—" ? "—" : pv(fluid.type), "inferred"),
-      fieldRow("密度", pvNum(fluid.density_kg_m3, "kg/m³"), "inferred"),
-      fieldRow("运动粘度", pvNum(fluid.kinematic_viscosity_m2_s, "m²/s"), "inferred"),
-      fieldRow("温度", pvNum(fluid.temperature_c, "°C"), "inferred"),
+      fieldRow("类型", pv(fluid.type) === "—" ? "—" : pv(fluid.type), provenanceStatus(fluid.type)),
+      fieldRow("密度", pvNum(fluid.density_kg_m3, "kg/m³"), provenanceStatus(fluid.density_kg_m3)),
+      fieldRow("运动粘度", pvNum(fluid.kinematic_viscosity_m2_s, "m²/s"), provenanceStatus(fluid.kinematic_viscosity_m2_s)),
+      fieldRow("温度", pvNum(fluid.temperature_c, "°C"), provenanceStatus(fluid.temperature_c)),
     ]));
 
     // Reynolds number if available
@@ -464,7 +524,11 @@
       viewer.appendChild(el("div", { class: "draft-readonly-section" }, [
         el("h3", { style: "color: #721c24;", text: "阻塞问题" }),
         ...spec.blocking_issues.map(bi =>
-          el("div", { style: "font-size:11px;color:#721c24;padding:2px 0;", text: `⚠ ${bi.message || bi.check || JSON.stringify(bi)}` })
+          el("div", { class: "blocker-card", style: "font-size:11px;color:#721c24;padding:6px 0;" }, [
+            el("div", { text: `原因：${blockerReason(bi)}` }),
+            el("div", { text: `字段：${blockerField(bi)}` }),
+            el("div", { text: `解决操作：${blockerAction(bi)}` }),
+          ])
         ),
       ]));
     }
@@ -2435,6 +2499,7 @@
 
       // Only update the right panel — do NOT auto-execute
       renderSpecPanel(result.spec, result.semantic_display);
+      appendChangeSummary(result.change_summary, result.spec_version || result.spec?.spec_version);
 
       hideProgress();
       updateProgressMessage("方案已修改。");

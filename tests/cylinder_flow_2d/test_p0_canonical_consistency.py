@@ -11,6 +11,7 @@ import pytest
 from fluid_scientist.api import cylinder_flow_router as router
 from fluid_scientist.cylinder_flow_2d.models import (
     CylinderFlow2DExperimentSpecV1,
+    DraftStatus,
     FieldSource,
     FieldStatus,
     ProvenanceField,
@@ -37,6 +38,20 @@ def test_rectangular_domain_does_not_create_rectangle_obstacle() -> None:
     spec = CylinderFlow2DV1Pipeline().run(
         "建立一个长6m宽4m的矩形计算域，入口速度1m/s"
     ).spec
+
+    assert spec.domain.length_m.value == pytest.approx(6.0)
+    assert spec.domain.height_m.value == pytest.approx(4.0)
+    assert spec.rectangle.enabled is False
+    assert spec.rectangle.width_m.value is None
+
+
+def test_rectangular_flow_domain_does_not_shadow_explicit_trapezoid() -> None:
+    user_text = (
+        "在二维长方形流场中，长6米，宽4米。圆柱半径0.1米，圆心距下壁面2米，"
+        "在圆柱下方有一下底为0.3米、上底为0.1米、高为0.2米的梯形凸起。"
+    )
+
+    spec = CylinderFlow2DV1Pipeline().run(user_text).spec
 
     assert spec.domain.length_m.value == pytest.approx(6.0)
     assert spec.domain.height_m.value == pytest.approx(4.0)
@@ -108,6 +123,33 @@ def test_modify_persists_read_back_and_returns_diff(monkeypatch) -> None:
     assert router._spec_store["spec_p0"].simulation.end_time == pytest.approx(20.0)
     assert persistence.load_spec("spec_p0")["simulation"]["end_time"] == pytest.approx(20.0)
     assert any(change["path"] == "simulation.end_time" for change in response.change_summary)
+
+
+def test_modify_applies_explicit_delta_t_and_end_time_together(monkeypatch) -> None:
+    spec = _modifiable_spec()
+    spec.blocking_issues = [{
+        "code": "TOP_BOUNDARY_AMBIGUITY",
+        "message": "顶部边界需要用户确认。",
+    }]
+    persistence = _MemoryPersistence("spec_p0", spec)
+    router._spec_store["spec_p0"] = spec
+    monkeypatch.setattr(router, "_get_persistence", lambda: persistence)
+
+    response = asyncio.run(router.modify_spec(router.ModifyRequest(
+        spec_id="spec_p0", modification_text="修改：deltaT=0.005s，endTime=20s"
+    )))
+
+    assert response.success is True
+    assert response.spec["simulation"]["delta_t"] == pytest.approx(0.005)
+    assert response.spec["simulation"]["end_time"] == pytest.approx(20.0)
+    assert response.spec["draft_status"] == DraftStatus.NEEDS_CLARIFICATION.value
+    assert any(
+        issue["code"] == "TOP_BOUNDARY_AMBIGUITY"
+        for issue in response.spec["blocking_issues"]
+    )
+    changed_paths = {change["path"] for change in response.change_summary}
+    assert "simulation.delta_t" in changed_paths
+    assert "simulation.end_time" in changed_paths
 
 
 def test_modify_failure_does_not_mutate_canonical_spec(monkeypatch) -> None:

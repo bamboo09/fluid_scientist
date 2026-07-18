@@ -2255,12 +2255,15 @@ def _apply_llm_to_spec(spec, llm_parsed: dict, user_text: str) -> None:
         # Skip simulation parameters that are optional (user may not specify them)
         if field_lower in ("end_time", "仿真时间", "delta_t", "时间步长", "time_step",
                            "max_courant", "courant", "cfl", "max_courant_number",
+                           "courant数", "courant number", "最大courant数", "最大cfl数",
                            "mesh_resolution", "网格分辨率", "网格数", "mesh",
                            "simulation", "仿真参数"):
             continue
         spec.blocking_issues.append({
             "code": "LLM_MISSING_FIELD",
             "message": f"LLM识别的缺失字段: {field}",
+            "field": str(field),
+            "resolution_action": f"请明确提供或确认字段“{field}”，然后重新校验。",
         })
 
     # --- Simulation parameters: apply LLM-extracted values ---
@@ -3466,6 +3469,19 @@ async def modify_spec(request: ModifyRequest) -> DraftResponse:
     end_time = pipeline._extract_end_time(mod_text)
     if end_time is not None:
         spec.simulation.end_time = end_time
+
+    # Time step.  This extractor is intentionally limited to an explicitly
+    # named numeric field and unit; it does not infer simulation policy.
+    delta_t_match = _re_modify.search(
+        r"(?:delta\s*_?\s*t|deltaT|时间步长|时间步)\s*[=为是:]?\s*"
+        r"(\d+(?:\.\d+)?)\s*(?:s|秒)?",
+        mod_text,
+        _re_modify.IGNORECASE,
+    )
+    if delta_t_match:
+        delta_t = float(delta_t_match.group(1))
+        if delta_t > 0:
+            spec.simulation.delta_t = delta_t
 
     # Fluid type
     if "水" in mod_text or "water" in mod_lower:
