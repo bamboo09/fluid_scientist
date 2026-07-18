@@ -82,6 +82,67 @@ def _persist_spec(spec_id: str, spec: Any, session_id: str = "", user_input: str
     except Exception as _e:
         pass  # Non-fatal: in-memory store still works
 
+
+class SpecPersistenceError(RuntimeError):
+    """Raised when a canonical spec cannot be durably written and read back."""
+
+
+def _persist_spec_verified(
+    spec_id: str,
+    spec: CylinderFlow2DExperimentSpecV1,
+    session_id: str = "",
+    user_input: str = "",
+) -> CylinderFlow2DExperimentSpecV1:
+    """Persist a spec, validate the read-back, then publish it in memory.
+
+    The previous database value is restored when verification fails.  The
+    in-memory canonical object is not replaced until durable read-back has
+    succeeded, so callers cannot report a successful modification from a
+    memory-only mutation.
+    """
+    persistence = _get_persistence()
+    previous = persistence.load_spec(spec_id)
+    try:
+        persistence.save_spec(spec_id, spec, session_id, user_input)
+        persisted = persistence.load_spec(spec_id)
+        if persisted is None:
+            raise SpecPersistenceError("persistence read-back returned no spec")
+        read_back = CylinderFlow2DExperimentSpecV1.model_validate(persisted)
+        if read_back.model_dump(mode="json") != spec.model_dump(mode="json"):
+            raise SpecPersistenceError("persistence read-back differs from candidate spec")
+    except Exception as exc:
+        try:
+            if previous is None:
+                persistence.delete_spec(spec_id)
+            else:
+                persistence.save_spec(spec_id, previous, session_id, user_input)
+        except Exception:
+            pass
+        if isinstance(exc, SpecPersistenceError):
+            raise
+        raise SpecPersistenceError(str(exc)) from exc
+
+    _spec_store[spec_id] = read_back
+    return read_back
+
+
+def _spec_diff(before: Any, after: Any, path: str = "") -> list[dict[str, Any]]:
+    """Return a compact, deterministic structural diff for UI read-back."""
+    changes: list[dict[str, Any]] = []
+    if isinstance(before, dict) and isinstance(after, dict):
+        for key in sorted(set(before) | set(after)):
+            child = f"{path}.{key}" if path else key
+            if key not in before:
+                changes.append({"path": child, "before": None, "after": after[key]})
+            elif key not in after:
+                changes.append({"path": child, "before": before[key], "after": None})
+            else:
+                changes.extend(_spec_diff(before[key], after[key], child))
+        return changes
+    if before != after:
+        changes.append({"path": path, "before": before, "after": after})
+    return changes
+
 def _load_spec(spec_id: str) -> CylinderFlow2DExperimentSpecV1 | None:
     """Load spec from in-memory store, fallback to SQLite."""
     spec = _spec_store.get(spec_id)
@@ -937,6 +998,8 @@ class DraftResponse(BaseModel):
     new_spec_id: str | None = None
     # New: CREATE_NEW_STUDY 时返回新建 study 的 id
     new_study_id: str | None = None
+    # Canonical read-back diff returned by successful modifications.
+    change_summary: list[dict[str, Any]] = Field(default_factory=list)
     error: str | None = None
 
 
@@ -2236,6 +2299,40 @@ def _apply_llm_to_spec(spec, llm_parsed: dict, user_text: str) -> None:
                 spec.simulation.max_courant_number = float(mc_val)
 
 
+def _enforce_selected_obstacle_candidate(spec: Any, candidate_set: Any) -> None:
+    """Keep exactly one selected value in the bottom-obstacle semantic slot.
+
+    Regex and LLM candidates remain available in ``intent_candidates`` for
+    audit, but only the resolver's selected value may enter the canonical
+    spec.  This prevents a regex rectangle and an LLM trapezoid from becoming
+    two simultaneous physical entities.
+    """
+    selected = candidate_set.get_resolved("obstacle.type")
+    if selected is None:
+        return
+    selected_type = str(selected.value).lower()
+    aliases = {
+        "triangle_2d": "triangle",
+        "rectangle_2d": "rectangle",
+        "trapezoid_2d": "trapezoid",
+        "custom_polygon_2d": "polygon",
+        "sine_bump": "half_sine",
+    }
+    selected_type = aliases.get(selected_type, selected_type)
+
+    if selected_type != "triangle":
+        spec.triangle.enabled = False
+    if selected_type != "rectangle":
+        spec.rectangle.enabled = False
+    if selected_type != "trapezoid":
+        spec.trapezoid.enabled = False
+    if selected_type != "polygon":
+        spec.polygon.enabled = False
+    if selected_type not in {"cosine_bell", "half_sine", "gaussian", "bump"}:
+        from fluid_scientist.cylinder_flow_2d.models import BottomProfileSpec
+        spec.bottom_profile = BottomProfileSpec()
+
+
 def _check_unsupported_geometry(spec) -> None:
     """Check if spec contains unsupported geometry and block if so.
 
@@ -3019,6 +3116,7 @@ async def create_draft(request: DraftRequest) -> DraftResponse:
         entrypoint_fn=lambda data: _apply_llm_to_spec(data["spec"], data["llm_parsed"], data["user_text"]),
         input_data={"spec": spec, "llm_parsed": llm_parsed, "user_text": request.user_text},
     )
+    _enforce_selected_obstacle_candidate(spec, candidate_set)
 
     # Check for unsupported geometry (rectangle and triangle now supported)
     _skill_executor.execute(
@@ -3269,18 +3367,22 @@ async def modify_spec(request: ModifyRequest) -> DraftResponse:
     the modification_text are changed. All previously confirmed values
     (USER_CONFIRMED source) are preserved. Derived fields are re-derived.
     """
-    spec = _load_spec(request.spec_id)
-    if spec is None:
+    canonical_spec = _load_spec(request.spec_id)
+    if canonical_spec is None:
         # Recovery: re-run pipeline from user_input if provided
         if request.user_input:
             pipeline_recovery = CylinderFlow2DV1Pipeline()
-            spec = pipeline_recovery.run(request.user_input).spec
-            _persist_spec(request.spec_id, spec)
+            canonical_spec = pipeline_recovery.run(request.user_input).spec
+            _persist_spec(request.spec_id, canonical_spec)
         else:
             return DraftResponse(
                 success=False,
                 error=f"Spec not found: {request.spec_id}. Server may have restarted.",
             )
+    # Work on a detached candidate.  Mutating the canonical in-memory object
+    # before durable persistence would make a failed write look successful.
+    before_spec = canonical_spec.model_dump(mode="json")
+    spec = canonical_spec.model_copy(deep=True)
     pipeline = CylinderFlow2DV1Pipeline()
     # Preprocess: strip modification keywords so extraction patterns match
     mod_text = request.modification_text
@@ -3554,7 +3656,25 @@ async def modify_spec(request: ModifyRequest) -> DraftResponse:
     if spec.user_input_text:
         spec.user_input_text = spec.user_input_text + "\n[修改] " + mod_text
 
-    _persist_spec(request.spec_id, spec)
+    candidate_spec = spec.model_dump(mode="json")
+    change_summary = _spec_diff(before_spec, candidate_spec)
+    try:
+        spec = _persist_spec_verified(
+            request.spec_id,
+            spec,
+            user_input=spec.user_input_text or request.user_input or "",
+        )
+    except SpecPersistenceError as exc:
+        return DraftResponse(
+            success=False,
+            spec_id=request.spec_id,
+            spec_version=canonical_spec.spec_version,
+            draft_status=canonical_spec.draft_status.value,
+            spec=before_spec,
+            semantic_display=canonical_spec.to_semantic_display(),
+            blocking_issues=canonical_spec.blocking_issues,
+            error=f"SPEC_PERSISTENCE_FAILED: {exc}",
+        )
 
     return DraftResponse(
         success=True,
@@ -3569,6 +3689,7 @@ async def modify_spec(request: ModifyRequest) -> DraftResponse:
         analysis_goals=[goal.model_dump() for goal in spec.analysis_goals],
         # 相对 Patch 的应用记录（空列表表示未触发相对修改）
         derived_values=_relative_applied,
+        change_summary=change_summary,
     )
 
 
@@ -5607,4 +5728,3 @@ async def list_plots(job_id: str):
             })
 
     return {"job_id": job_id, "plots": plots}
-

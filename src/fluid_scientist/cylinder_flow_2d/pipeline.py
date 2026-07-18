@@ -966,7 +966,14 @@ class CylinderFlow2DV1Pipeline:
                 _derived_nu = d.value
                 break
         if _derived_nu is not None and _derived_nu > 1e-4:
-            _fluid_type_val = spec.fluid.type.value if spec.fluid.type and spec.fluid.type.value else "water"
+            # A missing material identity is not evidence for water.  Only
+            # compare formula-derived viscosity against a named material when
+            # the user actually supplied that identity.
+            _fluid_type_val = (
+                spec.fluid.type.value
+                if spec.fluid.type and spec.fluid.type.is_user_provided()
+                else None
+            )
             if _fluid_type_val in ("water", "air"):
                 # Physical conflict: Re-derived viscosity is orders of
                 # magnitude larger than the real fluid's viscosity.
@@ -980,42 +987,41 @@ class CylinderFlow2DV1Pipeline:
                     f"(2)改流体类型为custom; (3)调整U或D使Re匹配。"
                 )
 
-        # Only set water defaults if viscosity is STILL not resolved
-        # (i.e., user didn't give Re, so we can't derive nu)
-        if not spec.fluid.kinematic_viscosity_m2_s.is_resolved():
-            decision.assumptions.append("假设流体为水（20°C）")
-            spec.fluid.type = ProvenanceField(
-                value="water",
-                source=FieldSource.MODEL_RECOMMENDED,
-                status=FieldStatus.AWAITING_CONFIRMATION,
-                confidence=0.7,
-                reason="默认推荐水作为流体",
-            )
-            spec.fluid.temperature_c = ProvenanceField(
-                value=20.0,
-                source=FieldSource.MODEL_RECOMMENDED,
-                status=FieldStatus.AWAITING_CONFIRMATION,
-                confidence=0.7,
-            )
-            spec.fluid.density_kg_m3 = ProvenanceField(
-                value=998.0,
-                source=FieldSource.MODEL_RECOMMENDED,
-                status=FieldStatus.AWAITING_CONFIRMATION,
-                confidence=0.7,
-            )
-            spec.fluid.kinematic_viscosity_m2_s = ProvenanceField(
-                value=1.004e-6,
-                source=FieldSource.MODEL_RECOMMENDED,
-                status=FieldStatus.AWAITING_CONFIRMATION,
-                confidence=0.7,
-            )
+        # Material properties may only be recommended from an explicitly
+        # named material.  An unspecified material stays null; U/D/Re may
+        # still derive an equivalent kinematic viscosity without inventing a
+        # material identity or database properties.
+        _fluid_type = (
+            spec.fluid.type.value
+            if spec.fluid.type and spec.fluid.type.is_user_provided()
+            else None
+        )
+        _material_defaults = {
+            "water": (20.0, 998.0, 1.004e-6),
+            "air": (20.0, 1.225, 1.5e-5),
+        }
+        if _fluid_type in _material_defaults:
+            _temperature_default, _density_default, _nu_default = _material_defaults[_fluid_type]
+            if not spec.fluid.temperature_c.is_resolved():
+                spec.fluid.temperature_c = ProvenanceField(
+                    value=_temperature_default,
+                    source=FieldSource.MODEL_RECOMMENDED,
+                    status=FieldStatus.AWAITING_CONFIRMATION,
+                    confidence=0.7,
+                    reason=f"根据用户指定的流体类型({_fluid_type})推荐温度",
+                )
+            if not spec.fluid.kinematic_viscosity_m2_s.is_resolved():
+                spec.fluid.kinematic_viscosity_m2_s = ProvenanceField(
+                    value=_nu_default,
+                    source=FieldSource.MODEL_RECOMMENDED,
+                    status=FieldStatus.AWAITING_CONFIRMATION,
+                    confidence=0.7,
+                    reason=f"根据用户指定的流体类型({_fluid_type})推荐运动黏度",
+                )
+        else:
+            _density_default = None
 
-        # Always ensure density is resolved based on fluid type.
-        # When Re is provided, viscosity is derived (nu=U*D/Re) but density
-        # is NOT set by the block above — it must be set separately here.
-        if not spec.fluid.density_kg_m3.is_resolved():
-            _fluid_type = spec.fluid.type.value if spec.fluid.type and spec.fluid.type.value else "water"
-            _density_default = 998.0 if _fluid_type == "water" else (1.225 if _fluid_type == "air" else 998.0)
+        if _density_default is not None and not spec.fluid.density_kg_m3.is_resolved():
             decision.assumptions.append(f"根据流体类型({_fluid_type})推导密度={_density_default} kg/m3")
             spec.fluid.density_kg_m3 = ProvenanceField(
                 value=_density_default,
@@ -1845,10 +1851,24 @@ class CylinderFlow2DV1Pipeline:
         rect_kw_found = None
         rect_pos = -1
         for kw in rectangle_keywords:
-            pos = text_lower.find(kw.lower())
-            if pos >= 0:
+            for match in re.finditer(re.escape(kw.lower()), text_lower):
+                pos = match.start()
+                role_window = text_lower[max(0, pos - 16):pos + len(kw) + 20]
+                domain_role = any(token in role_window for token in (
+                    "计算域", "流场区域", "求解域", "domain", "computational region",
+                ))
+                obstacle_role = any(token in role_window for token in (
+                    "障碍", "凸起", "固体", "物体", "obstacle", "solid", "block",
+                ))
+                # Shape words that qualify the computational domain must not
+                # create a SOLID_OBSTACLE.  If the sentence contains another
+                # explicit rectangle obstacle, keep scanning for that mention.
+                if domain_role and not obstacle_role:
+                    continue
                 rect_kw_found = kw
                 rect_pos = pos
+                break
+            if rect_pos >= 0:
                 break
         if rect_pos < 0:
             return None
