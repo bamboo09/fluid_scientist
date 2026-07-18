@@ -74,6 +74,11 @@ from .patch_validator import PatchValidator
 from .path_registry import PathMetadata, PathRegistry
 from .provenance import PatchHistory, PatchRecord
 from .quantity_resolver import QuantityResolver
+from .relative_patch import (
+    RelativeOperator,
+    RelativePatchError,
+    RelativePatchExpression,
+)
 from .relation_resolver import RelationResolver
 from .undo import UndoEngine
 
@@ -98,6 +103,10 @@ __all__ = [
     # Resolvers
     "QuantityResolver",
     "RelationResolver",
+    # Relative patch
+    "RelativeOperator",
+    "RelativePatchError",
+    "RelativePatchExpression",
     # Diff
     "FieldDiff",
     "SpecDiff",

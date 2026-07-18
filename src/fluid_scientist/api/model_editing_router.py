@@ -66,7 +66,38 @@ _OPENFOAM_ENV: dict[str, Any] = {
     "function_objects": ["forceCoeffs", "probes", "fieldAverage"],
     "mesh_tools": ["blockMesh", "snappyHexMesh"],
 }
-_DEFAULT_SKILLS: list[str] = []
+
+# Phase-mandatory skills for spec editing.  These are always injected
+# into the model prompt — _DEFAULT_SKILLS must NEVER be empty, because
+# an empty list means the model receives zero skill guidance and has
+# no way to understand the patch schema, geometry semantics, or
+# physics derivation rules.
+_DEFAULT_SKILLS: list[str] = [
+    "patch_schema_reference",   # SimulationSpecPatch JSON schema
+    "geometry_semantics",       # triangle_2d / cosine_bell_2d / etc.
+    "physics_derivation",       # nu=U*D/Re, St, CFL, etc.
+    "boundary_mapping",         # semantic BC → OpenFOAM dictionary
+]
+
+
+def _resolve_skills(session: Any, user_message: str) -> list[str]:
+    """Dynamically resolve skills for the current phase.
+
+    Tries to use the SkillResolver if available (cylinder_flow_router
+    path), otherwise falls back to _DEFAULT_SKILLS.
+    """
+    try:
+        from fluid_scientist.skills.skill_resolver import SkillResolver
+        resolver = SkillResolver()
+        injection = resolver.build_prompt_injection(
+            user_message=user_message,
+            session_state={},
+        )
+        if injection and injection.get("skill_ids"):
+            return injection["skill_ids"]
+    except (ImportError, AttributeError, Exception):
+        pass
+    return _DEFAULT_SKILLS
 
 
 # ---------------------------------------------------------------------------
@@ -276,16 +307,44 @@ def _record_trace(
     session_id: str,
     *,
     role: str = "spec_editor",
-    provider: str = "unknown",
-    configured_model: str = "unknown",
+    provider: str | None = None,
+    configured_model: str | None = None,
+    llm_client: Any = None,
+    llm_record: Any = None,
 ) -> str:
-    """Record a ModelTrace and associate it with the session."""
+    """Record a ModelTrace and associate it with the session.
+
+    If *llm_client* is provided, extract the real provider and model name
+    from it.  If *llm_record* (an LLMCallRecord) is provided, also extract
+    latency, fallback status, and token counts.
+
+    This replaces the previous stub that hardcoded "unknown" for provider
+    and model — a P0 traceability bug.
+    """
+    # Extract real provider/model from llm_client if available
+    if provider is None and llm_client is not None:
+        provider = getattr(llm_client, "_provider", "unknown")
+    if configured_model is None and llm_client is not None:
+        configured_model = getattr(llm_client, "_model_name", "unknown")
+
     trace = ModelTrace(
         role=role,
-        provider=provider,
-        configured_model=configured_model,
+        provider=provider or "unknown",
+        configured_model=configured_model or "unknown",
         request_id=f"req_{uuid.uuid4().hex[:16]}",
     )
+
+    # Enrich trace with LLM call record data if available
+    if llm_record is not None:
+        trace.latency_ms = getattr(llm_record, "latency_ms", None)
+        trace.fallback_used = getattr(llm_record, "fallback_used", False)
+        trace.input_tokens = getattr(llm_record, "input_tokens", None)
+        trace.output_tokens = getattr(llm_record, "output_tokens", None)
+        # Record the actual model from the response if different
+        actual_model = getattr(llm_record, "model_name", None)
+        if actual_model and actual_model != configured_model:
+            trace.actual_model_from_response = actual_model
+
     _trace_recorder.record(trace)
     _session_manager.add_model_trace(session_id, trace.trace_id)
     return trace.trace_id
@@ -841,12 +900,17 @@ def _handle_spec_modification(
     current_spec = _session_manager.get_active_spec(session_id)
     spec_dict = current_spec.model_dump(mode="json") if current_spec else None
 
-    # 1. Build context.
-    _context_builder.build_context(
+    # 1. Build context — the returned ModelContext is the authoritative
+    #    context object.  Previously this return value was discarded and
+    #    a hand-written context_dict was used instead, losing the
+    #    system_role, patch_schema, session_summary, recent_conversation,
+    #    and openfoam_environment fields (P0 bug).
+    resolved_skills = _resolve_skills(session, user_message)
+    model_context = _context_builder.build_context(
         session=session,
         spec=spec_dict,
         user_message=user_message,
-        skills=_DEFAULT_SKILLS,
+        skills=resolved_skills,
         openfoam_env=_OPENFOAM_ENV,
     )
 
@@ -873,15 +937,25 @@ def _handle_spec_modification(
     # 4. Create the model client callable adapter.
     model_client = _make_model_client_callable(llm_client, session_id)
 
-    # 5. Build the context dict for TwoCallStrategy.
+    # 5. Build the context dict for TwoCallStrategy from the ModelContext
+    #    object returned by build_context().  This ensures the full
+    #    context (system_role, skills, patch_schema, session_summary,
+    #    recent_conversation, openfoam_env) is passed to the model,
+    #    not just a hand-written subset.
     context_dict: dict[str, Any] = {
         "workflow_phase": str(session.current_phase),
         "confirmed_facts": [f.model_dump() for f in session.confirmed_facts],
         "unresolved_conflicts": [
             c.model_dump() for c in session.unresolved_conflicts
         ],
-        "skills": _DEFAULT_SKILLS,
+        "skills": resolved_skills,
         "openfoam_env": _OPENFOAM_ENV,
+        # Fields from ModelContext that were previously lost:
+        "system_role": getattr(model_context, "system_role", ""),
+        "patch_schema": patch_schema,
+        "session_summary": getattr(model_context, "session_summary", ""),
+        "recent_conversation": getattr(model_context, "recent_conversation", []),
+        "current_spec": spec_dict or {},
     }
 
     # 6. Execute the two-call strategy.
@@ -893,8 +967,9 @@ def _handle_spec_modification(
         patch_schema=patch_schema,
     )
 
-    # 7. Record a trace for the model call.
-    trace_id = _record_trace(session_id)
+    # 7. Record a trace for the model call — pass the real llm_client
+    #    so the trace records the actual provider/model, not "unknown".
+    trace_id = _record_trace(session_id, llm_client=llm_client)
 
     if errors:
         resp = TurnResponse(
